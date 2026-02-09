@@ -1,22 +1,16 @@
 # Logic/section_doubt.py
 
 import os
-import faiss
-import numpy as np
-from sentence_transformers import SentenceTransformer
 from groq import Groq
 
 # --------------------------------------------------
 # BASE DIRECTORY (ROBUST PATH HANDLING)
 # --------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# BASE_DIR → AI_Educater/backend
 
 # --------------------------------------------------
-# MODELS
+# GROQ CLIENT
 # --------------------------------------------------
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-
 print("GROQ_API_KEY loaded:", bool(os.getenv("GROQ_API_KEY")))
 
 groq_client = Groq(
@@ -24,7 +18,7 @@ groq_client = Groq(
 )
 
 # --------------------------------------------------
-# SECTION ID → FILE PATH (ABSOLUTE PATHS)
+# SECTION ID → FILE PATH
 # --------------------------------------------------
 SECTION_FILE_MAP = {
     "alkanes": os.path.join(
@@ -34,7 +28,6 @@ SECTION_FILE_MAP = {
         "hydrocarbon",
         "part1_alkanes.md"
     ),
-    # future-ready
     "alkenes": os.path.join(
         BASE_DIR,
         "data",
@@ -75,49 +68,40 @@ def load_text(path: str) -> str:
         return f.read()
 
 # --------------------------------------------------
-# SMART PARAGRAPH CHUNKING (CHEMISTRY SAFE)
+# SIMPLE CONTEXT LIMITER (RAILWAY SAFE)
 # --------------------------------------------------
-def chunk_text(text: str, min_len: int = 60):
+def get_relevant_context(text: str, question: str, max_chars: int = 4000):
     """
-    Preserve equations, definitions, reactions.
+    Lightweight context selection without FAISS.
     """
-    paras = [
-        p.strip()
-        for p in text.split("\n\n")
-        if len(p.strip()) >= min_len
-    ]
-    return paras
+    if len(text) <= max_chars:
+        return text
+
+    # Simple keyword matching
+    question_words = question.lower().split()
+    paragraphs = text.split("\n\n")
+
+    scored = []
+    for para in paragraphs:
+        score = sum(word in para.lower() for word in question_words)
+        scored.append((score, para))
+
+    scored.sort(reverse=True)
+
+    selected = []
+    total_len = 0
+    for score, para in scored:
+        if total_len + len(para) > max_chars:
+            break
+        selected.append(para)
+        total_len += len(para)
+
+    return "\n\n".join(selected) if selected else text[:max_chars]
 
 # --------------------------------------------------
-# BUILD FAISS INDEX
+# ASK AI (SYSTEM PROMPT UNCHANGED)
 # --------------------------------------------------
-def build_index(chunks):
-    embeddings = embedding_model.encode(
-        chunks, normalize_embeddings=True
-    )
-
-    index = faiss.IndexFlatIP(embeddings.shape[1])
-    index.add(np.array(embeddings))
-
-    return index
-
-# --------------------------------------------------
-# RETRIEVE CONTEXT
-# --------------------------------------------------
-def retrieve_chunks(question, chunks, index, k=5):
-    q_embedding = embedding_model.encode(
-        [question], normalize_embeddings=True
-    )
-
-    _, indices = index.search(np.array(q_embedding), k)
-
-    return [chunks[i] for i in indices[0] if i < len(chunks)]
-
-# --------------------------------------------------
-# ASK AI
-# --------------------------------------------------
-def ask_ai(question, context_chunks, basics_text):
-    context = "\n\n".join(context_chunks)
+def ask_ai(question, context_text, basics_text):
 
     prompt = f"""
 You are an expert Class 11 Chemistry teacher.
@@ -187,14 +171,13 @@ FINAL DIRECTIVE:
 Chemical correctness is more important than copying the input.
 Chemical formulas must be both scientifically correct and perfectly formatted.
 
-
 -------------------------
 BASIC CHEMISTRY (support only)
 {basics_text}
 -------------------------
 
 SECTION CONTENT
-{context}
+{context_text}
 
 QUESTION:
 {question}
@@ -212,11 +195,9 @@ ANSWER:
     return response.choices[0].message.content.strip()
 
 # --------------------------------------------------
-# MAIN FUNCTION (FRONTEND CALL)
+# MAIN FUNCTION
 # --------------------------------------------------
 def section_doubt(question: str, section_id: str):
-
-    print("SECTION ID RECEIVED:", section_id)
 
     if not section_id:
         return "Invalid section selected."
@@ -229,30 +210,9 @@ def section_doubt(question: str, section_id: str):
     try:
         section_text = load_text(SECTION_FILE_MAP[section_id])
         basics_text = load_text(BASICS_PATH)
-    except Exception as e:
-        print("FILE ERROR:", e)
+    except Exception:
         return "⚠️ Section content could not be loaded."
 
-    chunks = chunk_text(section_text)
-    if not chunks:
-        return "This question is outside the current section."
+    context_text = get_relevant_context(section_text, question)
 
-    index = build_index(chunks)
-    context_chunks = retrieve_chunks(question, chunks, index)
-
-    if not context_chunks:
-        return "This question is outside the current section."
-
-    return ask_ai(question, context_chunks, basics_text)
-
-
-# --------------------------------------------------
-# LOCAL TEST
-# --------------------------------------------------
-if __name__ == "__main__":
-    print(
-        section_doubt(
-            question="What is the general formula of alkanes?",
-            section_id="alkanes"
-        )
-    )
+    return ask_ai(question, context_text, basics_text)
