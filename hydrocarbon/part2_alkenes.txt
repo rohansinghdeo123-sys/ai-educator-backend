@@ -1,0 +1,385 @@
+PART 2: ALKENES
+SECTION 1: WHAT ARE ALKENES
+
+Notes
+
+Alkenes are unsaturated hydrocarbons that contain at least one carbon–carbon double bond (C=C).
+
+Because of the presence of a double bond, alkenes are more reactive than alkanes.
+
+General formula of alkenes:
+CnH2n
+
+Examples:
+
+Ethene: C2H4
+
+Propene: C3H6
+
+Alkenes are also called olefins, which means “oil-forming compounds”.
+
+Easy MCQs
+
+Alkenes are classified as:
+A. Saturated hydrocarbons
+B. Unsaturated hydrocarbons
+C. Aromatic hydrocarbons
+D. Cyclic hydrocarbons
+Correct Answer: B
+
+General formula of alkenes is:
+A. CnH2n+2
+B. CnH2n
+C. CnH2n-2
+D. CnHn
+Correct Answer: B
+
+Which of the following is an alkene?
+A. CH4
+B. C2H6
+C. C2H4
+D. C3H8
+Correct Answer: C
+
+SECTION 2: STRUCTURE OF DOUBLE BOND
+
+Notes
+
+A carbon–carbon double bond consists of:
+
+One sigma (sigma) bond – strong
+
+One pi (pi) bond – weak
+
+Sigma bond is formed by head-on overlap of orbitals.
+Pi bond is formed by sideways overlap of p-orbitals.
+
+Because the pi bond is weak, it breaks easily, allowing alkenes to undergo addition reactions.
+
+Bond length:
+
+C=C bond is shorter than a C–C single bond
+
+Easy MCQs
+
+A double bond contains:
+A. Two sigma bonds
+B. One sigma and one pi bond
+C. Two pi bonds
+D. Only pi bond
+Correct Answer: B
+
+Which bond is weaker in a double bond?
+A. Sigma bond
+B. Pi bond
+C. Ionic bond
+D. Hydrogen bond
+Correct Answer: B
+
+SECTION 3: NOMENCLATURE OF ALKENES (IUPAC)
+
+Notes
+
+Rules for naming alkenes:
+
+Choose the longest carbon chain containing the double bond
+
+Number the chain from the end nearest to the double bond
+
+Use the suffix “ene”
+
+Examples:
+
+CH2=CH2 → Ethene
+
+CH3–CH=CH2 → Prop-1-ene
+
+CH3–CH=CH–CH3 → But-2-ene
+
+Easy MCQs
+
+Name of CH3–CH=CH2 is:
+A. Propane
+B. Propene
+C. Propyne
+D. Ethene
+Correct Answer: B
+
+The suffix used for alkenes is:
+A. ane
+B. ene
+C. yne
+D. ol
+Correct Answer: B
+
+SECTION 4: ISOMERISM IN ALKENES
+
+Notes
+
+Alkenes show:
+
+Structural isomerism
+
+Geometrical (cis–trans) isomerism
+
+Geometrical isomerism occurs due to restricted rotation around the C=C bond.
+
+Example:
+But-2-ene exists as:
+
+cis-but-2-ene (similar groups on same side)
+
+trans-but-2-ene (similar groups on opposite sides)
+
+Easy MCQs
+
+Cis–trans isomerism occurs due to:
+A. Free rotation
+B. Restricted rotation
+C. No rotation
+D. Broken bond
+Correct Answer: B
+
+Which compound shows cis–trans isomerism?
+A. Ethene
+B. Propene
+C. But-2-ene
+D. Methane
+Correct Answer: C
+
+SECTION 5: PREPARATION OF ALKENES
+
+Notes
+
+Alkenes can be prepared by:
+
+(A) From Alkynes
+
+Partial reduction gives alkenes
+
+Lindlar catalyst → cis-alkene
+
+Na / liquid NH3 → trans-alkene
+
+(B) From Alkyl Halides
+
+Alcoholic KOH removes HX
+
+This process is called dehydrohalogenation
+
+(C) From Alcohols
+
+Heating alcohol with concentrated H2SO4 removes water
+
+This process is called dehydration
+
+Example:
+Ethanol → Ethene + Water
+
+Easy MCQs
+
+Removal of HX is called:
+A. Dehydration
+B. Dehydrogenation
+C. Dehydrohalogenation
+D. Hydrogenation
+Correct Answer: C
+
+Alcohol gives alkene by:
+A. Oxidation
+B. Reduction
+C. Dehydration
+D. Halogenation
+Correct Answer: C
+
+SECTION 6: PHYSICAL PROPERTIES OF ALKENES
+
+Notes
+
+First three alkenes are gases
+
+Next members are liquids
+
+Higher members are solids
+
+General properties:
+
+Colourless
+
+Odourless
+
+Insoluble in water
+
+Soluble in organic solvents
+
+Boiling point increases with molecular size.
+
+Easy MCQs
+
+Alkenes are generally:
+A. Soluble in water
+B. Insoluble in water
+C. Metals
+D. Ionic compounds
+Correct Answer: B
+
+Boiling point of alkenes:
+A. Decreases with size
+B. Remains same
+C. Increases with size
+D. Is random
+Correct Answer: C
+
+SECTION 7: CHEMICAL PROPERTIES — ADDITION REACTIONS
+
+Notes
+
+Due to the presence of a pi bond, alkenes undergo addition reactions.
+
+(A) Hydrogenation
+Alkene + H2 → Alkane
+Catalyst: Ni / Pd / Pt
+
+(B) Halogenation
+
+Br2 or Cl2 adds across the double bond
+
+Bromine water decolourises (test for unsaturation)
+
+(C) Addition of Hydrogen Halides
+
+HCl, HBr, or HI add to alkenes
+
+Easy MCQs
+
+Hydrogenation of alkene gives:
+A. Alkyne
+B. Alkane
+C. Alcohol
+D. Acid
+Correct Answer: B
+
+Bromine water test is used to detect:
+A. Saturation
+B. Unsaturation
+C. Acidity
+D. Basicity
+Correct Answer: B
+
+SECTION 8: MARKOVNIKOV’S RULE
+
+Notes
+
+Markovnikov’s rule applies to unsymmetrical alkenes.
+
+Rule:
+
+Hydrogen attaches to the carbon atom with more hydrogen atoms
+
+Example:
+Propene + HBr → 2-Bromopropane (major product)
+
+Easy MCQs
+
+Markovnikov’s rule applies to:
+A. Symmetrical alkenes
+B. Unsymmetrical alkenes
+C. Alkanes
+D. Alkynes
+Correct Answer: B
+
+In Markovnikov addition, hydrogen attaches to:
+A. Carbon with fewer hydrogens
+B. Carbon with more hydrogens
+C. Random carbon
+D. Any carbon
+Correct Answer: B
+
+SECTION 9: PEROXIDE EFFECT (ANTI-MARKOVNIKOV)
+
+Notes
+
+In presence of peroxide, HBr adds opposite to Markovnikov’s rule.
+This is called the anti-Markovnikov effect.
+
+Important points:
+
+Works only with HBr
+
+Does not work with HCl or HI
+
+Example:
+Propene + HBr (peroxide) → 1-Bromopropane
+
+Easy MCQs
+
+Peroxide effect is observed with:
+A. HCl
+B. HI
+C. HBr
+D. HF
+Correct Answer: C
+
+Peroxide addition follows:
+A. Markovnikov rule
+B. Anti-Markovnikov rule
+C. Random addition
+D. No rule
+Correct Answer: B
+
+SECTION 10: OXIDATION AND OZONOLYSIS
+
+Notes
+
+Cold dilute KMnO4 converts alkenes to glycols
+
+Hot KMnO4 breaks the double bond
+
+Ozonolysis breaks double bond to form aldehydes or ketones
+
+Ozonolysis is used to determine the position of the double bond.
+
+Easy MCQs
+
+KMnO4 test is used to detect:
+A. Saturation
+B. Unsaturation
+C. Acidity
+D. Basicity
+Correct Answer: B
+
+Ozonolysis is used to:
+A. Form polymers
+B. Break double bond
+C. Reduce alkene
+D. Form alcohol
+Correct Answer: B
+
+SECTION 11: POLYMERISATION OF ALKENES
+
+Notes
+
+Many alkene molecules join together to form a polymer.
+This process is called addition polymerisation.
+
+Examples:
+
+Ethene → Polythene
+
+Propene → Polypropene
+
+Easy MCQs
+
+Polythene is prepared from:
+A. Methane
+B. Ethane
+C. Ethene
+D. Ethyne
+Correct Answer: C
+
+Joining of many small molecules is called:
+A. Cracking
+B. Polymerisation
+C. Oxidation
+D. Reduction
+Correct Answer: B

@@ -1,0 +1,115 @@
+✅ FINAL CHAPTER MCQs — HYDROCARBONS
+
+(Total: 15 Questions)
+(Difficulty: Easy → Medium → Hard)
+
+🔹 EASY LEVEL (5 MCQs)
+
+Q1. Which of the following is a hydrocarbon?
+A. C₂H₅OH
+B. CH₄
+C. H₂O
+D. NH₃
+Correct Answer: B
+
+Q2. Alkanes are also known as:
+A. Unsaturated hydrocarbons
+B. Aromatic hydrocarbons
+C. Saturated hydrocarbons
+D. Cyclic hydrocarbons
+Correct Answer: C
+
+Q3. The general formula of alkanes is:
+A. CₙH₂ₙ
+B. CₙH₂ₙ₊₂
+C. CₙH₂ₙ₋₂
+D. CₙHₙ
+Correct Answer: B
+
+Q4. Which of the following is an alkene?
+A. Ethane
+B. Ethene
+C. Ethyne
+D. Benzene
+Correct Answer: B
+
+Q5. Ethyne belongs to which class of hydrocarbons?
+A. Alkanes
+B. Alkenes
+C. Alkynes
+D. Arenes
+Correct Answer: C
+
+🔸 MEDIUM LEVEL (5 MCQs)
+
+Q6. Which hydrocarbon mainly undergoes substitution reactions?
+A. Alkene
+B. Alkyne
+C. Alkane
+D. Cycloalkane
+Correct Answer: C
+
+Q7. Which compound contains a carbon–carbon triple bond?
+A. Ethene
+B. Ethyne
+C. Ethane
+D. Benzene
+Correct Answer: B
+
+Q8. Which of the following is an aromatic hydrocarbon?
+A. Propane
+B. Ethene
+C. Benzene
+D. Butyne
+Correct Answer: C
+
+Q9. Benzene mainly undergoes which type of reaction?
+A. Addition
+B. Substitution
+C. Elimination
+D. Polymerisation
+Correct Answer: B
+
+Q10. The molecular formula of benzene is:
+A. C₆H₁₂
+B. C₆H₁₀
+C. C₆H₆
+D. C₅H₆
+Correct Answer: C
+
+🔴 HARD LEVEL (5 MCQs)
+
+Q11. The general formula of alkynes is:
+A. CₙH₂ₙ
+B. CₙH₂ₙ₊₂
+C. CₙH₂ₙ₋₂
+D. CₙHₙ
+Correct Answer: C
+
+Q12. Benzene is exceptionally stable because of:
+A. Presence of double bonds
+B. Strong sigma bonds
+C. Resonance
+D. Ionic character
+Correct Answer: C
+
+Q13. Which reagents are used for nitration of benzene?
+A. Concentrated HNO₃ only
+B. Concentrated H₂SO₄ only
+C. Concentrated HNO₃ and concentrated H₂SO₄
+D. Dilute acids
+Correct Answer: C
+
+Q14. The electrophile formed during nitration of benzene is:
+A. NO₂⁻
+B. NO₃⁻
+C. NO₂⁺
+D. NO⁺
+Correct Answer: C
+
+Q15. Friedel–Crafts alkylation of benzene requires which catalyst?
+A. NaOH
+B. AlCl₃
+C. HCl
+D. KMnO₄
+Correct Answer: B

@@ -1,0 +1,1320 @@
+PART 1: HYDROCARBONS — INTRODUCTION & ALKANES
+SECTION 1: WHAT ARE HYDROCARBONS
+Notes
+
+Hydrocarbons are organic compounds made only of two elements:
+
+Carbon (C)
+
+Hydrogen (H)
+
+They are called hydrocarbons because:
+
+“Hydro” means hydrogen
+
+“Carbon” means carbon
+
+Hydrocarbons are the basic compounds from which many other organic compounds are formed.
+
+Classification of hydrocarbons:
+
+Saturated hydrocarbons → Alkanes
+
+Unsaturated hydrocarbons → Alkenes and Alkynes
+
+Aromatic hydrocarbons → Benzene and its derivatives
+
+Easy MCQs
+
+Hydrocarbons contain which elements?
+A. Carbon and Oxygen
+B. Carbon and Hydrogen
+C. Hydrogen and Nitrogen
+D. Carbon and Sulphur
+Correct Answer: B
+
+Which of the following is NOT a hydrocarbon?
+A. Methane
+B. Ethane
+C. Ethanol
+D. Benzene
+Correct Answer: C
+
+SECTION 2: ALKANES (SATURATED HYDROCARBONS)
+Notes
+
+Alkanes are saturated hydrocarbons. This means:
+
+They contain only single bonds between carbon atoms
+
+They do not contain double or triple bonds
+
+General formula of alkanes:
+CnH2n+2
+
+Examples:
+
+Methane: CH4
+
+Ethane: C2H6
+
+Propane: C3H8
+
+First few members of alkane series:
+
+Methane (CH4)
+
+Ethane (C2H6)
+
+Propane (C3H8)
+
+Butane (C4H10)
+
+Alkanes are also called paraffins, which means “little reactive”.
+
+Easy MCQs
+
+General formula of alkanes is:
+A. CnH2n
+B. CnH2n+2
+C. CnH2n-2
+D. CnHn
+Correct Answer: B
+
+Which is a saturated hydrocarbon?
+A. Ethene
+B. Ethyne
+C. Methane
+D. Benzene
+Correct Answer: C
+
+Alkanes are also known as:
+A. Olefins
+B. Paraffins
+C. Arenes
+D. Alkynes
+Correct Answer: B
+
+SECTION 3: PHYSICAL PROPERTIES OF ALKANES
+Notes
+
+First four alkanes are gases
+
+Next few members are liquids
+
+Higher members are solids
+
+General physical properties:
+
+Colourless
+
+Odourless
+
+Lighter than water
+
+Insoluble in water
+
+Soluble in organic solvents
+
+As molecular mass increases:
+
+Boiling point increases
+
+Density increases
+
+Easy MCQs
+
+Alkanes are generally:
+A. Coloured
+B. Acidic
+C. Colourless
+D. Metallic
+Correct Answer: C
+
+Alkanes are insoluble in:
+A. Organic solvents
+B. Alcohol
+C. Water
+D. Ether
+Correct Answer: C
+
+SECTION 4: CHEMICAL PROPERTIES OF ALKANES
+(A) Combustion
+Notes
+
+Alkanes burn in oxygen to form:
+
+Carbon dioxide (CO2)
+
+Water (H2O)
+
+Heat and light
+
+General reaction:
+Hydrocarbon + Oxygen -> CO2 + H2O
+
+Example:
+CH4 + 2O2 -> CO2 + 2H2O
+
+This reaction releases energy, therefore alkanes are used as fuels.
+
+Easy MCQs
+
+Combustion of alkanes produces:
+A. CO only
+B. CO2 and H2O
+C. H2 and O2
+D. Only heat
+Correct Answer: B
+
+Alkanes are used as fuels because:
+A. They are acidic
+B. They release energy on burning
+C. They are coloured
+D. They are heavy
+Correct Answer: B
+
+(B) Substitution Reaction
+Notes
+
+In alkanes, hydrogen atoms can be replaced by other atoms such as chlorine or bromine.
+This type of reaction is called a substitution reaction.
+
+Example:
+CH4 + Cl2 -> CH3Cl + HCl (in sunlight)
+
+Only one hydrogen atom is replaced at a time.
+
+Easy MCQs
+
+Reaction in which one atom replaces another is called:
+A. Addition
+B. Substitution
+C. Elimination
+D. Polymerisation
+Correct Answer: B
+
+Alkanes mainly show which type of reaction?
+A. Addition
+B. Substitution
+C. Oxidation only
+D. Neutralisation
+Correct Answer: B
+
+SECTION 5: PREPARATION OF ALKANES (BASIC IDEA)
+Notes
+
+Alkanes can be prepared by:
+
+Heating organic salts
+
+From other hydrocarbons
+
+Reduction of unsaturated hydrocarbons
+
+Important points:
+
+Alkanes are stable compounds
+
+Alkanes are less reactive
+
+Easy MCQs
+
+Alkanes contain only:
+A. Double bonds
+B. Triple bonds
+C. Single bonds
+D. Ionic bonds
+Correct Answer: C
+
+Alkanes are generally:
+A. Highly reactive
+B. Unstable
+C. Less reactive
+D. Explosive
+Correct Answer: C
+
+SECTION 6: CRACKING OF ALKANES
+Notes
+
+Cracking is the process of breaking large hydrocarbon molecules into smaller and more useful hydrocarbons.
+
+Cracking is carried out by:
+
+Heating at high temperature
+
+Using catalysts such as Al2O3 or SiO2
+
+Types of cracking:
+
+Thermal cracking
+
+Catalytic cracking
+
+Uses of cracking:
+
+Increases petrol yield
+
+Produces alkenes for polymer manufacture
+
+Example:
+C10H22 -> C5H12 + C5H10
+
+Easy MCQs
+
+Cracking of alkanes is used to:
+A. Increase molecular mass
+B. Break large hydrocarbons
+C. Form acids
+D. Remove oxygen
+Correct Answer: B
+
+Cracking mainly produces:
+A. Only alkanes
+B. Only alkynes
+C. Smaller alkanes and alkenes
+D. Alcohols
+Correct Answer: C
+
+SECTION 7: ENVIRONMENTAL EFFECTS OF HYDROCARBONS
+Notes
+
+Combustion of hydrocarbons causes:
+
+Air pollution
+
+Global warming
+
+Acid rain
+
+Incomplete combustion produces carbon monoxide (CO), which is poisonous.
+
+Hydrocarbons released from vehicles contribute to:
+
+Smog formation
+
+Respiratory problems
+
+Therefore, cleaner fuels such as CNG and LPG are preferred.
+
+Easy MCQs
+
+Incomplete combustion of hydrocarbons produces:
+A. CO2
+B. CO
+C. O2
+D. H2
+Correct Answer: B
+
+Which of the following is a cleaner fuel?
+A. Coal
+B. Diesel
+C. CNG
+D. Wood
+Correct Answer: C
+
+PART 2: ALKENES
+SECTION 1: WHAT ARE ALKENES
+
+Notes
+
+Alkenes are unsaturated hydrocarbons that contain at least one carbon–carbon double bond (C=C).
+
+Because of the presence of a double bond, alkenes are more reactive than alkanes.
+
+General formula of alkenes:
+CnH2n
+
+Examples:
+
+Ethene: C2H4
+
+Propene: C3H6
+
+Alkenes are also called olefins, which means “oil-forming compounds”.
+
+Easy MCQs
+
+Alkenes are classified as:
+A. Saturated hydrocarbons
+B. Unsaturated hydrocarbons
+C. Aromatic hydrocarbons
+D. Cyclic hydrocarbons
+Correct Answer: B
+
+General formula of alkenes is:
+A. CnH2n+2
+B. CnH2n
+C. CnH2n-2
+D. CnHn
+Correct Answer: B
+
+Which of the following is an alkene?
+A. CH4
+B. C2H6
+C. C2H4
+D. C3H8
+Correct Answer: C
+
+SECTION 2: STRUCTURE OF DOUBLE BOND
+
+Notes
+
+A carbon–carbon double bond consists of:
+
+One sigma (sigma) bond – strong
+
+One pi (pi) bond – weak
+
+Sigma bond is formed by head-on overlap of orbitals.
+Pi bond is formed by sideways overlap of p-orbitals.
+
+Because the pi bond is weak, it breaks easily, allowing alkenes to undergo addition reactions.
+
+Bond length:
+
+C=C bond is shorter than a C–C single bond
+
+Easy MCQs
+
+A double bond contains:
+A. Two sigma bonds
+B. One sigma and one pi bond
+C. Two pi bonds
+D. Only pi bond
+Correct Answer: B
+
+Which bond is weaker in a double bond?
+A. Sigma bond
+B. Pi bond
+C. Ionic bond
+D. Hydrogen bond
+Correct Answer: B
+
+SECTION 3: NOMENCLATURE OF ALKENES (IUPAC)
+
+Notes
+
+Rules for naming alkenes:
+
+Choose the longest carbon chain containing the double bond
+
+Number the chain from the end nearest to the double bond
+
+Use the suffix “ene”
+
+Examples:
+
+CH2=CH2 → Ethene
+
+CH3–CH=CH2 → Prop-1-ene
+
+CH3–CH=CH–CH3 → But-2-ene
+
+Easy MCQs
+
+Name of CH3–CH=CH2 is:
+A. Propane
+B. Propene
+C. Propyne
+D. Ethene
+Correct Answer: B
+
+The suffix used for alkenes is:
+A. ane
+B. ene
+C. yne
+D. ol
+Correct Answer: B
+
+SECTION 4: ISOMERISM IN ALKENES
+
+Notes
+
+Alkenes show:
+
+Structural isomerism
+
+Geometrical (cis–trans) isomerism
+
+Geometrical isomerism occurs due to restricted rotation around the C=C bond.
+
+Example:
+But-2-ene exists as:
+
+cis-but-2-ene (similar groups on same side)
+
+trans-but-2-ene (similar groups on opposite sides)
+
+Easy MCQs
+
+Cis–trans isomerism occurs due to:
+A. Free rotation
+B. Restricted rotation
+C. No rotation
+D. Broken bond
+Correct Answer: B
+
+Which compound shows cis–trans isomerism?
+A. Ethene
+B. Propene
+C. But-2-ene
+D. Methane
+Correct Answer: C
+
+SECTION 5: PREPARATION OF ALKENES
+
+Notes
+
+Alkenes can be prepared by:
+
+(A) From Alkynes
+
+Partial reduction gives alkenes
+
+Lindlar catalyst → cis-alkene
+
+Na / liquid NH3 → trans-alkene
+
+(B) From Alkyl Halides
+
+Alcoholic KOH removes HX
+
+This process is called dehydrohalogenation
+
+(C) From Alcohols
+
+Heating alcohol with concentrated H2SO4 removes water
+
+This process is called dehydration
+
+Example:
+Ethanol → Ethene + Water
+
+Easy MCQs
+
+Removal of HX is called:
+A. Dehydration
+B. Dehydrogenation
+C. Dehydrohalogenation
+D. Hydrogenation
+Correct Answer: C
+
+Alcohol gives alkene by:
+A. Oxidation
+B. Reduction
+C. Dehydration
+D. Halogenation
+Correct Answer: C
+
+SECTION 6: PHYSICAL PROPERTIES OF ALKENES
+
+Notes
+
+First three alkenes are gases
+
+Next members are liquids
+
+Higher members are solids
+
+General properties:
+
+Colourless
+
+Odourless
+
+Insoluble in water
+
+Soluble in organic solvents
+
+Boiling point increases with molecular size.
+
+Easy MCQs
+
+Alkenes are generally:
+A. Soluble in water
+B. Insoluble in water
+C. Metals
+D. Ionic compounds
+Correct Answer: B
+
+Boiling point of alkenes:
+A. Decreases with size
+B. Remains same
+C. Increases with size
+D. Is random
+Correct Answer: C
+
+SECTION 7: CHEMICAL PROPERTIES — ADDITION REACTIONS
+
+Notes
+
+Due to the presence of a pi bond, alkenes undergo addition reactions.
+
+(A) Hydrogenation
+Alkene + H2 → Alkane
+Catalyst: Ni / Pd / Pt
+
+(B) Halogenation
+
+Br2 or Cl2 adds across the double bond
+
+Bromine water decolourises (test for unsaturation)
+
+(C) Addition of Hydrogen Halides
+
+HCl, HBr, or HI add to alkenes
+
+Easy MCQs
+
+Hydrogenation of alkene gives:
+A. Alkyne
+B. Alkane
+C. Alcohol
+D. Acid
+Correct Answer: B
+
+Bromine water test is used to detect:
+A. Saturation
+B. Unsaturation
+C. Acidity
+D. Basicity
+Correct Answer: B
+
+SECTION 8: MARKOVNIKOV’S RULE
+
+Notes
+
+Markovnikov’s rule applies to unsymmetrical alkenes.
+
+Rule:
+
+Hydrogen attaches to the carbon atom with more hydrogen atoms
+
+Example:
+Propene + HBr → 2-Bromopropane (major product)
+
+Easy MCQs
+
+Markovnikov’s rule applies to:
+A. Symmetrical alkenes
+B. Unsymmetrical alkenes
+C. Alkanes
+D. Alkynes
+Correct Answer: B
+
+In Markovnikov addition, hydrogen attaches to:
+A. Carbon with fewer hydrogens
+B. Carbon with more hydrogens
+C. Random carbon
+D. Any carbon
+Correct Answer: B
+
+SECTION 9: PEROXIDE EFFECT (ANTI-MARKOVNIKOV)
+
+Notes
+
+In presence of peroxide, HBr adds opposite to Markovnikov’s rule.
+This is called the anti-Markovnikov effect.
+
+Important points:
+
+Works only with HBr
+
+Does not work with HCl or HI
+
+Example:
+Propene + HBr (peroxide) → 1-Bromopropane
+
+Easy MCQs
+
+Peroxide effect is observed with:
+A. HCl
+B. HI
+C. HBr
+D. HF
+Correct Answer: C
+
+Peroxide addition follows:
+A. Markovnikov rule
+B. Anti-Markovnikov rule
+C. Random addition
+D. No rule
+Correct Answer: B
+
+SECTION 10: OXIDATION AND OZONOLYSIS
+
+Notes
+
+Cold dilute KMnO4 converts alkenes to glycols
+
+Hot KMnO4 breaks the double bond
+
+Ozonolysis breaks double bond to form aldehydes or ketones
+
+Ozonolysis is used to determine the position of the double bond.
+
+Easy MCQs
+
+KMnO4 test is used to detect:
+A. Saturation
+B. Unsaturation
+C. Acidity
+D. Basicity
+Correct Answer: B
+
+Ozonolysis is used to:
+A. Form polymers
+B. Break double bond
+C. Reduce alkene
+D. Form alcohol
+Correct Answer: B
+
+SECTION 11: POLYMERISATION OF ALKENES
+
+Notes
+
+Many alkene molecules join together to form a polymer.
+This process is called addition polymerisation.
+
+Examples:
+
+Ethene → Polythene
+
+Propene → Polypropene
+
+Easy MCQs
+
+Polythene is prepared from:
+A. Methane
+B. Ethane
+C. Ethene
+D. Ethyne
+Correct Answer: C
+
+Joining of many small molecules is called:
+A. Cracking
+B. Polymerisation
+C. Oxidation
+D. Reduction
+Correct Answer: B
+
+=== PART 3: ALKYNES ===
+--- SECTION 1: WHAT ARE ALKYNES ---
+Notes
+
+Alkynes are unsaturated hydrocarbons that contain at least one carbon–carbon triple bond (C≡C).
+
+Because of the triple bond:
+
+Alkynes are more reactive than alkenes and alkanes
+
+General formula of alkynes:
+CnH₂n₋₂
+
+Examples:
+
+Ethyne (Acetylene): C₂H₂
+
+Propyne: C₃H₄
+
+The first member of the alkyne series is ethyne.
+
+Easy MCQs
+
+Alkynes are unsaturated because they contain:
+A. Single bond
+B. Double bond
+C. Triple bond
+D. Ionic bond
+Correct Answer: C
+
+General formula of alkynes is:
+A. CnH₂n
+B. CnH₂n₊₂
+C. CnH₂n₋₂
+D. CnHn
+Correct Answer: C
+
+--- SECTION 2: STRUCTURE OF TRIPLE BOND ---
+Notes
+
+A carbon–carbon triple bond consists of:
+
+One sigma (σ) bond
+
+Two pi (π) bonds
+
+Sigma bond is strong.
+Pi bonds are weak and break easily.
+
+In alkynes:
+
+Carbon atoms are sp hybridised
+
+Shape is linear
+
+Bond angle is 180°
+
+Easy MCQs
+
+Triple bond contains:
+A. Two sigma bonds
+B. One sigma and one pi bond
+C. One sigma and two pi bonds
+D. Two pi bonds only
+Correct Answer: C
+
+Shape of alkyne molecule is:
+A. Bent
+B. Tetrahedral
+C. Trigonal planar
+D. Linear
+Correct Answer: D
+
+--- SECTION 3: NOMENCLATURE OF ALKYNES ---
+Notes
+
+Rules for naming alkynes:
+
+Choose the longest chain containing the triple bond
+
+Number the chain from the end nearest to the triple bond
+
+Use suffix “yne”
+
+Examples:
+
+C≡C → Ethyne
+
+CH₃–C≡CH → Prop-1-yne
+
+CH₃–C≡C–CH₃ → But-2-yne
+
+Easy MCQs
+
+Name of CH₃–C≡CH is:
+A. Propane
+B. Propene
+C. Propyne
+D. Butyne
+Correct Answer: C
+
+Suffix used for alkynes is:
+A. ane
+B. ene
+C. yne
+D. ol
+Correct Answer: C
+
+--- SECTION 4: PREPARATION OF ALKYNES ---
+Notes
+
+(A) From Dihaloalkanes
+Vicinal or geminal dihalides give alkynes when heated with alcoholic KOH.
+
+(B) From Calcium Carbide
+Laboratory preparation of ethyne:
+
+CaC₂ + H₂O → C₂H₂ + Ca(OH)₂
+
+Easy MCQs
+
+Ethyne is prepared in laboratory from:
+A. Calcium oxide
+B. Calcium carbide
+C. Sodium carbonate
+D. Sodium chloride
+Correct Answer: B
+
+Removal of two HX molecules gives:
+A. Alkane
+B. Alkene
+C. Alkyne
+D. Alcohol
+Correct Answer: C
+
+--- SECTION 5: PHYSICAL PROPERTIES OF ALKYNES ---
+Notes
+
+First two alkynes are gases
+
+Higher members are liquids or solids
+
+Insoluble in water
+
+Soluble in organic solvents
+
+Boiling point increases with increase in molecular mass.
+
+Easy MCQs
+
+Alkynes are soluble in:
+A. Water
+B. Acids
+C. Organic solvents
+D. Metals
+Correct Answer: C
+
+First member of alkyne series is:
+A. Methyne
+B. Ethyne
+C. Propane
+D. Butene
+Correct Answer: B
+
+--- SECTION 6: CHEMICAL PROPERTIES (ADDITION REACTIONS) ---
+Notes
+
+Alkynes mainly undergo addition reactions.
+
+(A) Hydrogenation
+Alkyne → Alkene → Alkane
+
+(B) Halogenation
+Br₂ or Cl₂ adds across the triple bond.
+
+(C) Addition of Hydrogen Halides
+HX adds stepwise to give alkene and then alkane.
+
+Easy MCQs
+
+Hydrogenation of alkyne gives:
+A. Only alkene
+B. Only alkane
+C. Alkene followed by alkane
+D. Alcohol
+Correct Answer: C
+
+Alkynes mainly undergo:
+A. Substitution
+B. Addition
+C. Elimination
+D. Rearrangement
+Correct Answer: B
+
+--- SECTION 7: ACIDIC NATURE OF ALKYNES ---
+Notes
+
+Terminal alkynes are weakly acidic due to sp hybridised carbon.
+
+Ethyne reacts with:
+
+Sodium metal
+
+Ammoniacal silver nitrate
+
+Ammoniacal cuprous chloride
+
+Easy MCQs
+
+Which hydrocarbon is acidic?
+A. Ethane
+B. Ethene
+C. Ethyne
+D. Benzene
+Correct Answer: C
+
+Terminal alkyne reacts with:
+A. Water
+B. Sodium metal
+C. Sugar
+D. Oxygen
+Correct Answer: B
+
+--- SECTION 8: OXIDATION AND OZONOLYSIS ---
+Notes
+
+Ozonolysis breaks the triple bond
+
+Strong oxidation using KMnO₄ gives carboxylic acids
+
+Easy MCQs
+
+Ozonolysis causes:
+A. Polymerisation
+B. Breaking of bond
+C. Reduction
+D. Neutralisation
+Correct Answer: B
+
+Oxidation of alkynes gives:
+A. Alcohol
+B. Ketone
+C. Carboxylic acid
+D. Ether
+Correct Answer: C
+
+--- SECTION 9: POLYMERISATION OF ALKYNES ---
+Notes
+
+Ethyne undergoes polymerisation to form:
+
+Polyacetylene
+
+Benzene (by trimerisation)
+
+Easy MCQs
+
+Polymer of ethyne is:
+A. Polythene
+B. Polyacetylene
+C. PVC
+D. Nylon
+Correct Answer: B
+
+Trimerisation of ethyne gives:
+A. Methane
+B. Benzene
+C. Ethane
+D. Propane
+Correct Answer: B
+
+--- SECTION 10: USES OF ALKYNES ---
+Notes
+
+Ethyne is used:
+
+In oxy-acetylene welding
+
+In manufacture of plastics
+
+In preparation of solvents
+
+Easy MCQs
+
+Ethyne is used in:
+A. Cooking
+B. Welding
+C. Drinking
+D. Medicine only
+Correct Answer: B
+
+Alkynes are mainly used in:
+A. Food industry
+B. Industrial processes
+C. Farming
+D. Painting
+Correct Answer: B
+
+PART 4: AROMATIC HYDROCARBONS (BENZENE & ARENES)
+SECTION 1: WHAT ARE AROMATIC HYDROCARBONS
+Notes
+
+Aromatic hydrocarbons are a special class of hydrocarbons that contain a benzene ring or a similar ring structure.
+
+They are called arenes.
+
+These compounds show extra stability, which is called aromaticity.
+
+Examples of aromatic hydrocarbons:
+
+Benzene (C6H6)
+
+Toluene
+
+Naphthalene
+
+Aromatic hydrocarbons are more stable than alkenes because their electrons are delocalised over the ring.
+
+Easy MCQs
+
+Aromatic hydrocarbons are also called:
+A. Alkanes
+B. Alkenes
+C. Arenes
+D. Alkynes
+Correct Answer: C
+
+Which of the following is an aromatic compound?
+A. Ethene
+B. Benzene
+C. Ethyne
+D. Propane
+Correct Answer: B
+
+SECTION 2: STRUCTURE OF BENZENE
+Notes
+
+The molecular formula of benzene is C6H6.
+
+Benzene has:
+
+Six carbon atoms
+
+Six hydrogen atoms
+
+Each carbon atom is sp2 hybridised.
+
+The molecule is planar and forms a hexagonal ring.
+
+Kekulé suggested alternating double bonds, but the actual structure is a resonance hybrid.
+
+All carbon–carbon bonds in benzene are equal in length.
+
+Easy MCQs
+
+Molecular formula of benzene is:
+A. C6H12
+B. C6H10
+C. C6H6
+D. C5H6
+Correct Answer: C
+
+Hybridisation of carbon in benzene is:
+A. sp
+B. sp2
+C. sp3
+D. None
+Correct Answer: B
+
+SECTION 3: RESONANCE AND STABILITY OF BENZENE
+Notes
+
+Benzene shows resonance.
+
+The pi electrons are delocalised over the entire ring.
+
+This delocalisation provides extra stability, called resonance energy.
+
+Because of this stability, benzene does not prefer addition reactions.
+
+Instead, benzene mainly undergoes substitution reactions.
+
+Easy MCQs
+
+Extra stability of benzene is due to:
+A. Sigma bonds
+B. Pi bonds
+C. Resonance
+D. Ionic bonds
+Correct Answer: C
+
+Benzene mainly undergoes:
+A. Addition reactions
+B. Substitution reactions
+C. Elimination reactions
+D. Polymerisation
+Correct Answer: B
+
+SECTION 4: AROMATICITY (HUCKEL’S RULE)
+Notes
+
+A compound is aromatic if it satisfies all of the following conditions:
+
+It is cyclic
+
+It is planar
+
+It is fully conjugated
+
+It contains (4n + 2) pi electrons
+
+This rule is called Huckel’s rule.
+
+Examples:
+
+Benzene → 6 pi electrons
+
+Naphthalene → 10 pi electrons
+
+Easy MCQs
+
+Aromatic compounds follow:
+A. Markovnikov rule
+B. Huckel’s rule
+C. Hund’s rule
+D. Aufbau rule
+Correct Answer: B
+
+Number of pi electrons in benzene is:
+A. 2
+B. 4
+C. 6
+D. 8
+Correct Answer: C
+
+SECTION 5: PREPARATION OF BENZENE
+Notes
+
+Benzene can be prepared by:
+
+From coal tar (industrial method)
+
+From sodium benzoate using soda lime
+
+Polymerisation of ethyne
+
+Reduction of phenol
+
+Easy MCQs
+
+Benzene is prepared from sodium benzoate using:
+A. NaOH
+B. Soda lime
+C. KOH
+D. HCl
+Correct Answer: B
+
+Polymerisation of ethyne produces:
+A. Toluene
+B. Benzene
+C. Phenol
+D. Aniline
+Correct Answer: B
+
+SECTION 6: PHYSICAL PROPERTIES OF BENZENE
+Notes
+
+Benzene is:
+
+A colourless liquid
+
+Has a sweet smell
+
+Insoluble in water
+
+Soluble in organic solvents
+
+It burns with a sooty flame due to high carbon content.
+
+Easy MCQs
+
+Benzene at room temperature is:
+A. Solid
+B. Gas
+C. Liquid
+D. Plasma
+Correct Answer: C
+
+Benzene burns with:
+A. Blue flame
+B. Smokeless flame
+C. Sooty flame
+D. No flame
+Correct Answer: C
+
+SECTION 7: ELECTROPHILIC SUBSTITUTION REACTIONS
+Notes
+
+Benzene mainly undergoes electrophilic substitution reactions.
+
+Important reactions:
+
+Nitration
+
+Halogenation
+
+Sulphonation
+
+Friedel–Crafts alkylation
+
+Friedel–Crafts acylation
+
+These reactions preserve aromaticity.
+
+Easy MCQs
+
+Benzene mainly undergoes:
+A. Nucleophilic addition
+B. Electrophilic substitution
+C. Radical elimination
+D. Polymerisation
+Correct Answer: B
+
+Catalyst used in Friedel–Crafts reactions is:
+A. NaOH
+B. HCl
+C. AlCl3
+D. KMnO4
+Correct Answer: C
+
+SECTION 8: NITRATION OF BENZENE
+Notes
+
+Reaction:
+Benzene + concentrated HNO3 + concentrated H2SO4 → Nitrobenzene
+
+The electrophile formed is NO2+ (nitronium ion).
+
+Easy MCQs
+
+Nitration introduces which group?
+A. OH
+B. NO2
+C. Cl
+D. NH2
+Correct Answer: B
+
+Electrophile in nitration is:
+A. NO2-
+B. NO2
+C. NO2+
+D. NO3-
+Correct Answer: C
+
+SECTION 9: HALOGENATION OF BENZENE
+Notes
+
+Chlorination:
+Benzene + Cl2 / FeCl3 → Chlorobenzene
+
+Bromination:
+Benzene + Br2 / FeBr3 → Bromobenzene
+
+Easy MCQs
+
+Catalyst used in chlorination is:
+A. HCl
+B. FeCl3
+C. NaCl
+D. KCl
+Correct Answer: B
+
+Product of benzene + Cl2 is:
+A. Dichlorobenzene
+B. Chlorobenzene
+C. Hexachlorobenzene
+D. Benzyl chloride
+Correct Answer: B
+
+SECTION 10: DIRECTING EFFECT & ACTIVATING GROUPS
+Notes
+
+Substituents affect where new groups enter the benzene ring.
+
+Ortho/Para directing groups:
+
+OH
+
+NH2
+
+CH3
+
+Meta directing groups:
+
+NO2
+
+COOH
+
+SO3H
+
+Activating groups increase reactivity.
+Deactivating groups decrease reactivity.
+
+Easy MCQs
+
+OH group is:
+A. Meta directing
+B. Ortho/Para directing
+C. Random directing
+D. Non-directing
+Correct Answer: B
+
+NO2 group is:
+A. Activating
+B. Deactivating
+C. Neutral
+D. Inert
+Correct Answer: B
+
