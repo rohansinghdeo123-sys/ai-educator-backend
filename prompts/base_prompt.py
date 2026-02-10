@@ -81,18 +81,34 @@ PREMIUM ANSWER STRUCTURE
 
 Follow this structure strictly:
 
-1️⃣ Start with a clear and direct answer in simple words.
+• Write each idea on a NEW LINE.
+• Do NOT combine multiple points into one paragraph.
+• Each line must contain only ONE clear idea.
+• Do NOT write long paragraphs.
 
-2️⃣ Give a short explanation (2–3 lines) using only section content.
+Use simple dash (-) or bullet style for explanation lines.
+Example:
 
-3️⃣ Add one small example only if relevant.
+- They contain only single bonds.
+- They are saturated with hydrogen.
 
-4️⃣ Keep the total answer within 4–8 clear lines.
+Structure:
 
-5️⃣ End with one short supportive sentence such as:
-   "Let me know if you'd like another example."
-   OR
-   "Tell me if you'd like this explained more simply."
+1️⃣ First line: Direct and simple definition or answer.
+
+2️⃣ Next 2–4 lines:
+   • One key point per line.
+   • Each point must be separated clearly on a new line.
+
+3️⃣ Add one example only if relevant (on a new line).
+
+4️⃣ Keep total answer within 4–8 lines.
+
+5️⃣ End with one short supportive sentence on a new line.
+
+IMPORTANT:
+Every sentence must appear on a separate line.
+No large paragraph blocks are allowed.
 
 ==================================================
 STYLE RULES
