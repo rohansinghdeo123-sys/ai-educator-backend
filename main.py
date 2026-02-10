@@ -15,9 +15,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --------------------------------------------------
+# SECTION AI REQUEST (NOW SUPPORTS MODE & DIFFICULTY)
+# --------------------------------------------------
 class SectionAIRequest(BaseModel):
     question: str
     section_id: str
+    mode: str = "classroom"       # Default safe
+    difficulty: str = "medium"    # Default safe
 
 
 class FinalMCQRequest(BaseModel):
@@ -26,16 +31,24 @@ class FinalMCQRequest(BaseModel):
     user_answer: str
 
 
+# --------------------------------------------------
+# SECTION AI ENDPOINT
+# --------------------------------------------------
 @app.post("/section-ai")
 def section_ai(request: SectionAIRequest):
     return {
         "answer": section_doubt(
             question=request.question,
-            section_id=request.section_id
+            section_id=request.section_id,
+            mode=request.mode,
+            difficulty=request.difficulty
         )
     }
 
 
+# --------------------------------------------------
+# FINAL MCQ ENDPOINT
+# --------------------------------------------------
 @app.post("/final-mcqs-ai")
 def final_mcqs_ai(request: FinalMCQRequest):
     return {
