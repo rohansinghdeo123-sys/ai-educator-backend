@@ -141,12 +141,13 @@ BASIC CHEMISTRY (support only)
     )
 
     answer = response.choices[0].message.content.strip()
+    greeting = "Nice question! Let’s work through it together.\n"
 
     # Save conversation to memory
     conversation_memory.append({"role": "user", "content": question})
     conversation_memory.append({"role": "assistant", "content": answer})
 
-    return answer
+    return greeting + answer
 
 # --------------------------------------------------
 # RESET MEMORY FUNCTION
