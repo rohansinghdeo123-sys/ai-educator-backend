@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from Logic.section_doubt import section_doubt
+from Logic.section_doubt import section_doubt, reset_conversation
 from Logic.final_mcq_ai import explain_mcq
 
 app = FastAPI(title="AI Educator Backend")
@@ -16,13 +16,13 @@ app.add_middleware(
 )
 
 # --------------------------------------------------
-# SECTION AI REQUEST (NOW SUPPORTS MODE & DIFFICULTY)
+# SECTION AI REQUEST (SUPPORTS MODE & DIFFICULTY)
 # --------------------------------------------------
 class SectionAIRequest(BaseModel):
     question: str
     section_id: str
-    mode: str = "classroom"       # Default safe
-    difficulty: str = "medium"    # Default safe
+    mode: str = "classroom"
+    difficulty: str = "medium"
 
 
 class FinalMCQRequest(BaseModel):
@@ -44,6 +44,15 @@ def section_ai(request: SectionAIRequest):
             difficulty=request.difficulty
         )
     }
+
+
+# --------------------------------------------------
+# RESET CHAT ENDPOINT (NEW)
+# --------------------------------------------------
+@app.post("/reset-chat")
+def reset_chat():
+    reset_conversation()
+    return {"message": "Chat reset successfully."}
 
 
 # --------------------------------------------------

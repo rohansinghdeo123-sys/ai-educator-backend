@@ -18,6 +18,11 @@ groq_client = Groq(
 )
 
 # --------------------------------------------------
+# SIMPLE GLOBAL MEMORY (LEVEL 1 MEMORY)
+# --------------------------------------------------
+conversation_memory = []
+
+# --------------------------------------------------
 # SECTION ID → FILE PATH
 # --------------------------------------------------
 SECTION_FILE_MAP = {
@@ -95,11 +100,13 @@ def get_relevant_context(text: str, question: str, max_chars: int = 4000):
     return "\n\n".join(selected) if selected else text[:max_chars]
 
 # --------------------------------------------------
-# ASK AI (NOW USING MULTI-MODE ARCHITECTURE)
+# ASK AI WITH MEMORY
 # --------------------------------------------------
 def ask_ai(question, context_text, basics_text, mode="classroom", difficulty="medium"):
 
-    # Build the structured multi-mode prompt
+    global conversation_memory
+
+    # Build structured prompt
     core_prompt = build_prompt(
         question=question,
         section_content=context_text,
@@ -107,7 +114,6 @@ def ask_ai(question, context_text, basics_text, mode="classroom", difficulty="me
         difficulty=difficulty
     )
 
-    # Add BASIC CHEMISTRY support safely (unchanged behavior)
     final_prompt = f"""
 {core_prompt}
 
@@ -117,14 +123,37 @@ BASIC CHEMISTRY (support only)
 --------------------------------------------------
 """
 
+    # Build message list with memory
+    messages = []
+
+    # Add previous conversation
+    for msg in conversation_memory:
+        messages.append(msg)
+
+    # Add current question
+    messages.append({"role": "user", "content": final_prompt})
+
     response = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": final_prompt}],
+        messages=messages,
         temperature=0.2,
         max_tokens=400
     )
 
-    return response.choices[0].message.content.strip()
+    answer = response.choices[0].message.content.strip()
+
+    # Save conversation to memory
+    conversation_memory.append({"role": "user", "content": question})
+    conversation_memory.append({"role": "assistant", "content": answer})
+
+    return answer
+
+# --------------------------------------------------
+# RESET MEMORY FUNCTION
+# --------------------------------------------------
+def reset_conversation():
+    global conversation_memory
+    conversation_memory.clear()
 
 # --------------------------------------------------
 # MAIN FUNCTION (FRONTEND SAFE)
