@@ -115,6 +115,28 @@ Example:
 - Let me know if you'd like another example.
 
 ==================================================
+RELATED TOPIC SUGGESTION (MANDATORY)
+==================================================
+
+After completing the answer, suggest exactly TWO related concepts 
+from the SAME SECTION CONTENT that the student should study next.
+
+Rules:
+
+- Suggestions must belong strictly to the current section.
+- Do NOT suggest topics from other chapters.
+- Do NOT invent new topics.
+- Suggestions must be short concept titles, not explanations.
+- Each suggestion must start with a dash (-).
+- Do NOT exceed two suggestions.
+
+Format exactly:
+
+Related topics you should also review:
+- Topic 1
+- Topic 2
+
+==================================================
 FINAL PRIORITY ORDER
 ==================================================
 
