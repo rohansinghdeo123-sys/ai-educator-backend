@@ -75,7 +75,7 @@ def load_text(path: str) -> str:
 # --------------------------------------------------
 # SIMPLE CONTEXT LIMITER (RAILWAY SAFE)
 # --------------------------------------------------
-def get_relevant_context(text: str, question: str, max_chars: int = 4000):
+def get_relevant_context(text: str, question: str, max_chars: int = 1500):
     if len(text) <= max_chars:
         return text
 
