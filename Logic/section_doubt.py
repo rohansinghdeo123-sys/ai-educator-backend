@@ -1,6 +1,7 @@
 # Logic/section_doubt.py
 
 from prompts.prompt_builder import build_prompt
+from prompts.summary_prompt import SUMMARY_PROMPT
 import os
 from groq import Groq
 
@@ -15,7 +16,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # --------------------------------------------------
-# SESSION MEMORY STORAGE (PER USER)
+# SESSION MEMORY STORAGE
 # --------------------------------------------------
 chat_sessions = {}   # { session_id: [messages] }
 
@@ -41,7 +42,7 @@ def load_text(path: str) -> str:
         return f.read()
 
 # --------------------------------------------------
-# CONTEXT LIMITER
+# CONTEXT LIMITER (Token Safe)
 # --------------------------------------------------
 def get_relevant_context(text: str, question: str, max_chars: int = 1500):
     if len(text) <= max_chars:
@@ -70,7 +71,8 @@ def get_relevant_context(text: str, question: str, max_chars: int = 1500):
 # --------------------------------------------------
 # ASK AI (SESSION MEMORY VERSION)
 # --------------------------------------------------
-def ask_ai(question, context_text, basics_text, session_id, mode="classroom", difficulty="medium"):
+def ask_ai(question, context_text, basics_text, session_id,
+           mode="classroom", difficulty="medium"):
 
     global chat_sessions
 
@@ -80,7 +82,33 @@ def ask_ai(question, context_text, basics_text, session_id, mode="classroom", di
 
     conversation_memory = chat_sessions[session_id]
 
-    # Build structured prompt
+    # ==================================================
+    # 🔥 SUMMARY MODE (SEPARATE LOGIC)
+    # ==================================================
+    if mode == "summary":
+
+        summary_prompt = f"""
+{SUMMARY_PROMPT}
+
+SECTION CONTENT:
+{context_text}
+"""
+
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": summary_prompt}],
+            temperature=0.3,
+            max_tokens=300
+        )
+
+        summary_output = response.choices[0].message.content.strip()
+
+        return summary_output
+
+    # ==================================================
+    # 📘 NORMAL CLASSROOM MODE
+    # ==================================================
+
     core_prompt = build_prompt(
         question=question,
         section_content=context_text,
@@ -119,11 +147,11 @@ BASIC CHEMISTRY (support only)
 
     greeting = "Nice question! Let’s work through it together.\n"
 
-    # Save conversation to session memory
+    # Save conversation
     conversation_memory.append({"role": "user", "content": question})
     conversation_memory.append({"role": "assistant", "content": answer})
 
-    # Limit memory to last 10 messages
+    # Limit memory (avoid token explosion)
     if len(conversation_memory) > 10:
         chat_sessions[session_id] = conversation_memory[-10:]
 
@@ -140,7 +168,10 @@ def reset_conversation(session_id: str):
 # --------------------------------------------------
 # MAIN FUNCTION
 # --------------------------------------------------
-def section_doubt(question: str, section_id: str, session_id: str, mode="classroom", difficulty="medium"):
+def section_doubt(question: str, section_id: str,
+                  session_id: str,
+                  mode="classroom",
+                  difficulty="medium"):
 
     if not section_id:
         return "Invalid section selected."
@@ -158,4 +189,5 @@ def section_doubt(question: str, section_id: str, session_id: str, mode="classro
 
     context_text = get_relevant_context(section_text, question)
 
-    return ask_ai(question, context_text, basics_text, session_id, mode, difficulty)
+    return ask_ai(question, context_text, basics_text,
+                  session_id, mode, difficulty)

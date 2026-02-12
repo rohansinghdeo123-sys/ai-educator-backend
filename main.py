@@ -16,7 +16,7 @@ app.add_middleware(
 )
 
 # --------------------------------------------------
-# SECTION AI REQUEST (NOW SUPPORTS SESSION)
+# SECTION AI REQUEST (SESSION ENABLED)
 # --------------------------------------------------
 class SectionAIRequest(BaseModel):
     question: str
@@ -26,10 +26,20 @@ class SectionAIRequest(BaseModel):
     difficulty: str = "medium"
 
 
+# --------------------------------------------------
+# FINAL MCQ REQUEST
+# --------------------------------------------------
 class FinalMCQRequest(BaseModel):
     question: str
     options: list[str]
     user_answer: str
+
+
+# --------------------------------------------------
+# RESET REQUEST MODEL (IMPORTANT FIX)
+# --------------------------------------------------
+class ResetRequest(BaseModel):
+    session_id: str
 
 
 # --------------------------------------------------
@@ -49,11 +59,11 @@ def section_ai(request: SectionAIRequest):
 
 
 # --------------------------------------------------
-# RESET CHAT ENDPOINT (SESSION BASED)
+# RESET CHAT ENDPOINT (PROPER JSON BODY)
 # --------------------------------------------------
 @app.post("/reset-chat")
-def reset_chat(session_id: str):
-    reset_conversation(session_id)
+def reset_chat(request: ResetRequest):
+    reset_conversation(request.session_id)
     return {"message": "Chat session reset successfully."}
 
 
