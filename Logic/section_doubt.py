@@ -18,7 +18,7 @@ groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 # --------------------------------------------------
 # SESSION MEMORY STORAGE
 # --------------------------------------------------
-chat_sessions = {}   # { session_id: [messages] }
+chat_sessions = {}
 
 # --------------------------------------------------
 # SECTION FILE MAP
@@ -42,7 +42,7 @@ def load_text(path: str) -> str:
         return f.read()
 
 # --------------------------------------------------
-# CONTEXT LIMITER (Token Safe)
+# CONTEXT LIMITER
 # --------------------------------------------------
 def get_relevant_context(text: str, question: str, max_chars: int = 1500):
     if len(text) <= max_chars:
@@ -69,21 +69,20 @@ def get_relevant_context(text: str, question: str, max_chars: int = 1500):
     return "\n\n".join(selected) if selected else text[:max_chars]
 
 # --------------------------------------------------
-# ASK AI (SESSION MEMORY VERSION)
+# ASK AI FUNCTION
 # --------------------------------------------------
 def ask_ai(question, context_text, basics_text, session_id,
-           mode="classroom", difficulty="medium"):
+           mode="revision", difficulty="medium"):
 
     global chat_sessions
 
-    # Create session memory if not exists
     if session_id not in chat_sessions:
         chat_sessions[session_id] = []
 
     conversation_memory = chat_sessions[session_id]
 
     # ==================================================
-    # 🔥 SUMMARY MODE (SEPARATE LOGIC)
+    # SUMMARY MODE
     # ==================================================
     if mode == "summary":
 
@@ -101,12 +100,130 @@ SECTION CONTENT:
             max_tokens=300
         )
 
-        summary_output = response.choices[0].message.content.strip()
-
-        return summary_output
+        return response.choices[0].message.content.strip()
 
     # ==================================================
-    # 📘 NORMAL CLASSROOM MODE
+    # KEY POINTS MODE
+    # ==================================================
+    if mode == "keypoints":
+
+        keypoints_prompt = f"""
+Generate concise key revision bullet points from the following content.
+
+Rules:
+- No greetings
+- No markdown
+- No bold text
+- Clear bullet points only
+
+CONTENT:
+{context_text}
+"""
+
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": keypoints_prompt}],
+            temperature=0.3,
+            max_tokens=300
+        )
+
+        return response.choices[0].message.content.strip()
+
+    # ==================================================
+    # EXPLAIN MODE
+    # ==================================================
+    if mode == "explain":
+
+        explain_prompt = f"""
+Explain the following concept clearly and simply for a student.
+
+Question:
+{question}
+
+CONTENT:
+{context_text}
+"""
+
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": explain_prompt}],
+            temperature=0.3,
+            max_tokens=400
+        )
+
+        return response.choices[0].message.content.strip()
+
+    # ==================================================
+    # EXAM MODE (MCQs)
+    # ==================================================
+    if mode == "exam":
+
+        exam_prompt = f"""
+You are an expert chemistry exam paper setter.
+
+Generate exactly 5 high-quality exam-level MCQs.
+
+STRICT RULES:
+- No bold text
+- No markdown formatting
+- No introduction
+- No greetings
+- No commentary
+- Plain clean text only
+
+FORMAT STRICTLY LIKE THIS:
+
+Q1. Question text?
+A. Option
+B. Option
+C. Option
+D. Option
+Answer: Correct option letter
+Explanation: Short explanation
+
+CONTENT:
+{context_text}
+"""
+
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": exam_prompt}],
+            temperature=0.4,
+            max_tokens=700
+        )
+
+        return response.choices[0].message.content.strip()
+
+    # ==================================================
+    # PROBABLE THEORY QUESTIONS
+    # ==================================================
+    if mode == "probable":
+
+        probable_prompt = f"""
+Generate probable exam theory questions.
+
+Rules:
+- Generate 3 questions of 3 marks
+- Generate 2 questions of 5 marks
+- No markdown
+- No greetings
+- No extra commentary
+
+CONTENT:
+{context_text}
+"""
+
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": probable_prompt}],
+            temperature=0.4,
+            max_tokens=500
+        )
+
+        return response.choices[0].message.content.strip()
+
+    # ==================================================
+    # DEFAULT REVISION / ASK AI MODE
     # ==================================================
 
     core_prompt = build_prompt(
@@ -125,17 +242,9 @@ BASIC CHEMISTRY (support only)
 --------------------------------------------------
 """
 
-    # Build message list
-    messages = []
-
-    # Add previous memory
-    for msg in conversation_memory:
-        messages.append(msg)
-
-    # Add current question
+    messages = conversation_memory.copy()
     messages.append({"role": "user", "content": final_prompt})
 
-    # Call model
     response = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
         messages=messages,
@@ -145,32 +254,35 @@ BASIC CHEMISTRY (support only)
 
     answer = response.choices[0].message.content.strip()
 
-    greeting = "Nice question! Let’s work through it together.\n"
-
-    # Save conversation
     conversation_memory.append({"role": "user", "content": question})
     conversation_memory.append({"role": "assistant", "content": answer})
 
-    # Limit memory (avoid token explosion)
     if len(conversation_memory) > 10:
         chat_sessions[session_id] = conversation_memory[-10:]
 
-    return greeting + answer
+    # 🔥 Add welcoming message ONLY for revision (Ask AI)
+    if mode == "revision":
+        greeting = "Nice question! Let’s understand this step by step.\n\n"
+        return greeting + answer
+
+    return answer
+
 
 # --------------------------------------------------
-# RESET SESSION MEMORY
+# RESET
 # --------------------------------------------------
 def reset_conversation(session_id: str):
     global chat_sessions
     if session_id in chat_sessions:
         chat_sessions.pop(session_id)
 
+
 # --------------------------------------------------
 # MAIN FUNCTION
 # --------------------------------------------------
 def section_doubt(question: str, section_id: str,
                   session_id: str,
-                  mode="classroom",
+                  mode="revision",
                   difficulty="medium"):
 
     if not section_id:
@@ -189,5 +301,11 @@ def section_doubt(question: str, section_id: str,
 
     context_text = get_relevant_context(section_text, question)
 
-    return ask_ai(question, context_text, basics_text,
-                  session_id, mode, difficulty)
+    return ask_ai(
+        question,
+        context_text,
+        basics_text,
+        session_id,
+        mode,
+        difficulty
+    )
