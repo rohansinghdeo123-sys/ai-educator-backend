@@ -1,5 +1,6 @@
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, Integer, String, Date
 from database import Base
+
 
 class UserProgress(Base):
     __tablename__ = "user_progress"
@@ -10,5 +11,9 @@ class UserProgress(Base):
     total_tests = Column(Integer, default=0)
     total_questions = Column(Integer, default=0)
     total_correct = Column(Integer, default=0)
+
     xp = Column(Integer, default=0)
     streak = Column(Integer, default=0)
+
+    # 🔥 Required for proper streak system
+    last_active_date = Column(Date, nullable=True)

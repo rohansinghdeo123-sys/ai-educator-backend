@@ -1,3 +1,4 @@
+from datetime import date
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -82,24 +83,58 @@ def final_mcqs_ai(request: FinalMCQRequest):
 
 # ================= UPDATE PROGRESS =================
 
+# ================= UPDATE PROGRESS =================
+
 @app.post("/update-progress")
 def update_progress(progress: ProgressUpdate, db: Session = Depends(get_db)):
     user = db.query(UserProgress).filter(UserProgress.user_id == progress.user_id).first()
 
+    today = date.today()
+
     if not user:
-        user = UserProgress(user_id=progress.user_id)
+        user = UserProgress(
+            user_id=progress.user_id,
+            total_tests=0,
+            total_questions=0,
+            total_correct=0,
+            xp=0,
+            streak=0,
+            last_active_date=today
+        )
         db.add(user)
 
+    # ---------------------------
+    # UPDATE CORE STATS
+    # ---------------------------
     user.total_tests = progress.total_tests
     user.total_questions = progress.total_questions
     user.total_correct = progress.total_correct
     user.xp = progress.xp
-    user.streak = progress.streak
+
+    # ---------------------------
+    # STREAK LOGIC (PRODUCTION SAFE)
+    # ---------------------------
+    if user.last_active_date:
+        difference = (today - user.last_active_date).days
+
+        if difference == 1:
+            user.streak += 1
+        elif difference > 1:
+            user.streak = 1
+        # if difference == 0 → same day → no change
+
+    else:
+        user.streak = 1
+
+    user.last_active_date = today
 
     db.commit()
     db.refresh(user)
 
-    return {"message": "Progress updated successfully."}
+    return {
+        "message": "Progress updated successfully.",
+        "streak": user.streak
+    }
 
 # ================= GET PROGRESS =================
 
