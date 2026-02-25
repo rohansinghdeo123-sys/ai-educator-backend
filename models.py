@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date
+from sqlalchemy import Column, Integer, String
 from database import Base
 
 
@@ -14,6 +14,3 @@ class UserProgress(Base):
 
     xp = Column(Integer, default=0)
     streak = Column(Integer, default=0)
-
-    # 🔥 Required for proper streak system
-    last_active_date = Column(Date, nullable=True)

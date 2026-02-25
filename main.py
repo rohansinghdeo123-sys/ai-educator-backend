@@ -1,16 +1,16 @@
-from datetime import date
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 
 from database import SessionLocal, engine
 from models import Base, UserProgress
-from schemas import ProgressUpdate, ProgressResponse
-
-from pydantic import BaseModel
 
 from Logic.section_doubt import section_doubt, reset_conversation
 from Logic.final_mcq_ai import explain_mcq
+
+
+# ================= INIT =================
 
 Base.metadata.create_all(bind=engine)
 
@@ -18,11 +18,12 @@ app = FastAPI(title="AI Educator Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["*"],   # safe for development
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # ================= DATABASE DEPENDENCY =================
 
@@ -33,6 +34,7 @@ def get_db():
     finally:
         db.close()
 
+
 # ================= SECTION AI =================
 
 class SectionAIRequest(BaseModel):
@@ -41,6 +43,7 @@ class SectionAIRequest(BaseModel):
     session_id: str
     mode: str = "revision"
     difficulty: str = "medium"
+
 
 @app.post("/section-ai")
 def section_ai(request: SectionAIRequest):
@@ -54,15 +57,18 @@ def section_ai(request: SectionAIRequest):
         )
     }
 
+
 # ================= RESET CHAT =================
 
 class ResetRequest(BaseModel):
     session_id: str
 
+
 @app.post("/reset-chat")
 def reset_chat(request: ResetRequest):
     reset_conversation(request.session_id)
     return {"message": "Chat session reset successfully."}
+
 
 # ================= FINAL MCQ =================
 
@@ -70,6 +76,7 @@ class FinalMCQRequest(BaseModel):
     question: str
     options: list[str]
     user_answer: str
+
 
 @app.post("/final-mcqs-ai")
 def final_mcqs_ai(request: FinalMCQRequest):
@@ -81,52 +88,40 @@ def final_mcqs_ai(request: FinalMCQRequest):
         )
     }
 
-# ================= UPDATE PROGRESS =================
 
 # ================= UPDATE PROGRESS =================
+
+class ProgressUpdate(BaseModel):
+    user_id: str
+    total_tests: int
+    total_questions: int
+    total_correct: int
+    xp: int
+    streak: int
+
 
 @app.post("/update-progress")
 def update_progress(progress: ProgressUpdate, db: Session = Depends(get_db)):
-    user = db.query(UserProgress).filter(UserProgress.user_id == progress.user_id).first()
-
-    today = date.today()
+    user = db.query(UserProgress).filter(
+        UserProgress.user_id == progress.user_id
+    ).first()
 
     if not user:
         user = UserProgress(
             user_id=progress.user_id,
-            total_tests=0,
-            total_questions=0,
-            total_correct=0,
-            xp=0,
-            streak=0,
-            last_active_date=today
+            total_tests=progress.total_tests,
+            total_questions=progress.total_questions,
+            total_correct=progress.total_correct,
+            xp=progress.xp,
+            streak=progress.streak,
         )
         db.add(user)
-
-    # ---------------------------
-    # UPDATE CORE STATS
-    # ---------------------------
-    user.total_tests = progress.total_tests
-    user.total_questions = progress.total_questions
-    user.total_correct = progress.total_correct
-    user.xp = progress.xp
-
-    # ---------------------------
-    # STREAK LOGIC (PRODUCTION SAFE)
-    # ---------------------------
-    if user.last_active_date:
-        difference = (today - user.last_active_date).days
-
-        if difference == 1:
-            user.streak += 1
-        elif difference > 1:
-            user.streak = 1
-        # if difference == 0 → same day → no change
-
     else:
-        user.streak = 1
-
-    user.last_active_date = today
+        user.total_tests = progress.total_tests
+        user.total_questions = progress.total_questions
+        user.total_correct = progress.total_correct
+        user.xp = progress.xp
+        user.streak = progress.streak
 
     db.commit()
     db.refresh(user)
@@ -136,29 +131,45 @@ def update_progress(progress: ProgressUpdate, db: Session = Depends(get_db)):
         "streak": user.streak
     }
 
+
 # ================= GET PROGRESS =================
 
-@app.get("/get-progress/{user_id}", response_model=ProgressResponse)
+@app.get("/get-progress/{user_id}")
 def get_progress(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(UserProgress).filter(UserProgress.user_id == user_id).first()
+    user = db.query(UserProgress).filter(
+        UserProgress.user_id == user_id
+    ).first()
 
     if not user:
-        return ProgressResponse(
-            user_id=user_id,
-            total_tests=0,
-            total_questions=0,
-            total_correct=0,
-            xp=0,
-            streak=0
-        )
+        return {
+            "user_id": user_id,
+            "total_tests": 0,
+            "total_questions": 0,
+            "total_correct": 0,
+            "xp": 0,
+            "streak": 0
+        }
 
-    return user
+    return {
+        "user_id": user.user_id,
+        "total_tests": user.total_tests,
+        "total_questions": user.total_questions,
+        "total_correct": user.total_correct,
+        "xp": user.xp,
+        "streak": user.streak
+    }
+
 
 # ================= LEADERBOARD =================
 
 @app.get("/leaderboard")
 def leaderboard(db: Session = Depends(get_db)):
-    users = db.query(UserProgress).order_by(UserProgress.xp.desc()).limit(10).all()
+    users = (
+        db.query(UserProgress)
+        .order_by(UserProgress.xp.desc())
+        .limit(10)
+        .all()
+    )
 
     return [
         {
