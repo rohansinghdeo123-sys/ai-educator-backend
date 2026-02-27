@@ -79,6 +79,7 @@ def update_progress(progress: ProgressUpdate, db: Session = Depends(get_db)):
 
     today = date.today()
 
+    # Create user if not exists
     if not user:
         user = UserProgress(
             user_id=progress.user_id,
@@ -87,32 +88,38 @@ def update_progress(progress: ProgressUpdate, db: Session = Depends(get_db)):
             total_correct=0,
             xp=0,
             streak=0,
-            last_active_date=today
+            last_active_date=None
         )
         db.add(user)
+        db.commit()
+        db.refresh(user)
 
-    # Update main stats
+    # ================= UPDATE MAIN STATS =================
     user.total_tests = progress.total_tests
     user.total_questions = progress.total_questions
     user.total_correct = progress.total_correct
     user.xp = progress.xp
 
-    # Streak logic (SAFE)
+    # ================= SAFE STREAK LOGIC =================
     if user.last_active_date:
-    difference = (today - user.last_active_date).days
+        difference = (today - user.last_active_date).days
 
-    if difference == 0:
-        pass  # same day → keep streak same
+        if difference == 0:
+            # Same day → do nothing
+            pass
 
-    elif difference == 1:
-        user.streak += 1  # next day → increment
+        elif difference == 1:
+            # Next consecutive day
+            user.streak += 1
 
+        else:
+            # Missed days → reset streak
+            user.streak = 1
     else:
-        user.streak = 1  # gap → reset
+        # First ever test
+        user.streak = 1
 
-else:
-    user.streak = 1  # first ever test
-
+    # Always update last active date
     user.last_active_date = today
 
     db.commit()
