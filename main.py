@@ -1,16 +1,22 @@
+from datetime import date
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
 
 from database import SessionLocal, engine
-from models import Base, UserProgress
+from models import Base, UserProgress, TestHistory
+from schemas import (
+    ProgressUpdate,
+    ProgressResponse,
+    TestHistoryCreate,
+    TestHistoryResponse,
+)
+
+from pydantic import BaseModel
+from typing import List
 
 from Logic.section_doubt import section_doubt, reset_conversation
 from Logic.final_mcq_ai import explain_mcq
-
-
-# ================= INIT =================
 
 Base.metadata.create_all(bind=engine)
 
@@ -18,14 +24,14 @@ app = FastAPI(title="AI Educator Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # safe for development
-    allow_credentials=False,
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# ================= DATABASE DEPENDENCY =================
+# ================= DATABASE =================
 
 def get_db():
     db = SessionLocal()
@@ -67,109 +73,107 @@ class ResetRequest(BaseModel):
 @app.post("/reset-chat")
 def reset_chat(request: ResetRequest):
     reset_conversation(request.session_id)
-    return {"message": "Chat session reset successfully."}
-
-
-# ================= FINAL MCQ =================
-
-class FinalMCQRequest(BaseModel):
-    question: str
-    options: list[str]
-    user_answer: str
-
-
-@app.post("/final-mcqs-ai")
-def final_mcqs_ai(request: FinalMCQRequest):
-    return {
-        "explanation": explain_mcq(
-            question=request.question,
-            options=request.options,
-            user_answer=request.user_answer
-        )
-    }
+    return {"message": "Chat reset successfully"}
 
 
 # ================= UPDATE PROGRESS =================
 
-class ProgressUpdate(BaseModel):
-    user_id: str
-    total_tests: int
-    total_questions: int
-    total_correct: int
-    xp: int
-    streak: int
-
-
 @app.post("/update-progress")
 def update_progress(progress: ProgressUpdate, db: Session = Depends(get_db)):
-    user = db.query(UserProgress).filter(
-        UserProgress.user_id == progress.user_id
-    ).first()
+    user = db.query(UserProgress).filter(UserProgress.user_id == progress.user_id).first()
+
+    today = date.today()
 
     if not user:
         user = UserProgress(
             user_id=progress.user_id,
-            total_tests=progress.total_tests,
-            total_questions=progress.total_questions,
-            total_correct=progress.total_correct,
-            xp=progress.xp,
-            streak=progress.streak,
+            total_tests=0,
+            total_questions=0,
+            total_correct=0,
+            xp=0,
+            streak=0,
+            last_active_date=today
         )
         db.add(user)
+
+    user.total_tests = progress.total_tests
+    user.total_questions = progress.total_questions
+    user.total_correct = progress.total_correct
+    user.xp = progress.xp
+
+    if user.last_active_date:
+        difference = (today - user.last_active_date).days
+        if difference == 1:
+            user.streak += 1
+        elif difference > 1:
+            user.streak = 1
     else:
-        user.total_tests = progress.total_tests
-        user.total_questions = progress.total_questions
-        user.total_correct = progress.total_correct
-        user.xp = progress.xp
-        user.streak = progress.streak
+        user.streak = 1
+
+    user.last_active_date = today
 
     db.commit()
     db.refresh(user)
 
-    return {
-        "message": "Progress updated successfully.",
-        "streak": user.streak
-    }
+    return {"message": "Progress updated successfully", "streak": user.streak}
+
+
+# ================= SAVE TEST HISTORY =================
+
+@app.post("/save-test")
+def save_test(test: TestHistoryCreate, db: Session = Depends(get_db)):
+    new_test = TestHistory(
+        user_id=test.user_id,
+        date=date.today(),
+        score=test.score,
+        total_questions=test.total_questions,
+        xp_earned=test.xp_earned
+    )
+
+    db.add(new_test)
+    db.commit()
+
+    return {"message": "Test saved successfully"}
 
 
 # ================= GET PROGRESS =================
 
-@app.get("/get-progress/{user_id}")
+@app.get("/get-progress/{user_id}", response_model=ProgressResponse)
 def get_progress(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(UserProgress).filter(
-        UserProgress.user_id == user_id
-    ).first()
+    user = db.query(UserProgress).filter(UserProgress.user_id == user_id).first()
 
     if not user:
-        return {
-            "user_id": user_id,
-            "total_tests": 0,
-            "total_questions": 0,
-            "total_correct": 0,
-            "xp": 0,
-            "streak": 0
-        }
+        return ProgressResponse(
+            user_id=user_id,
+            total_tests=0,
+            total_questions=0,
+            total_correct=0,
+            xp=0,
+            streak=0
+        )
 
-    return {
-        "user_id": user.user_id,
-        "total_tests": user.total_tests,
-        "total_questions": user.total_questions,
-        "total_correct": user.total_correct,
-        "xp": user.xp,
-        "streak": user.streak
-    }
+    return user
+
+
+# ================= GET TEST HISTORY =================
+
+@app.get("/test-history/{user_id}", response_model=List[TestHistoryResponse])
+def get_test_history(user_id: str, db: Session = Depends(get_db)):
+    tests = (
+        db.query(TestHistory)
+        .filter(TestHistory.user_id == user_id)
+        .order_by(TestHistory.date.asc())
+        .all()
+    )
+
+    return tests
 
 
 # ================= LEADERBOARD =================
 
 @app.get("/leaderboard")
 def leaderboard(db: Session = Depends(get_db)):
-    users = (
-        db.query(UserProgress)
-        .order_by(UserProgress.xp.desc())
-        .limit(10)
-        .all()
-    )
+    users = db.query(UserProgress).order_by(UserProgress.xp.desc()).limit(10).all()
 
     return [
         {
