@@ -2,6 +2,7 @@ from datetime import date
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from typing import List
 
 from database import SessionLocal, engine
 from models import Base, UserProgress, TestHistory
@@ -13,10 +14,8 @@ from schemas import (
 )
 
 from pydantic import BaseModel
-from typing import List
-
 from Logic.section_doubt import section_doubt, reset_conversation
-from Logic.final_mcq_ai import explain_mcq
+
 
 Base.metadata.create_all(bind=engine)
 
@@ -30,7 +29,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # ================= DATABASE =================
 
 def get_db():
@@ -40,7 +38,6 @@ def get_db():
     finally:
         db.close()
 
-
 # ================= SECTION AI =================
 
 class SectionAIRequest(BaseModel):
@@ -49,7 +46,6 @@ class SectionAIRequest(BaseModel):
     session_id: str
     mode: str = "revision"
     difficulty: str = "medium"
-
 
 @app.post("/section-ai")
 def section_ai(request: SectionAIRequest):
@@ -63,24 +59,23 @@ def section_ai(request: SectionAIRequest):
         )
     }
 
-
 # ================= RESET CHAT =================
 
 class ResetRequest(BaseModel):
     session_id: str
-
 
 @app.post("/reset-chat")
 def reset_chat(request: ResetRequest):
     reset_conversation(request.session_id)
     return {"message": "Chat reset successfully"}
 
-
 # ================= UPDATE PROGRESS =================
 
 @app.post("/update-progress")
 def update_progress(progress: ProgressUpdate, db: Session = Depends(get_db)):
-    user = db.query(UserProgress).filter(UserProgress.user_id == progress.user_id).first()
+    user = db.query(UserProgress).filter(
+        UserProgress.user_id == progress.user_id
+    ).first()
 
     today = date.today()
 
@@ -96,11 +91,13 @@ def update_progress(progress: ProgressUpdate, db: Session = Depends(get_db)):
         )
         db.add(user)
 
+    # Update main stats
     user.total_tests = progress.total_tests
     user.total_questions = progress.total_questions
     user.total_correct = progress.total_correct
     user.xp = progress.xp
 
+    # Streak logic (SAFE)
     if user.last_active_date:
         difference = (today - user.last_active_date).days
         if difference == 1:
@@ -115,8 +112,10 @@ def update_progress(progress: ProgressUpdate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
 
-    return {"message": "Progress updated successfully", "streak": user.streak}
-
+    return {
+        "message": "Progress updated successfully",
+        "streak": user.streak
+    }
 
 # ================= SAVE TEST HISTORY =================
 
@@ -135,12 +134,13 @@ def save_test(test: TestHistoryCreate, db: Session = Depends(get_db)):
 
     return {"message": "Test saved successfully"}
 
-
 # ================= GET PROGRESS =================
 
 @app.get("/get-progress/{user_id}", response_model=ProgressResponse)
 def get_progress(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(UserProgress).filter(UserProgress.user_id == user_id).first()
+    user = db.query(UserProgress).filter(
+        UserProgress.user_id == user_id
+    ).first()
 
     if not user:
         return ProgressResponse(
@@ -152,8 +152,15 @@ def get_progress(user_id: str, db: Session = Depends(get_db)):
             streak=0
         )
 
-    return user
-
+    # RETURN PROPER PYDANTIC OBJECT (VERY IMPORTANT)
+    return ProgressResponse(
+        user_id=user.user_id,
+        total_tests=user.total_tests,
+        total_questions=user.total_questions,
+        total_correct=user.total_correct,
+        xp=user.xp,
+        streak=user.streak
+    )
 
 # ================= GET TEST HISTORY =================
 
@@ -168,12 +175,16 @@ def get_test_history(user_id: str, db: Session = Depends(get_db)):
 
     return tests
 
-
 # ================= LEADERBOARD =================
 
 @app.get("/leaderboard")
 def leaderboard(db: Session = Depends(get_db)):
-    users = db.query(UserProgress).order_by(UserProgress.xp.desc()).limit(10).all()
+    users = (
+        db.query(UserProgress)
+        .order_by(UserProgress.xp.desc())
+        .limit(10)
+        .all()
+    )
 
     return [
         {
