@@ -99,13 +99,19 @@ def update_progress(progress: ProgressUpdate, db: Session = Depends(get_db)):
 
     # Streak logic (SAFE)
     if user.last_active_date:
-        difference = (today - user.last_active_date).days
-        if difference == 1:
-            user.streak += 1
-        elif difference > 1:
-            user.streak = 1
+    difference = (today - user.last_active_date).days
+
+    if difference == 0:
+        pass  # same day → keep streak same
+
+    elif difference == 1:
+        user.streak += 1  # next day → increment
+
     else:
-        user.streak = 1
+        user.streak = 1  # gap → reset
+
+else:
+    user.streak = 1  # first ever test
 
     user.last_active_date = today
 
