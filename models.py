@@ -1,5 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, ForeignKey
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, String, Date
 from database import Base
 
 
@@ -18,18 +17,14 @@ class UserProgress(Base):
 
     last_active_date = Column(Date, nullable=True)
 
-    tests = relationship("TestHistory", back_populates="user")
-
 
 class TestHistory(Base):
     __tablename__ = "test_history007"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, ForeignKey("user_progress.user_id"))
+    user_id = Column(String, index=True)
     date = Column(Date)
 
     score = Column(Integer)
     total_questions = Column(Integer)
     xp_earned = Column(Integer)
-
-    user = relationship("UserProgress", back_populates="tests")
