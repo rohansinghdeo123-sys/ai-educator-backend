@@ -4,7 +4,7 @@ from database import Base
 
 
 class UserProgress(Base):
-    __tablename__ = "user_progress"
+    __tablename__ = "user_progress007"
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, unique=True, index=True)
@@ -22,7 +22,7 @@ class UserProgress(Base):
 
 
 class TestHistory(Base):
-    __tablename__ = "test_history"
+    __tablename__ = "test_history007"
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, ForeignKey("user_progress.user_id"))

@@ -17,8 +17,6 @@ from pydantic import BaseModel
 from Logic.section_doubt import section_doubt, reset_conversation
 
 
-Base.metadata.create_all(bind=engine)
-
 app = FastAPI(title="AI Educator Backend")
 
 app.add_middleware(
