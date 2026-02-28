@@ -197,11 +197,17 @@ def leaderboard(db: Session = Depends(get_db)):
         .all()
     )
 
-    return [
-        {
-            "user_id": u.user_id,
-            "xp": u.xp,
-            "streak": u.streak
-        }
-        for u in users
-    ]
+    leaderboard_data = []
+    rank = 1
+
+    for user in users:
+        leaderboard_data.append({
+            "rank": rank,
+            "user_id": user.user_id,
+            "xp": user.xp,
+            "streak": user.streak,
+            "total_tests": user.total_tests
+        })
+        rank += 1
+
+    return leaderboard_data
