@@ -3,7 +3,7 @@ from prompts.mode_layers import MODE_LAYERS
 from prompts.difficulty_layers import DIFFICULTY_LAYERS
 
 
-def build_messages(question, section_content, mode, difficulty):
+def build_prompt(question, section_content, mode, difficulty):
 
     mode_instruction = MODE_LAYERS.get(mode, MODE_LAYERS["classroom"])
     difficulty_instruction = DIFFICULTY_LAYERS.get(difficulty, DIFFICULTY_LAYERS["medium"])
