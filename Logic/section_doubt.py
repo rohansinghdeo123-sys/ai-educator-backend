@@ -44,29 +44,79 @@ def load_text(path: str) -> str:
 # --------------------------------------------------
 # CONTEXT LIMITER
 # --------------------------------------------------
-def get_relevant_context(text: str, question: str, max_chars: int = 1500):
+def get_relevant_context(text: str, question: str, max_chars: int = 2000):
+    import re
+
+    # Basic stopwords to avoid scoring useless words
+    STOPWORDS = {
+        "what", "is", "the", "of", "define", "explain",
+        "write", "give", "state", "why", "how", "are",
+        "in", "for", "with", "and", "from"
+    }
+
+    def normalize_text(t: str) -> str:
+        """
+        Normalize chemical notation for matching.
+        Converts subscripts/superscripts to normal digits/symbols.
+        """
+        replacements = {
+            "₀": "0", "₁": "1", "₂": "2", "₃": "3",
+            "₄": "4", "₅": "5", "₆": "6", "₇": "7",
+            "₈": "8", "₉": "9",
+            "⁺": "+", "⁻": "-", "⁰": "0",
+            "¹": "1", "²": "2", "³": "3"
+        }
+
+        for k, v in replacements.items():
+            t = t.replace(k, v)
+
+        return t.lower()
+
+    # If text already small, return directly
     if len(text) <= max_chars:
         return text
 
-    question_words = question.lower().split()
-    paragraphs = text.split("\n\n")
+    normalized_text = normalize_text(text)
+    normalized_question = normalize_text(question)
 
+    # Extract meaningful keywords from question
+    question_words = [
+        w for w in re.findall(r"\b\w+\b", normalized_question)
+        if w not in STOPWORDS and len(w) > 2
+    ]
+
+    paragraphs = text.split("\n\n")
     scored = []
+
     for para in paragraphs:
-        score = sum(word in para.lower() for word in question_words)
+        para_norm = normalize_text(para)
+
+        # Count frequency of important words
+        score = sum(para_norm.count(word) for word in question_words)
+
         scored.append((score, para))
 
-    scored.sort(reverse=True)
+    # Sort by highest relevance
+    scored.sort(key=lambda x: x[0], reverse=True)
 
     selected = []
     total_len = 0
+
     for score, para in scored:
+        if score == 0:
+            continue
+
         if total_len + len(para) > max_chars:
-            break
+            continue
+
         selected.append(para)
         total_len += len(para)
 
-    return "\n\n".join(selected) if selected else text[:max_chars]
+    # Fallback: if nothing matched, return first chunk safely
+    if not selected:
+        return text[:max_chars]
+
+    return "\n\n".join(selected)
 
 # --------------------------------------------------
 # ASK AI FUNCTION
