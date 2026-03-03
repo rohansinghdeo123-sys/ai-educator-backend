@@ -27,7 +27,7 @@ SECTION_FILE_MAP = {
     "alkanes": os.path.join(BASE_DIR, "data", "chemistry", "hydrocarbon", "part1_alkanes.md"),
     "alkenes": os.path.join(BASE_DIR, "data", "chemistry", "hydrocarbon", "part2_alkenes.md"),
     "alkynes": os.path.join(BASE_DIR, "data", "chemistry", "hydrocarbon", "part3_alkynes.md"),
-    "aromatics": os.path.join(BASE_DIR, "data", "chemistry", "hydrocarbon", "part4_aromatic_hydrocarbons.md"),
+    "aromatics": os.path.join(BASE_DIR, "data", "chemistry", "hydrocarbon", "part4_aromatics.md"),
 }
 
 BASICS_PATH = os.path.join(BASE_DIR, "data", "datachemistry_basics.txt")
