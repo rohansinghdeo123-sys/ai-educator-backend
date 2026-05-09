@@ -1,0 +1,43 @@
+CHEMISTRY BASICS — REFERENCE ONLY
+
+1. Atom
+An atom is the smallest unit of an element that retains its chemical properties.
+
+2. Molecule
+A molecule is formed when two or more atoms bond together.
+
+3. Chemical Bond
+A chemical bond is a force that holds atoms together in a molecule.
+
+4. Covalent Bond
+A covalent bond is formed by sharing of electrons between atoms.
+
+5. Single, Double, Triple Bonds
+Single bond: one shared pair of electrons
+Double bond: two shared pairs
+Triple bond: three shared pairs
+
+6. Saturated Compound
+A compound containing only single bonds between carbon atoms.
+
+7. Unsaturated Compound
+A compound containing at least one double or triple bond.
+
+8. Sigma (σ) Bond
+A sigma bond is formed by head-on overlap of orbitals and is strong.
+
+9. Pi (π) Bond
+A pi bond is formed by sideways overlap of p-orbitals and is weaker.
+
+10. Hybridisation
+Hybridisation is the mixing of atomic orbitals to form new hybrid orbitals.
+
+sp³: tetrahedral
+sp²: trigonal planar
+sp: linear
+
+11. Oxidation
+Oxidation involves addition of oxygen or removal of hydrogen.
+
+12. Reduction
+Reduction involves removal of oxygen or addition of hydrogen.
