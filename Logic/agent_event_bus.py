@@ -101,6 +101,7 @@ class AgentEventBus:
             ("tutor", "Tutor Agent"),
             ("revision", "Revision Agent"),
             ("exam", "Exam Agent"),
+            ("coach", "Coach Agent"),
             ("planner", "Planner Agent"),
         ]
         for agent_id, display_name in defaults:
