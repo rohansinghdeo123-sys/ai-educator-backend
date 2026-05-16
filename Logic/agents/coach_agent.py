@@ -20,13 +20,13 @@ import os
 import time
 import uuid
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Generator
 
 from groq import Groq
 
 from Logic.agent_event_bus import event_bus
 from Logic.analytics_engine import get_user_analytics
-from Logic.knowledge_graph import knowledge_graph   # <-- NEW
+from Logic.knowledge_graph import knowledge_graph
 from models import (
     AICoachDailySignal,
     AICoachInteraction,
@@ -280,7 +280,6 @@ def _make_rule_based_recommendation(
 
     # ── Enrich with Knowledge Graph insights ──────────────────────────────
     if knowledge_graph.concepts and weak_topics:
-        # Take the weakest topic
         w = weak_topics[0]["topic"]
         concepts = knowledge_graph.search_by_keyword(w, limit=2)
         if concepts:
@@ -310,7 +309,6 @@ def _build_coach_system_prompt(
         for memory in memories
     ) or "- No durable coach memories yet."
 
-    # ── Add graph hints for weak topics ────────────────────────────────────
     graph_hints = ""
     if knowledge_graph.concepts and topic_snapshot["weak_topics"]:
         for wt in topic_snapshot["weak_topics"][:2]:
@@ -672,3 +670,115 @@ def coach_agent(request, db=None) -> dict:
             "model": MODEL_NAME,
         },
     }
+
+
+# ================= NEW STREAMING GENERATOR =================
+def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
+    """
+    Same as coach_agent, but yields tokens one by one from Groq.
+    After the stream ends, it persists the interaction and emits events.
+    """
+    if db is None:
+        yield "Coach needs database access to personalize advice."
+        return
+
+    user_id = getattr(request, "user_id", None) or getattr(request, "session_id", "anonymous")
+    question = getattr(request, "question", "")
+    session_id = getattr(request, "session_id", f"coach-{user_id}")
+    intent = getattr(request, "intent", "general")
+
+    coach = get_or_create_coach(db, user_id)
+    progress = _build_progress_snapshot(db, user_id)
+    topic_snapshot = _get_topic_snapshot(db, user_id)
+    recent_sessions = _build_recent_session_snapshot(_get_recent_sessions(db, user_id))
+    memories = _get_recent_memories(db, coach.coach_id)
+
+    try:
+        analytics_snapshot = get_user_analytics(db, user_id)
+    except Exception:
+        analytics_snapshot = {}
+
+    recommendation = _make_rule_based_recommendation(
+        progress=progress,
+        weak_topics=topic_snapshot["weak_topics"],
+        recent_sessions=recent_sessions,
+    )
+
+    system_prompt = _build_coach_system_prompt(
+        coach=coach,
+        progress=progress,
+        topic_snapshot=topic_snapshot,
+        recent_sessions=recent_sessions,
+        memories=memories,
+        analytics_snapshot=analytics_snapshot,
+    )
+
+    # ── Stream tokens ─────────────────────────────────────────────────────
+    full_answer = ""
+    try:
+        stream = groq_client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question},
+            ],
+            temperature=0.35,
+            max_tokens=450,
+            stream=True,
+        )
+
+        for chunk in stream:
+            token = chunk.choices[0].delta.content
+            if token:
+                full_answer += token
+                yield token
+
+    except Exception as exc:
+        logger.error("[COACH STREAM] Groq API error: %s", exc)
+        fallback = recommendation
+        full_answer = fallback
+        yield fallback
+
+    # ── Persist after stream ──────────────────────────────────────────────
+    coach.daily_strategy = recommendation
+    coach.next_best_action = recommendation
+    coach.last_interaction_at = datetime.utcnow()
+    coach.updated_at = datetime.utcnow()
+
+    _persist_interaction(
+        db=db,
+        coach=coach,
+        role="user",
+        message=question,
+        intent=intent,
+        mode="coach",
+        metadata={"session_id": session_id},
+    )
+
+    _persist_interaction(
+        db=db,
+        coach=coach,
+        role="assistant",
+        message=full_answer,
+        intent=intent,
+        mode="coach",
+        metadata={
+            "session_id": session_id,
+            "progress": progress,
+            "weak_topics": topic_snapshot["weak_topics"][:3],
+        },
+        quality_score=0.8,
+    )
+
+    event_bus.emit(
+        "coach",
+        "task_complete",
+        {
+            "status": "success",
+            "message": f"Coach stream delivered by {coach.coach_name}",
+            "latency_ms": 0,
+            "quality_score": 0.8,
+            "quality_passed": True,
+        },
+        session_id=session_id,
+    )
