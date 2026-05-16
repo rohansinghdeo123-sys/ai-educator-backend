@@ -12,6 +12,7 @@ A durable per-user coach that learns from:
 
 The coach is not a generic tutor. It gives study strategy, weak-area advice,
 exam guidance, motivation, and next best actions for one specific user.
+Now enriched with structured curriculum data from the Knowledge Graph.
 """
 
 import logging
@@ -25,6 +26,7 @@ from groq import Groq
 
 from Logic.agent_event_bus import event_bus
 from Logic.analytics_engine import get_user_analytics
+from Logic.knowledge_graph import knowledge_graph   # <-- NEW
 from models import (
     AICoachDailySignal,
     AICoachInteraction,
@@ -262,21 +264,37 @@ def _make_rule_based_recommendation(
     weak_topics: List[Dict[str, Any]],
     recent_sessions: List[Dict[str, Any]],
 ) -> str:
+    base = ""
     if progress["total_questions"] == 0:
-        return "Start with a 10-question diagnostic MCQ set to establish your baseline."
-
-    if weak_topics:
+        base = "Start with a 10-question diagnostic MCQ set to establish your baseline."
+    elif weak_topics:
         topic = weak_topics[0]["topic"]
         accuracy = weak_topics[0]["accuracy"]
-        return f"Focus next on {topic}. Current accuracy is {accuracy}%, so do one short revision pass and then 15 MCQs."
+        base = f"Focus next on {topic}. Current accuracy is {accuracy}%, so do one short revision pass and then 15 MCQs."
+    elif progress["accuracy"] < 60:
+        base = "Prioritize accuracy over speed today. Review incorrect answers before starting a new test."
+    elif recent_sessions and recent_sessions[0]["accuracy"] >= 80:
+        base = "Good momentum. Move to mixed practice and protect your streak with one timed set."
+    else:
+        base = "Do one focused practice block, then review mistakes immediately while memory is fresh."
 
-    if progress["accuracy"] < 60:
-        return "Prioritize accuracy over speed today. Review incorrect answers before starting a new test."
+    # ── Enrich with Knowledge Graph insights ──────────────────────────────
+    if knowledge_graph.concepts and weak_topics:
+        # Take the weakest topic
+        w = weak_topics[0]["topic"]
+        concepts = knowledge_graph.search_by_keyword(w, limit=2)
+        if concepts:
+            c = concepts[0]
+            if c.get("typical_exam_weightage") == "high":
+                base += f" (Note: '{c['title']}' has high exam weightage – prioritise this.)"
+            if c.get("prerequisites"):
+                prereqs = ", ".join(c["prerequisites"])
+                base += f" Also consider revising prerequisites: {prereqs}."
+            if c.get("common_mistakes"):
+                mistakes = [m['mistake'] for m in c['common_mistakes'][:2]]
+                base += f" Watch out for common errors like: {', '.join(mistakes)}."
 
-    if recent_sessions and recent_sessions[0]["accuracy"] >= 80:
-        return "Good momentum. Move to mixed practice and protect your streak with one timed set."
-
-    return "Do one focused practice block, then review mistakes immediately while memory is fresh."
+    return base
 
 
 def _build_coach_system_prompt(
@@ -291,6 +309,22 @@ def _build_coach_system_prompt(
         f"- {memory.title}: {memory.summary}"
         for memory in memories
     ) or "- No durable coach memories yet."
+
+    # ── Add graph hints for weak topics ────────────────────────────────────
+    graph_hints = ""
+    if knowledge_graph.concepts and topic_snapshot["weak_topics"]:
+        for wt in topic_snapshot["weak_topics"][:2]:
+            concepts = knowledge_graph.search_by_keyword(wt["topic"], limit=2)
+            for c in concepts:
+                hint = f"- {c['title']}: importance={c.get('importance_level','medium')}, weightage={c.get('typical_exam_weightage','medium')}"
+                if c.get('prerequisites'):
+                    hint += f", prerequisites={c['prerequisites']}"
+                if c.get('common_mistakes'):
+                    hint += f", common mistakes: {[m['mistake'] for m in c['common_mistakes'][:2]]}"
+                graph_hints += hint + "\n"
+
+    if graph_hints:
+        graph_hints = "\nCURRICULUM INSIGHTS (use these to prioritise):\n" + graph_hints
 
     return f"""
 You are {coach.coach_name}, a personal AI study coach for one learner.
@@ -324,6 +358,7 @@ ANALYTICS:
 
 COACH MEMORY:
 {memory_text}
+{graph_hints}
 
 RESPONSE FORMAT:
 1. Start with a personalized, natural answer.
@@ -498,7 +533,7 @@ def coach_agent(request, db=None) -> dict:
             "step": "context",
             "step_num": 1,
             "total_steps": 4,
-            "message": "Built analytics, memory, and session context",
+            "message": "Built analytics, memory, and session context (including Knowledge Graph insights)",
             "weak_topics": topic_snapshot["weak_topics"][:3],
         },
         session_id=session_id,

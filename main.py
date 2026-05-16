@@ -51,6 +51,7 @@ from Logic.section_doubt import (
     reset_conversation,
     section_doubt,
 )
+from Logic.knowledge_graph import knowledge_graph   # <-- NEW import
 
 # ── Groq client for casual CEO chats ──
 import groq
@@ -68,7 +69,7 @@ def generic_llm_chat(system_prompt: str, user_message: str, agent_id: str = "unk
     try:
         client = groq.Client(api_key=api_key)
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",    # <-- Change this model if you want a different one
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
@@ -279,6 +280,21 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+# ── Knowledge Graph loading (absolute path) ─────────────────────────────
+import os as _os
+_BASE_DIR = _os.path.dirname(_os.path.abspath(__file__))   # <-- one level up = backend/
+_JSON_PATH = _os.path.join(_BASE_DIR, "data", "Chapters", "basic_concepts_of_chemistry.json")
+
+logger.info("Loading knowledge graph from: %s", _JSON_PATH)
+
+try:
+    knowledge_graph.load_chapter(_JSON_PATH, "basic-concepts-of-chemistry")
+    logger.info("Knowledge graph loaded: basic-concepts-of-chemistry (%d concepts)",
+                len(knowledge_graph.concepts))
+except Exception as e:
+    logger.warning("Could not load basic-concepts-of-chemistry chapter: %s", e)
 
 
 # ================= REQUEST MODELS =================
@@ -699,6 +715,7 @@ def health_check():
         "coach_api": True,
         "firebase_admin_ready": FIREBASE_ADMIN_READY,
         "firebase_admin_error": FIREBASE_ADMIN_ERROR,
+        "knowledge_graph_chapters": knowledge_graph.list_chapters(),  # <-- NEW
     }
 
 
@@ -798,17 +815,13 @@ def admin_send_message(
     db: Session = Depends(get_db),
     _current_admin: Dict[str, Any] = Depends(require_admin),
 ):
-    # ── CASUAL MODE (CEO talking to agents) ─────────────────
-        # ── CASUAL MODE (CEO talking to agents) ─────────────────
     if request.mode == "casual":
-        # 1. Gather real agent data from the event bus
         agent_stats = event_bus.get_agent(request.agent_id) or {}
         recent_events = event_bus.get_recent_events(
             limit=5,
             agent_id=request.agent_id,
         )
 
-        # 2. Build a factual summary of the agent's current state
         status = agent_stats.get("status", "unknown")
         health = agent_stats.get("health", "unknown")
         current_task = agent_stats.get("current_task") or "idle"
@@ -817,18 +830,16 @@ def admin_send_message(
         total_success = agent_stats.get("total_success", 0)
         avg_latency = agent_stats.get("avg_latency_ms", 0)
 
-        # Format a few recent events into a readable list
         last_events = ""
         if recent_events:
             event_lines = []
             for ev in recent_events[:5]:
-                timestamp = ev.get("timestamp", "")[:16]  # YYYY-MM-DD HH:MM
+                timestamp = ev.get("timestamp", "")[:16]
                 ev_type = ev.get("event_type", "event")
                 data_preview = str(ev.get("data", {}))[:120]
                 event_lines.append(f"  [{timestamp}] {ev_type}: {data_preview}")
             last_events = "\n".join(event_lines)
 
-        # 3. Role‑specific personality description
         role_descriptions = {
             "tutor": "You are the Tutor Agent. Your job is to help students learn chemistry concepts, answer their questions, and provide clear explanations.",
             "revision": "You are the Revision Agent. You generate intelligent revision summaries, key points, and deep explanations.",
@@ -841,7 +852,6 @@ def admin_send_message(
             f"You are the {request.agent_id} agent, a key member of the AI learning platform team.",
         )
 
-        # 4. Construct the system prompt with live data
         system_prompt = f"""
 {role_text}
 You are reporting to the CEO in a casual, professional tone as a trusted team member.
@@ -863,7 +873,6 @@ If the CEO asks about something not covered by the data, politely say that you d
 Be concise, but warm and proactive. Offer insights or suggestions where relevant.
 """
 
-        # 5. Enrich the user message slightly to encourage an update-style answer
         enriched_message = (
             f"CEO says: {request.message}\n\n"
             "Provide a thoughtful, data-driven response based on the facts you have."
@@ -886,7 +895,7 @@ Be concise, but warm and proactive. Offer insights or suggestions where relevant
             "session_id": request.session_id,
         }
 
-    # ── STANDARD STUDY MODE (unchanged) ──────────────────────
+    # ── STANDARD STUDY MODE ──────────────────────
     class AdminRequest:
         def __init__(self):
             self.question = request.message

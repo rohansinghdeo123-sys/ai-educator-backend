@@ -1,0 +1,430 @@
+[
+  {
+    "concept_id": "chemistry_definition",
+    "title": "Definition of Chemistry",
+    "definition": "Chemistry is the branch of science that studies the preparation, properties, structure and reactions of material substances.",
+    "core_explanation": "Chemistry is also called the science of atoms and molecules because it explains the behaviour of matter at the molecular level. It bridges physics with biology and geology, focusing on the infinite variety of molecules built from about a hundred elements.",
+    "key_points": [
+      "Deals with composition, structure, properties and transformations of matter.",
+      "Central science connecting physics, biology, geology and materials science."
+    ],
+    "examples": ["Rusting of iron", "Curd formation from milk", "Vinegar from sugarcane juice"],
+    "formulas": [],
+    "properties": [],
+    "applications": ["Understanding natural phenomena and designing new materials."],
+    "common_mistakes": [
+      {
+        "mistake": "Confusing chemistry with alchemy; thinking chemistry is not a systematic science.",
+        "correction": "Modern chemistry is based on rigorous experimentation and quantitative laws, unlike alchemy which mixed mysticism.",
+        "frequency": "medium"
+      }
+    ],
+    "prerequisites": [],
+    "related_concepts": [
+      {"concept_id": "matter_definition", "relationship": "foundation_of"},
+      {"concept_id": "atom_definition", "relationship": "explains"},
+      {"concept_id": "molecule_definition", "relationship": "explains"}
+    ],
+    "difficulty_level": 1,
+    "blooms_taxonomy": "Understand",
+    "typical_exam_weightage": "low",
+    "learning_objectives": [
+      "Define chemistry and state its scope.",
+      "Identify the role of chemistry in everyday phenomena."
+    ],
+    "importance_level": "core",
+    "source_pages": [1],
+    "parent_concept_id": null
+  },
+  {
+    "concept_id": "historical_alchemy",
+    "title": "Alchemy and Iatrochemistry",
+    "definition": "Alchemy and iatrochemistry were early forms of chemistry that developed between 1300–1600 CE, combining mysticism with practical chemical techniques.",
+    "core_explanation": "Early chemistry emerged from the search for the Philosopher's Stone (to turn base metals into gold) and the Elixir of Life (for immortality). Alchemical traditions in China, India, and Arab cultures laid the groundwork for modern chemistry, which crystallised in 18th‑century Europe.",
+    "key_points": [
+      "Alchemy aimed at metal transmutation and immortality.",
+      "Iatrochemistry focused on medicinal preparations.",
+      "Modern chemistry evolved from these empirical traditions."
+    ],
+    "examples": [],
+    "formulas": [],
+    "properties": [],
+    "applications": ["Historical context for the evolution of scientific chemistry."],
+    "common_mistakes": [
+      {
+        "mistake": "Believing alchemists were unscientific; many chemical processes (distillation, metallurgy) originated in alchemy.",
+        "correction": "Alchemy contributed practical techniques and apparatus, but lacked the theoretical framework of modern chemistry.",
+        "frequency": "low"
+      }
+    ],
+    "prerequisites": [],
+    "related_concepts": [
+      {"concept_id": "chemistry_definition", "relationship": "precursor_of"},
+      {"concept_id": "ancient_indian_chemistry", "relationship": "parallel_tradition"}
+    ],
+    "difficulty_level": 1,
+    "blooms_taxonomy": "Remember",
+    "typical_exam_weightage": "none",
+    "learning_objectives": [],
+    "importance_level": "low",
+    "source_pages": [1, 2],
+    "parent_concept_id": null
+  },
+  {
+    "concept_id": "ancient_indian_chemistry",
+    "title": "Ancient Indian Chemistry (Rasayan Shastra)",
+    "definition": "Ancient Indian chemistry, known as Rasayan Shastra, encompassed metallurgy, medicine, glass‑making, dyeing, and other applied chemical arts.",
+    "core_explanation": "India had a rich tradition of chemical knowledge long before the modern era. Techniques for extracting copper, iron, zinc, making soap, gunpowder, dyes, and bhasmas (metal nanoparticles) were documented in texts like Arthashastra, Charaka Samhita, and Rasratnakar. The concept of atoms (Paramanu) was proposed by Acharya Kanda around 600 BCE.",
+    "key_points": [
+      "Baked bricks and glazed pottery at Mohenjodaro, Harappa (earliest chemical processes).",
+      "Copper metallurgy and hardening with tin/arsenic.",
+      "Glass, faience and coloured glazes using metal oxides.",
+      "Soap from mustard oil and alkalies (Chakrapani).",
+      "Gunpowder mixture described in Rasopanishada.",
+      "Nanotechnology concept in Charaka Samhita (bhasmas).",
+      "Atomic theory (Paramanu) by Acharya Kanda, 600 BCE."
+    ],
+    "examples": ["Iron pillar of Delhi (corrosion resistance)", "Ajanta‑Ellora frescoes (durable paints)"],
+    "formulas": [],
+    "properties": [],
+    "applications": ["Historical depth of chemical knowledge in India.", "Inspiration for modern metallurgy and pharmaceuticals."],
+    "common_mistakes": [
+      {
+        "mistake": "Assuming ancient Indians lacked structured chemical science.",
+        "correction": "They had systematic knowledge of metallurgy, dyes, medicines, and even nanotechnology concepts.",
+        "frequency": "low"
+      }
+    ],
+    "prerequisites": [],
+    "related_concepts": [
+      {"concept_id": "historical_alchemy", "relationship": "parallel_tradition"},
+      {"concept_id": "dalton_atomic_theory", "relationship": "earlier_formulation"}
+    ],
+    "difficulty_level": 1,
+    "blooms_taxonomy": "Remember",
+    "typical_exam_weightage": "none",
+    "learning_objectives": [],
+    "importance_level": "low",
+    "source_pages": [1, 2, 3],
+    "parent_concept_id": null
+  },
+  {
+    "concept_id": "importance_of_chemistry",
+    "title": "Role and Importance of Chemistry",
+    "definition": "Chemistry plays a central role in science and daily life, contributing to food, healthcare, industry, new materials, environmental protection and the national economy.",
+    "core_explanation": "Principles of chemistry are applied in manufacturing fertilisers, polymers, drugs, metals, alloys, soaps, detergents, electronics materials (superconducting ceramics, optical fibres) and in solving environmental issues like ozone depletion. It underpins large‑scale industries and creates employment.",
+    "key_points": [
+      "Enables large‑scale production of fertilisers, improved seeds, pesticides.",
+      "Synthesises life‑saving drugs (cisplatin, taxol, AZT).",
+      "Produces advanced materials (conducting polymers, optical fibres).",
+      "Addresses environmental challenges (CFC substitutes, greenhouse gas management).",
+      "Drives national economy and employment generation."
+    ],
+    "examples": ["Urea fertilisers", "Cisplatin for cancer therapy", "Superconducting ceramics"],
+    "formulas": [],
+    "properties": [],
+    "applications": ["Agriculture", "Pharmaceuticals", "Materials science", "Environmental science"],
+    "common_mistakes": [
+      {
+        "mistake": "Underestimating chemistry’s role in everyday products like food and clothing.",
+        "correction": "Chemistry is involved in food preservation, synthetic fibres, and even the production of clean water.",
+        "frequency": "medium"
+      }
+    ],
+    "prerequisites": ["chemistry_definition"],
+    "related_concepts": [
+      {"concept_id": "chemistry_definition", "relationship": "extends"},
+      {"concept_id": "matter_definition", "relationship": "applied_to"}
+    ],
+    "difficulty_level": 1,
+    "blooms_taxonomy": "Understand",
+    "typical_exam_weightage": "medium",
+    "learning_objectives": [
+      "Explain the multidisciplinary role of chemistry.",
+      "List applications of chemistry in daily life and industry."
+    ],
+    "importance_level": "high",
+    "source_pages": [4],
+    "parent_concept_id": null
+  },
+  {
+    "concept_id": "matter_definition",
+    "title": "Matter",
+    "definition": "Anything that has mass and occupies space is called matter.",
+    "core_explanation": "Matter is the physical substance of the universe. All objects around us — books, water, air, living beings — are made of matter. Matter can exist in different physical states and be classified into mixtures and pure substances.",
+    "key_points": [
+      "Matter has mass and volume.",
+      "Exists as solid, liquid or gas.",
+      "Composed of atoms and molecules."
+    ],
+    "examples": ["Air", "Water", "Book", "Pen", "All living beings"],
+    "formulas": [],
+    "properties": [],
+    "applications": ["Foundation for all chemical and physical studies."],
+    "common_mistakes": [
+      {
+        "mistake": "Thinking energy or light is matter.",
+        "correction": "Matter must have mass and occupy space; light and sound are forms of energy, not matter.",
+        "frequency": "high"
+      },
+      {
+        "mistake": "Confusing weight with mass.",
+        "correction": "Mass is the amount of matter; weight is the force of gravity on that mass.",
+        "frequency": "high"
+      }
+    ],
+    "prerequisites": [],
+    "related_concepts": [
+      {"concept_id": "states_of_matter", "relationship": "has_state"},
+      {"concept_id": "classification_of_matter", "relationship": "can_be_classified_as"},
+      {"concept_id": "atom_definition", "relationship": "composed_of"}
+    ],
+    "difficulty_level": 1,
+    "blooms_taxonomy": "Remember",
+    "typical_exam_weightage": "medium",
+    "learning_objectives": [
+      "Define matter and give examples.",
+      "Distinguish matter from non‑matter phenomena."
+    ],
+    "importance_level": "core",
+    "source_pages": [4],
+    "parent_concept_id": null
+  },
+  {
+    "concept_id": "states_of_matter",
+    "title": "States of Matter",
+    "definition": "Matter can exist in three physical states — solid, liquid and gas — which differ in the arrangement and freedom of particles.",
+    "core_explanation": "Particles in solids are closely packed in an orderly arrangement with very little freedom to move. In liquids, particles are close but can slide past each other. In gases, particles are far apart and move rapidly. These states are interconvertible by changing temperature and pressure.",
+    "key_points": [
+      "Three states: solid, liquid, gas.",
+      "Solids: definite shape and volume.",
+      "Liquids: definite volume, no definite shape.",
+      "Gases: no definite shape or volume.",
+      "Interconversion: solid ⇌ liquid ⇌ gas via heating/cooling."
+    ],
+    "examples": ["Ice (solid), water (liquid), steam (gas)"],
+    "formulas": [],
+    "properties": [],
+    "applications": ["Understanding phase changes in daily life and industry."],
+    "common_mistakes": [
+      {
+        "mistake": "Assuming gases have no mass.",
+        "correction": "Gases have mass; e.g., a filled LPG cylinder is heavier than an empty one.",
+        "frequency": "high"
+      }
+    ],
+    "prerequisites": ["matter_definition"],
+    "related_concepts": [
+      {"concept_id": "solid_state", "relationship": "includes"},
+      {"concept_id": "liquid_state", "relationship": "includes"},
+      {"concept_id": "gaseous_state", "relationship": "includes"},
+      {"concept_id": "interconversion_of_states", "relationship": "feature_of"}
+    ],
+    "difficulty_level": 1,
+    "blooms_taxonomy": "Understand",
+    "typical_exam_weightage": "high",
+    "learning_objectives": [
+      "List three states of matter.",
+      "Compare arrangement and movement of particles in solids, liquids, and gases."
+    ],
+    "importance_level": "core",
+    "source_pages": [4, 5],
+    "parent_concept_id": null
+  },
+  {
+    "concept_id": "solid_state",
+    "title": "Solid State",
+    "definition": "Solids have a definite shape and definite volume; their particles are closely packed in an orderly arrangement with only vibrational movement.",
+    "core_explanation": "The strong interparticle forces in solids keep particles in fixed positions, giving rigidity and a fixed shape that does not depend on the container.",
+    "key_points": [
+      "Definite volume and definite shape.",
+      "Particles arranged in a fixed, orderly pattern.",
+      "Very little freedom of movement — only vibration."
+    ],
+    "examples": ["Ice", "Iron nail", "Wooden block"],
+    "formulas": [],
+    "properties": ["Rigidity", "Incompressibility", "High density relative to gases"],
+    "applications": ["Structural materials", "Crystalline studies"],
+    "common_mistakes": [
+      {
+        "mistake": "Thinking all solids are hard — e.g., sponge is solid but compressible due to air pockets.",
+        "correction": "Compressibility in sponge is due to trapped air, not the solid material itself.",
+        "frequency": "medium"
+      }
+    ],
+    "prerequisites": ["states_of_matter"],
+    "related_concepts": [
+      {"concept_id": "states_of_matter", "relationship": "is_a"},
+      {"concept_id": "liquid_state", "relationship": "contrast_with"},
+      {"concept_id": "gaseous_state", "relationship": "contrast_with"}
+    ],
+    "difficulty_level": 1,
+    "blooms_taxonomy": "Understand",
+    "typical_exam_weightage": "medium",
+    "learning_objectives": [
+      "Describe properties of solids.",
+      "Explain the particle arrangement in solids."
+    ],
+    "importance_level": "core",
+    "source_pages": [4, 5],
+    "parent_concept_id": "states_of_matter"
+  },
+  {
+    "concept_id": "liquid_state",
+    "title": "Liquid State",
+    "definition": "Liquids have a definite volume but no definite shape; they take the shape of the container.",
+    "core_explanation": "Particles in liquids are close together but have enough kinetic energy to move past one another. This gives liquids fluidity while keeping volume nearly constant under moderate pressure.",
+    "key_points": [
+      "Definite volume, indefinite shape.",
+      "Particles are close but can flow.",
+      "Moderate interparticle forces."
+    ],
+    "examples": ["Water", "Milk", "Oil"],
+    "formulas": [],
+    "properties": ["Fluidity", "Incompressibility", "Take shape of container"],
+    "applications": ["Hydraulic systems", "Solvents in reactions"],
+    "common_mistakes": [
+      {
+        "mistake": "Confusing volume constancy with shape constancy.",
+        "correction": "Liquids maintain constant volume but not shape; they adapt to the container.",
+        "frequency": "medium"
+      }
+    ],
+    "prerequisites": ["states_of_matter"],
+    "related_concepts": [
+      {"concept_id": "states_of_matter", "relationship": "is_a"},
+      {"concept_id": "solid_state", "relationship": "contrast_with"},
+      {"concept_id": "gaseous_state", "relationship": "contrast_with"}
+    ],
+    "difficulty_level": 1,
+    "blooms_taxonomy": "Understand",
+    "typical_exam_weightage": "medium",
+    "learning_objectives": [
+      "Describe properties of liquids.",
+      "Explain particle behaviour in liquids."
+    ],
+    "importance_level": "core",
+    "source_pages": [4, 5],
+    "parent_concept_id": "states_of_matter"
+  },
+  {
+    "concept_id": "gaseous_state",
+    "title": "Gaseous State",
+    "definition": "Gases have neither definite shape nor definite volume; they expand to fill the entire container.",
+    "core_explanation": "In gases, particles are far apart with weak interparticle forces and move randomly at high speeds. This makes gases highly compressible and able to mix completely with other gases.",
+    "key_points": [
+      "No definite volume, no definite shape.",
+      "Particles are far apart and move fast.",
+      "Highly compressible, low density."
+    ],
+    "examples": ["Air", "Oxygen", "Carbon dioxide"],
+    "formulas": [],
+    "properties": ["Compressibility", "Diffusibility", "Exert pressure"],
+    "applications": ["Pneumatic tools", "Breathing", "Gas cylinders"],
+    "common_mistakes": [
+      {
+        "mistake": "Thinking gases have no mass because they are invisible.",
+        "correction": "Gases have mass; e.g., an inflated balloon weighs more than a deflated one.",
+        "frequency": "high"
+      }
+    ],
+    "prerequisites": ["states_of_matter"],
+    "related_concepts": [
+      {"concept_id": "states_of_matter", "relationship": "is_a"},
+      {"concept_id": "solid_state", "relationship": "contrast_with"},
+      {"concept_id": "liquid_state", "relationship": "contrast_with"}
+    ],
+    "difficulty_level": 1,
+    "blooms_taxonomy": "Understand",
+    "typical_exam_weightage": "medium",
+    "learning_objectives": [
+      "Describe properties of gases.",
+      "Explain why gases are compressible and fill containers."
+    ],
+    "importance_level": "core",
+    "source_pages": [4, 5],
+    "parent_concept_id": "states_of_matter"
+  },
+  {
+    "concept_id": "interconversion_of_states",
+    "title": "Interconversion of States of Matter",
+    "definition": "The three states of matter are interconvertible by changing temperature and/or pressure: solid ⇌ liquid ⇌ gas.",
+    "core_explanation": "Heating a solid melts it to a liquid, and further heating vaporises the liquid to a gas. Cooling reverses the process (condensation, freezing). Pressure also influences the state; e.g., increasing pressure can condense a gas.",
+    "key_points": [
+      "Solid → Liquid (melting), Liquid → Gas (vaporisation).",
+      "Gas → Liquid (condensation), Liquid → Solid (freezing).",
+      "Temperature and pressure changes drive interconversion."
+    ],
+    "examples": ["Ice → Water → Steam on heating.", "Water vapour → liquid water on a cold surface."],
+    "formulas": [],
+    "properties": [],
+    "applications": ["Distillation", "Refrigeration", "Steam engines"],
+    "common_mistakes": [
+      {
+        "mistake": "Ignoring the role of pressure alongside temperature.",
+        "correction": "Both temperature and pressure determine the state; e.g., water boils at a lower temperature at high altitude.",
+        "frequency": "medium"
+      }
+    ],
+    "prerequisites": ["states_of_matter"],
+    "related_concepts": [
+      {"concept_id": "solid_state", "relationship": "involves"},
+      {"concept_id": "liquid_state", "relationship": "involves"},
+      {"concept_id": "gaseous_state", "relationship": "involves"}
+    ],
+    "difficulty_level": 2,
+    "blooms_taxonomy": "Understand",
+    "typical_exam_weightage": "high",
+    "learning_objectives": [
+      "Explain how heating/cooling changes the state of matter.",
+      "Describe the effect of pressure on phase transitions."
+    ],
+    "importance_level": "core",
+    "source_pages": [5],
+    "parent_concept_id": "states_of_matter"
+  },
+  {
+    "concept_id": "classification_of_matter",
+    "title": "Classification of Matter (Macroscopic Level)",
+    "definition": "At the macroscopic level, matter is classified into mixtures and pure substances. Pure substances can be elements or compounds; mixtures can be homogeneous or heterogeneous.",
+    "core_explanation": "A pure substance contains only one type of constituent particle with a fixed chemical nature. A mixture contains two or more pure substances in any proportion, and its composition can vary. Mixtures can be physically separated; pure substances cannot.",
+    "key_points": [
+      "Matter → Mixture / Pure substance.",
+      "Pure substance → Element / Compound.",
+      "Mixture → Homogeneous / Heterogeneous.",
+      "Components of a mixture can be separated by physical methods."
+    ],
+    "examples": ["Pure substance: distilled water, gold.", "Mixture: air, sugar solution, sand and salt mix."],
+    "formulas": [],
+    "properties": [],
+    "applications": ["Separation techniques like filtration, distillation, chromatography."],
+    "common_mistakes": [
+      {
+        "mistake": "Thinking all 'pure' looking materials are pure substances.",
+        "correction": "Tap water and milk are mixtures, not pure substances. Pure substance has fixed composition.",
+        "frequency": "high"
+      },
+      {
+        "mistake": "Assuming a homogeneous mixture is a compound.",
+                "correction": "A compound has a fixed chemical formula and properties; mixtures do not.",
+        "frequency": "high"
+      }
+    ],
+    "prerequisites": ["matter_definition", "states_of_matter"],
+    "related_concepts": [
+      {"concept_id": "matter_definition", "relationship": "classified_as"},
+      {"concept_id": "pure_substances", "relationship": "includes"},
+      {"concept_id": "mixtures", "relationship": "includes"}
+    ],
+    "difficulty_level": 2,
+    "blooms_taxonomy": "Understand",
+    "typical_exam_weightage": "high",
+    "learning_objectives": [
+      "Classify matter into mixtures and pure substances.",
+      "Distinguish between homogeneous and heterogeneous mixtures."
+    ],
+    "importance_level": "core",
+    "source_pages": [5, 6],
+    "parent_concept_id": "matter_definition"
+  }
+]
