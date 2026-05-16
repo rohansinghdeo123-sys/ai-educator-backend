@@ -11,10 +11,11 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import json
 import logging
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Generator
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -44,23 +45,25 @@ from schemas import (
 from Logic.agent_event_bus import event_bus
 from Logic.agent_router import route_to_agent
 from Logic.analytics_engine import get_user_analytics, update_topic_performance
-from Logic.agents.coach_agent import get_or_create_coach, run_daily_learning_cycle, coach_agent
+from Logic.agents.coach_agent import (
+    get_or_create_coach,
+    run_daily_learning_cycle,
+    coach_agent,
+    coach_agent_stream,          # <-- NEW
+)
 from Logic.section_doubt import (
     generate_structured_mcqs,
     generate_structured_probable_questions,
     reset_conversation,
     section_doubt,
 )
-from Logic.knowledge_graph import knowledge_graph   # <-- NEW import
+from Logic.knowledge_graph import knowledge_graph
 
 # ── Groq client for casual CEO chats ──
 import groq
 
 # ── Generic LLM chat (Groq LLaMA 3.1 8B) ─────────
 def generic_llm_chat(system_prompt: str, user_message: str, agent_id: str = "unknown") -> str:
-    """
-    Casual chat via Groq's LLaMA 3.1 8B (or any model you set).
-    """
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         logger.error("GROQ_API_KEY not set – cannot use casual chat.")
@@ -686,6 +689,40 @@ def coach_chat(payload: CoachChatRequest, db: Session = Depends(get_db)):
     return result
 
 
+# ─── STREAMING ENDPOINT ────────────────────────────────────────────────────
+@app.post("/coach/chat/stream")
+async def coach_chat_stream(payload: CoachChatRequest, db: Session = Depends(get_db)):
+    """
+    Stream the coach's reply via Server‑Sent Events (SSE).
+    The frontend will receive tokens one by one and display them
+    as they arrive, creating a real‑time typing effect.
+    """
+    class CoachRequest:
+        def __init__(self):
+            self.user_id = payload.user_id
+            self.question = payload.message
+            self.section_id = payload.topic or payload.subject or "general"
+            self.session_id = payload.session_id or f"coach-{payload.user_id}"
+            self.mode = "coach"
+            self.intent = payload.intent
+            self.difficulty = "medium"
+
+    def event_stream():
+        for token in coach_agent_stream(CoachRequest(), db=db):
+            # SSE format: data: <token>\n\n
+            yield f"data: {token}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.post("/coach/daily-learning/{user_id}", response_model=CoachDailySignalResponse)
 def coach_daily_learning(user_id: str, db: Session = Depends(get_db)):
     signal = run_daily_learning_cycle(db=db, user_id=user_id)
@@ -715,7 +752,7 @@ def health_check():
         "coach_api": True,
         "firebase_admin_ready": FIREBASE_ADMIN_READY,
         "firebase_admin_error": FIREBASE_ADMIN_ERROR,
-        "knowledge_graph_chapters": knowledge_graph.list_chapters(),  # <-- NEW
+        "knowledge_graph_chapters": knowledge_graph.list_chapters(),
     }
 
 
