@@ -4,10 +4,11 @@
 REVISION AGENT — Smart Summary, Deep Explain, Key Points (with Admin Telemetry)
 
 This agent handles all revision-related tasks with the agentic cycle:
-1. RETRIEVE: Search knowledge base for the topic
-2. GENERATE: Create mode-specific content using specialized prompts
-3. FORMAT: Apply chemistry formatting
-4. VALIDATE: Check output quality
+1. RETRIEVE: Search knowledge base AND knowledge graph for the topic
+2. ENRICH: Combine markdown and structured concept data
+3. GENERATE: Create mode-specific content using specialised prompts
+4. FORMAT: Apply chemistry formatting
+5. VALIDATE: Check output quality
 
 Every step emits events to the Agent Event Bus for real-time admin monitoring.
 """
@@ -25,6 +26,7 @@ from Logic.tools.knowledge_search import search_knowledge_base
 from Logic.tools.chemistry_formatter import format_chemistry_output
 from Logic.tools.answer_evaluator import evaluate_answer_quality
 from Logic.agent_event_bus import event_bus
+from Logic.knowledge_graph import knowledge_graph   # <-- NEW
 
 logger = logging.getLogger("ai_educator.agents.revision")
 
@@ -42,7 +44,7 @@ REVISION_PROMPTS = {
 
 def revision_agent(request, revision_type: str = "summary") -> dict:
     """
-    Agentic Revision: Retrieve → Generate → Format → Validate
+    Agentic Revision: Retrieve → Enrich → Generate → Format → Validate
     """
     start_time = time.time()
 
@@ -64,13 +66,13 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
         "message": f"Starting {revision_type} generation for {section_id}",
     })
 
-    # ===== STEP 1: RETRIEVE =====
+    # ===== STEP 1: RETRIEVE from markdown =====
     event_bus.emit("revision", "tool_call", {
-        "step": "retrieve",
+        "step": "retrieve_markdown",
         "step_num": 1,
-        "total_steps": 4,
+        "total_steps": 5,
         "tool": "knowledge_search",
-        "message": f"Searching knowledge base for {section_id}...",
+        "message": f"Searching markdown knowledge base for {section_id}...",
     })
 
     search_result = search_knowledge_base(
@@ -82,7 +84,7 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
 
     if search_result.get("error"):
         event_bus.emit("revision", "error", {
-            "step": "retrieve",
+            "step": "retrieve_markdown",
             "message": f"Knowledge base error: {search_result['error']}",
         }, severity="error")
         return {
@@ -94,25 +96,88 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
     context = search_result["context"]
 
     event_bus.emit("revision", "step", {
-        "step": "retrieve_complete",
+        "step": "retrieve_markdown_complete",
         "step_num": 1,
-        "total_steps": 4,
-        "message": f"Retrieved {search_result['paragraphs_found']} paragraphs",
+        "total_steps": 5,
+        "message": f"Retrieved {search_result['paragraphs_found']} paragraphs from markdown",
         "paragraphs": search_result["paragraphs_found"],
     })
 
-    # ===== STEP 2: GENERATE =====
+    # ===== STEP 2: ENRICH with knowledge graph =====
+    event_bus.emit("revision", "tool_call", {
+        "step": "retrieve_graph",
+        "step_num": 2,
+        "total_steps": 5,
+        "tool": "knowledge_graph",
+        "message": f"Searching knowledge graph for {section_id}...",
+    })
+
+    concept_data = ""
+    concepts_found = []
+    if knowledge_graph.concepts:
+        # Look for an exact concept_id match or keyword search
+        exact = knowledge_graph.get_concept(section_id)
+        if exact:
+            concepts_found = [exact]
+        else:
+            keywords = [w.strip().lower() for w in question.replace("?", "").replace(".", "").split() if len(w) > 3]
+            search_kw = keywords[0] if keywords else section_id
+            concepts_found = knowledge_graph.search_by_keyword(search_kw, limit=5)
+
+        if concepts_found:
+            blocks = []
+            for c in concepts_found:
+                block = f"--- CONCEPT: {c['title']} (ID: {c['concept_id']}) ---\n"
+                block += f"Definition: {c.get('definition', '')}\n"
+                block += f"Explanation: {c.get('core_explanation', '')}\n"
+                if c.get("key_points"):
+                    block += "Key Points:\n  " + "\n  ".join(c["key_points"]) + "\n"
+                if c.get("formulas"):
+                    block += "Formulas:\n  " + "\n  ".join(c["formulas"]) + "\n"
+                if c.get("examples"):
+                    block += "Examples:\n  " + "\n  ".join(c["examples"]) + "\n"
+                if c.get("common_mistakes"):
+                    mistakes = "\n  ".join([f"Mistake: {m['mistake']} -> Correction: {m['correction']}" for m in c["common_mistakes"]])
+                    block += "Common Mistakes:\n  " + mistakes + "\n"
+                blocks.append(block)
+            concept_data = "\n\n".join(blocks)
+
+    event_bus.emit("revision", "step", {
+        "step": "retrieve_graph_complete",
+        "step_num": 2,
+        "total_steps": 5,
+        "message": f"Found {len(concepts_found)} concept(s) in knowledge graph",
+        "concepts_found": len(concepts_found),
+    })
+
+    # Combine markdown context with structured data
+    enriched_context = context
+    if concept_data:
+        enriched_context += "\n\n--- STRUCTURED KNOWLEDGE (from official curriculum) ---\n" + concept_data
+
+    # Student-friendly instruction prefix
+    student_instructions = (
+        "You are a friendly, patient AI revision assistant for school students.\n"
+        "Use simple language and everyday analogies to explain concepts.\n"
+        "When you see 'Common Mistakes' in the context, mention them so the student can avoid them.\n"
+        "Highlight the most important points clearly.\n"
+        "Encourage the student and make them feel confident.\n"
+        "If the context contains both markdown text and structured knowledge, combine them to create the best revision material."
+    )
+
+    # ===== STEP 3: GENERATE =====
     event_bus.emit("revision", "tool_call", {
         "step": "generate",
-        "step_num": 2,
-        "total_steps": 4,
+        "step_num": 3,
+        "total_steps": 5,
         "tool": "groq_llm",
         "message": f"Generating {revision_type} via {MODEL_NAME}...",
         "model": MODEL_NAME,
         "temperature": config["temp"],
     })
 
-    system_prompt = config["prompt"].format(context=context)
+    # Insert the enriched context into the prompt template
+    system_prompt = student_instructions + "\n\n" + config["prompt"].format(context=enriched_context)
     messages = [{"role": "user", "content": system_prompt}]
 
     try:
@@ -142,22 +207,22 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
             "metadata": {"agent": "revision", "error": str(e)},
         }
 
-    # ===== STEP 3: FORMAT =====
+    # ===== STEP 4: FORMAT =====
     event_bus.emit("revision", "tool_call", {
         "step": "format",
-        "step_num": 3,
-        "total_steps": 4,
+        "step_num": 4,
+        "total_steps": 5,
         "tool": "chemistry_formatter",
         "message": "Applying chemistry formatting...",
     })
 
     formatted_answer = format_chemistry_output(raw_answer)
 
-    # ===== STEP 4: VALIDATE =====
+    # ===== STEP 5: VALIDATE =====
     event_bus.emit("revision", "tool_call", {
         "step": "validate",
-        "step_num": 4,
-        "total_steps": 4,
+        "step_num": 5,
+        "total_steps": 5,
         "tool": "answer_evaluator",
         "message": "Validating answer quality...",
     })
@@ -169,10 +234,10 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
         context=context,
     )
 
-    if not quality["passed"]:
+    if not quality["passed"] and not concepts_found:
         event_bus.emit("revision", "step", {
             "step": "retry",
-            "message": f"Quality failed (score={quality['score']}). Retrying with more context...",
+            "message": f"Quality failed (score={quality['score']}). Retrying with more markdown context...",
         }, severity="warning")
 
         retry_search = search_knowledge_base(
@@ -182,7 +247,10 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
             max_chars=5000,
         )
         if retry_search["context"]:
-            retry_prompt = config["prompt"].format(context=retry_search["context"])
+            retry_context = retry_search["context"]
+            if concept_data:
+                retry_context += "\n\n--- STRUCTURED KNOWLEDGE ---\n" + concept_data
+            retry_prompt = student_instructions + "\n\n" + config["prompt"].format(context=retry_context)
             try:
                 retry_response = groq_client.chat.completions.create(
                     model=MODEL_NAME,
@@ -224,6 +292,7 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
             "quality_score": quality["score"],
             "quality_passed": quality["passed"],
             "paragraphs_retrieved": search_result["paragraphs_found"],
+            "concepts_from_graph": len(concepts_found),
             "latency_ms": latency_ms,
         },
     }

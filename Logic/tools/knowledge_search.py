@@ -5,6 +5,8 @@ import re
 import logging
 from typing import List, Tuple
 
+from Logic.knowledge_graph import knowledge_graph  # <-- NEW
+
 logger = logging.getLogger("ai_educator.tools.knowledge_search")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -92,6 +94,41 @@ def _score_paragraph(paragraph: str, keywords: List[str]) -> float:
     return freq_score + (density_score * 10) + heading_bonus + formula_bonus
 
 
+def _build_concept_context(concept: dict) -> str:
+    """Build a text block from a single knowledge graph concept."""
+    lines = []
+    title = concept.get("title", "")
+    if title:
+        lines.append(f"# {title}")
+    definition = concept.get("definition")
+    if definition:
+        lines.append(f"\n**Definition:** {definition}")
+    core = concept.get("core_explanation")
+    if core:
+        lines.append(f"\n**Explanation:** {core}")
+    key_points = concept.get("key_points", [])
+    if key_points:
+        lines.append("\n**Key Points:**")
+        for point in key_points:
+            lines.append(f"- {point}")
+    formulas = concept.get("formulas", [])
+    if formulas:
+        lines.append("\n**Formulas:**")
+        for formula in formulas:
+            lines.append(f"- {formula}")
+    examples = concept.get("examples", [])
+    if examples:
+        lines.append("\n**Examples:**")
+        for example in examples:
+            lines.append(f"- {example}")
+    common_mistakes = concept.get("common_mistakes", [])
+    if common_mistakes:
+        lines.append("\n**Common Mistakes:**")
+        for mistake in common_mistakes:
+            lines.append(f"- {mistake.get('mistake','')} → Correction: {mistake.get('correction','')}")
+    return "\n".join(lines)
+
+
 def search_knowledge_base(
     section_id: str,
     question: str,
@@ -101,102 +138,120 @@ def search_knowledge_base(
     """
     TOOL: Search the knowledge base for relevant content.
 
-    This is the primary retrieval tool for all agents.
-    It returns the most relevant paragraphs from the section file
-    along with metadata about the search.
+    If the section_id matches a markdown file, those paragraphs are used.
+    Otherwise, the Knowledge Graph (JSON concepts) is queried and the
+    concept data is returned as the context.
 
     Returns:
         dict with keys:
         - "context": str — The retrieved text
         - "section_id": str — Which section was searched
-        - "paragraphs_found": int — How many relevant paragraphs
+        - "paragraphs_found": int — How many relevant paragraphs (or 1 for a graph concept)
         - "keywords_used": list — What keywords were searched
         - "basics_context": str — Supplementary basics text
     """
     section_id = section_id.strip().lower()
 
-    if section_id not in SECTION_FILE_MAP:
-        return {
-            "context": "",
-            "section_id": section_id,
-            "paragraphs_found": 0,
-            "keywords_used": [],
-            "basics_context": "",
-            "error": f"Section '{section_id}' not found.",
-        }
+    # ── Step 1: Try markdown file map ──────────────────────────────────
+    if section_id in SECTION_FILE_MAP:
+        try:
+            with open(SECTION_FILE_MAP[section_id], "r", encoding="utf-8") as f:
+                section_text = f.read()
+        except FileNotFoundError:
+            # Fall through to graph fallback
+            section_text = ""
 
-    try:
-        with open(SECTION_FILE_MAP[section_id], "r", encoding="utf-8") as f:
-            section_text = f.read()
-    except FileNotFoundError:
-        return {
-            "context": "",
-            "section_id": section_id,
-            "paragraphs_found": 0,
-            "keywords_used": [],
-            "basics_context": "",
-            "error": "Section file not found.",
-        }
+        if section_text:
+            # Load basics
+            basics_text = ""
+            try:
+                with open(BASICS_PATH, "r", encoding="utf-8") as f:
+                    basics_text = f.read()[:800]
+            except FileNotFoundError:
+                pass
 
-    # Load basics
-    basics_text = ""
-    try:
-        with open(BASICS_PATH, "r", encoding="utf-8") as f:
-            basics_text = f.read()[:800]
-    except FileNotFoundError:
-        pass
+            # If section is small enough, return all of it
+            if len(section_text) <= max_chars:
+                return {
+                    "context": section_text,
+                    "section_id": section_id,
+                    "paragraphs_found": len(section_text.split("\n\n")),
+                    "keywords_used": [],
+                    "basics_context": basics_text,
+                    "source": "markdown",
+                }
 
-    # If section is small enough, return all of it
-    if len(section_text) <= max_chars:
-        return {
-            "context": section_text,
-            "section_id": section_id,
-            "paragraphs_found": len(section_text.split("\n\n")),
-            "keywords_used": [],
-            "basics_context": basics_text,
-        }
+            # Expand query with synonyms
+            keywords = _expand_query(question)
 
-    # Expand query with synonyms
-    keywords = _expand_query(question)
+            # Split into paragraphs and score
+            paragraphs = [p.strip() for p in section_text.split("\n\n") if p.strip()]
+            scored: List[Tuple[float, str]] = []
 
-    # Split into paragraphs and score
-    paragraphs = [p.strip() for p in section_text.split("\n\n") if p.strip()]
-    scored: List[Tuple[float, str]] = []
+            for para in paragraphs:
+                score = _score_paragraph(para, keywords)
+                scored.append((score, para))
 
-    for para in paragraphs:
-        score = _score_paragraph(para, keywords)
-        scored.append((score, para))
+            scored.sort(key=lambda x: x[0], reverse=True)
 
-    # Sort by score (highest first)
-    scored.sort(key=lambda x: x[0], reverse=True)
+            selected = []
+            total_len = 0
 
-    # Select top paragraphs within char limit
-    selected = []
-    total_len = 0
+            for score, para in scored[:max_paragraphs * 2]:
+                if score <= 0:
+                    continue
+                if total_len + len(para) > max_chars:
+                    continue
+                selected.append(para)
+                total_len += len(para)
 
-    for score, para in scored[:max_paragraphs * 2]:  # Consider more, pick best
-        if score <= 0:
-            continue
-        if total_len + len(para) > max_chars:
-            continue
-        selected.append(para)
-        total_len += len(para)
+            if not selected:
+                fallback = paragraphs[:3]
+                return {
+                    "context": "\n\n".join(fallback),
+                    "section_id": section_id,
+                    "paragraphs_found": len(fallback),
+                    "keywords_used": keywords,
+                    "basics_context": basics_text,
+                    "source": "markdown",
+                }
 
-    # If nothing matched, return the first few paragraphs as fallback
-    if not selected:
-        fallback = paragraphs[:3]
-        return {
-            "context": "\n\n".join(fallback),
-            "section_id": section_id,
-            "paragraphs_found": len(fallback),
-            "keywords_used": keywords,
-            "basics_context": basics_text,
-        }
+            return {
+                "context": "\n\n".join(selected),
+                "section_id": section_id,
+                "paragraphs_found": len(selected),
+                "keywords_used": keywords,
+                "basics_context": basics_text,
+                "source": "markdown",
+            }
 
+    # ── Step 2: Knowledge Graph fallback ──────────────────────────────
+    if knowledge_graph.concepts:
+        # Try exact match with section_id as a concept_id
+        concept = knowledge_graph.get_concept(section_id)
+        if not concept:
+            # Try keyword search
+            concepts = knowledge_graph.search_by_keyword(section_id.replace("_", " "), limit=1)
+            if concepts:
+                concept = concepts[0]
+
+        if concept:
+            context = _build_concept_context(concept)
+            return {
+                "context": context,
+                "section_id": section_id,
+                "paragraphs_found": 1,
+                "keywords_used": [],
+                "basics_context": "",
+                "source": "knowledge_graph",
+            }
+
+    # ── No match at all ──────────────────────────────────────────────
     return {
-        "context": "\n\n".join(selected),
+        "context": "",
         "section_id": section_id,
-        "paragraphs_found": len(selected),
-        "keywords_used": keywords,
-        "basics_context": basics_text,
+        "paragraphs_found": 0,
+        "keywords_used": [],
+        "basics_context": "",
+        "error": f"Section '{section_id}' not found in any knowledge source.",
     }

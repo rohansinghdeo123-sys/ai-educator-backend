@@ -5,6 +5,8 @@ EXAM AGENT - MCQ Generation & Probable Questions
 
 This agent supports both legacy text output and structured exam payloads.
 Structured MCQs are returned in `data.questions` for the frontend.
+Now uses the Knowledge Graph to extract common mistakes as distractors
+and align questions with curriculum learning objectives.
 """
 
 import json
@@ -20,6 +22,7 @@ from Logic.agent_event_bus import event_bus
 from Logic.tools.answer_evaluator import evaluate_answer_quality
 from Logic.tools.chemistry_formatter import format_chemistry_output
 from Logic.tools.knowledge_search import search_knowledge_base
+from Logic.knowledge_graph import knowledge_graph   # <-- NEW
 from prompts.agent_prompts import EXAM_MCQ_PROMPT, EXAM_PROBABLE_PROMPT
 
 logger = logging.getLogger("ai_educator.agents.exam")
@@ -129,12 +132,6 @@ def normalize_structured_mcqs(payload: Optional[Dict[str, Any]], count: int = 5)
 
 
 def parse_text_mcqs(text: str, count: int = 5) -> List[Dict[str, Any]]:
-    """
-    Fallback parser for legacy model output.
-
-    Handles compact text like:
-    Q1. Question? A. Opt B. Opt C. Opt D. Opt Answer: C Explanation: ...
-    """
     if not text:
         return []
 
@@ -219,9 +216,11 @@ def mcqs_to_legacy_text(questions: List[Dict[str, Any]]) -> str:
 
 def build_structured_mcq_prompt(context: str, count: int = 5) -> str:
     return f"""
-You are a senior Class 11 Chemistry exam setter.
+You are a friendly, patient AI exam creator for school students. Create exactly {count} multiple-choice questions from the provided content.
 
-Generate exactly {count} MCQs from the SECTION CONTENT.
+Use simple language and clear phrasing. Make sure the questions test understanding, not just memorisation.
+
+When the content includes 'Common Mistakes', use those typical errors as WRONG options (distractors) to help students learn from mistakes.
 
 Return valid JSON only.
 Do not include markdown.
@@ -240,7 +239,7 @@ JSON shape:
         {{ "key": "D", "text": "Option text" }}
       ],
       "answer": "A",
-      "explanation": "Short feedback explaining the correct answer"
+      "explanation": "Short feedback explaining the correct answer in a friendly tone"
     }}
   ]
 }}
@@ -249,10 +248,9 @@ Rules:
 - Exactly {count} questions.
 - Exactly 4 options per question.
 - One and only one correct answer per question.
-- Options must be plausible.
-- Explanations must be useful feedback after user selection.
+- Where possible, include a common misconception as one of the wrong options.
+- Explanations must be helpful and encouraging.
 - Use Unicode chemical subscripts and superscripts.
-- Use only SECTION CONTENT.
 
 SECTION CONTENT:
 {context}
@@ -261,9 +259,7 @@ SECTION CONTENT:
 
 def build_structured_probable_prompt(context: str) -> str:
     return f"""
-You are a senior Class 11 Chemistry exam paper setter.
-
-Generate probable theory questions from the SECTION CONTENT.
+You are a friendly, helpful AI exam setter for school students. Generate probable theory questions from the provided content.
 
 Return valid JSON only.
 Do not include markdown.
@@ -282,11 +278,10 @@ JSON shape:
 
 Rules:
 - Generate exactly 5 questions.
-- First 3 questions are 3 marks.
-- Last 2 questions are 5 marks.
-- Do not provide answers.
-- Do not provide explanations.
-- Use only SECTION CONTENT.
+- First 3 questions are 3 marks, last 2 are 5 marks.
+- Questions should test deep understanding.
+- Do not provide answers or explanations.
+- Use friendly, clear language.
 
 SECTION CONTENT:
 {context}
@@ -365,15 +360,16 @@ def exam_agent(request, exam_type: str = "mcq") -> dict:
         },
     )
 
+    # ===== STEP 1: RETRIEVE from markdown =====
     event_bus.emit(
         "exam",
         "tool_call",
         {
-            "step": "retrieve",
+            "step": "retrieve_markdown",
             "step_num": 1,
-            "total_steps": 4,
+            "total_steps": 5,
             "tool": "knowledge_search",
-            "message": f"Searching knowledge base for {section_id}...",
+            "message": f"Searching markdown knowledge base for {section_id}...",
         },
     )
 
@@ -389,7 +385,7 @@ def exam_agent(request, exam_type: str = "mcq") -> dict:
             "exam",
             "error",
             {
-                "step": "retrieve",
+                "step": "retrieve_markdown",
                 "message": f"Knowledge base error: {search_result['error']}",
             },
             severity="error",
@@ -407,19 +403,73 @@ def exam_agent(request, exam_type: str = "mcq") -> dict:
         "exam",
         "step",
         {
-            "step": "retrieve_complete",
+            "step": "retrieve_markdown_complete",
             "step_num": 1,
-            "total_steps": 4,
-            "message": f"Retrieved {search_result['paragraphs_found']} paragraphs",
+            "total_steps": 5,
+            "message": f"Retrieved {search_result['paragraphs_found']} paragraphs from markdown",
         },
     )
 
+    # ===== STEP 2: ENRICH with knowledge graph (extract common mistakes for distractors) =====
+    event_bus.emit(
+        "exam",
+        "tool_call",
+        {
+            "step": "retrieve_graph",
+            "step_num": 2,
+            "total_steps": 5,
+            "tool": "knowledge_graph",
+            "message": "Searching knowledge graph for common mistakes and learning objectives...",
+        },
+    )
+
+    concept_data = ""
+    concepts_found = []
+    if knowledge_graph.concepts:
+        exact = knowledge_graph.get_concept(section_id)
+        if exact:
+            concepts_found = [exact]
+        else:
+            keywords = [w.strip().lower() for w in question.replace("?", "").replace(".", "").split() if len(w) > 3]
+            search_kw = keywords[0] if keywords else section_id
+            concepts_found = knowledge_graph.search_by_keyword(search_kw, limit=3)
+
+        if concepts_found:
+            blocks = []
+            for c in concepts_found:
+                block = f"--- CONCEPT: {c['title']} ---\n"
+                if c.get("common_mistakes"):
+                    mistakes = "\n  ".join([f"Mistake: {m['mistake']} (Student thinks: {m['mistake']}) -> Correction: {m['correction']}" for m in c["common_mistakes"]])
+                    block += "Common Mistakes (use these as WRONG options):\n  " + mistakes + "\n"
+                if c.get("learning_objectives"):
+                    block += "Learning Objectives:\n  " + "\n  ".join(c["learning_objectives"]) + "\n"
+                blocks.append(block)
+            concept_data = "\n\n".join(blocks)
+
+    # Combine markdown and graph data
+    enriched_context = context
+    if concept_data:
+        enriched_context += "\n\n--- COMMON MISTAKES & OBJECTIVES (use these for distractors) ---\n" + concept_data
+
+    event_bus.emit(
+        "exam",
+        "step",
+        {
+            "step": "retrieve_graph_complete",
+            "step_num": 2,
+            "total_steps": 5,
+            "message": f"Found {len(concepts_found)} concept(s) with common mistakes",
+            "concepts_found": len(concepts_found),
+        },
+    )
+
+    # ===== STEP 3: BUILD PROMPT =====
     if exam_type == "probable":
-        prompt = build_structured_probable_prompt(context)
+        prompt = build_structured_probable_prompt(enriched_context)
         temperature = 0.25
         max_tokens = 900
     else:
-        prompt = build_structured_mcq_prompt(context, count=5)
+        prompt = build_structured_mcq_prompt(enriched_context, count=5)
         temperature = 0.2
         max_tokens = 1400
 
@@ -428,8 +478,8 @@ def exam_agent(request, exam_type: str = "mcq") -> dict:
         "tool_call",
         {
             "step": "generate",
-            "step_num": 2,
-            "total_steps": 4,
+            "step_num": 3,
+            "total_steps": 5,
             "tool": "groq_llm",
             "message": f"Generating {exam_type} via {MODEL_NAME}...",
             "model": MODEL_NAME,
@@ -490,13 +540,14 @@ def exam_agent(request, exam_type: str = "mcq") -> dict:
             "questions": mcq_questions,
         }
 
+    # ===== STEP 5: VALIDATE =====
     event_bus.emit(
         "exam",
         "tool_call",
         {
             "step": "validate",
-            "step_num": 4,
-            "total_steps": 4,
+            "step_num": 5,
+            "total_steps": 5,
             "tool": "answer_evaluator",
             "message": "Validating exam content quality...",
         },
