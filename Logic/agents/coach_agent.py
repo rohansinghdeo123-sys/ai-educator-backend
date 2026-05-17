@@ -1,14 +1,12 @@
 # Logic/agents/coach_agent.py
 
 """
-PERSONAL AI COACH AGENT – Multi‑agent system with deterministic formatting
+PERSONAL AI COACH AGENT – Multi‑agent system with robust formatting
 
 Agents:
 - Drafter  (LLM) : generates a detailed, friendly first draft
-- Reviewer (LLM) : enriches the draft with curriculum knowledge, outputs structured sections
-- Formatter (code): applies the beautiful emoji‑rich, perfectly spaced layout
-
-No formatting hallucinations – the final step is pure Python.
+- Reviewer (LLM) : enriches the draft with curriculum knowledge
+- Formatter (code): applies beautiful emoji‑rich layout with perfect spacing
 """
 
 import logging
@@ -285,7 +283,7 @@ def _make_rule_based_recommendation(
     return base
 
 
-# ─── Prompt builders (unchanged) ────────────────────────────────────────────
+# ─── Prompt builders ────────────────────────────────────────────────────────
 
 def _build_study_prompt(
     coach: AICoachProfile,
@@ -387,7 +385,7 @@ RECOMMENDATION (rule‑based):
 """.strip()
 
 
-def _build_structured_review_prompt(
+def _build_review_prompt(
     coach: AICoachProfile,
     question: str,
     draft: str,
@@ -413,61 +411,19 @@ def _build_structured_review_prompt(
                 break
 
     return f"""
-You are {coach.coach_name}, a personal AI study coach. Review the draft answer below and produce an enriched version in a structured format.
+You are {coach.coach_name}, a personal AI study coach. Review the draft answer below and produce an enriched version.
 
 TASKS:
 - Correct any factual errors using the provided curriculum data.
 - Add any missing key points, examples, or common mistakes from the curriculum.
 - Keep the tone friendly and encouraging.
 
-FORMAT YOUR ANSWER EXACTLY LIKE THIS (use ### to start each section, followed by the section content):
-
-### Main Title
-A short, catchy title for the answer (e.g., "✨ Matter — Complete Explanation")
-
-### Definition
-- Simple definition in one or two sentences.
-
-### Simple Meaning
-- Point one
-- Point two
-
-### Understanding the Concept
-A short paragraph explaining the concept in daily life.
-
-### Examples
-- Example 1
-- Example 2
-
-### What is NOT included
-- Some things that do not fit the concept
-
-### Key Points
-1. Point one
-2. Point two
-
-### Types / Categories (if applicable)
-Type    Example    Description
-...
-
-### Real-Life Example
-A relatable, everyday example explained in a few sentences.
-
-### Scientific Definition
-The formal definition.
-
-### Exam Answer
-Q. Question?
-Answer: One concise sentence.
-
-### Key Takeaway
-👉 “Memorable sentence to remember.”
-
-IMPORTANT:
-- Use ### at the start of each section heading. The heading must be on its own line immediately after ###.
-- Do NOT use any markdown other than ### for section headings.
-- Use plain text for bullet points (just dashes -).
-- Ensure there is a blank line between each section.
+FORMAT YOUR ANSWER AS FOLLOWS:
+- Use clear section headings like "Definition:", "Simple Meaning:", "Understanding the Concept:", "Examples:", "What is NOT included:", "Key Points:", "Types / Categories (if applicable):", "Real-Life Example:", "Scientific Definition:", "Exam Answer:", "Key Takeaway:".
+- Write the heading on its own line, followed by the content.
+- Use a blank line between each section.
+- Use simple dashes (-) for bullet points.
+- Do NOT use any markdown symbols like asterisks or underscores.
 
 CURRICULUM DATA:
 {graph_context if graph_context else "No specific curriculum data found – keep the draft's content."}
@@ -475,20 +431,19 @@ CURRICULUM DATA:
 DRAFT ANSWER:
 {draft}
 
-Now provide the enriched answer in the structured format above.
+Now provide the enriched answer following the format above.
 """.strip()
 
 
-# ─── Deterministic Formatter (Code Agent) ───────────────────────────────────
+# ─── Deterministic Formatter ────────────────────────────────────────────────
 
-def _apply_deterministic_format(structured_text: str) -> str:
+def _apply_deterministic_format(text: str) -> str:
     """
-    Parse a structured text with ### sections and transform it into
-    the beautiful, perfectly spaced emoji‑rich final answer.
+    Parse plain text with natural headings (e.g. "Definition:") and
+    convert to beautifully spaced, emoji‑rich final answer.
     """
-    # Emoji mapping for common section headings
+    # Emoji map for known headings
     EMOJI_MAP = {
-        "main title": "✨",
         "definition": "📖",
         "simple meaning": "💡",
         "understanding the concept": "🌍",
@@ -502,64 +457,68 @@ def _apply_deterministic_format(structured_text: str) -> str:
         "key takeaway": "🎯",
     }
 
-    sections = re.split(r"\n###\s+", structured_text.strip())
-    output_lines = []
-
-    for section in sections:
-        section = section.strip()
-        if not section:
+    lines = text.split("\n")
+    output = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            output.append("")
             continue
 
-        # Split into heading and body (first line is heading, rest is body)
-        lines = section.split("\n", 1)
-        heading = lines[0].strip()
-        body = lines[1].strip() if len(lines) > 1 else ""
-
-        # Determine emoji
-        heading_lower = heading.lower()
-        emoji = ""
-        for key, e in EMOJI_MAP.items():
-            if key in heading_lower:
-                emoji = e
-                break
-        if not emoji:
-            # Try to pick a relevant emoji based on keywords in the heading
-            if "definition" in heading_lower:
-                emoji = "📖"
-            elif "meaning" in heading_lower:
-                emoji = "💡"
-            elif "example" in heading_lower:
-                emoji = "🔍"
-            elif "point" in heading_lower:
-                emoji = "⭐"
-            elif "type" in heading_lower or "categor" in heading_lower:
-                emoji = "🧊💧🌬"
-            elif "not" in heading_lower:
-                emoji = "❌"
-            elif "exam" in heading_lower:
-                emoji = "✍️"
-            elif "takeaway" in heading_lower or "remember" in heading_lower:
-                emoji = "🎯"
-            else:
-                emoji = "✨"
-
-        # Format the section
-        output_lines.append(f"{emoji} {heading}")
-        output_lines.append("")
-        if body:
-            # Ensure body lines are individually clean
-            body_lines = body.split("\n")
-            for line in body_lines:
-                output_lines.append(line.strip())
-            output_lines.append("")
+        # Check if this line is a heading (ends with ":" and is relatively short)
+        is_heading = stripped.endswith(":") and len(stripped) < 60
+        if is_heading:
+            heading_key = stripped[:-1].strip().lower()
+            emoji = ""
+            for key, e in EMOJI_MAP.items():
+                if key in heading_key:
+                    emoji = e
+                    break
+            if not emoji:
+                # Try partial match
+                if "definition" in heading_key:
+                    emoji = "📖"
+                elif "meaning" in heading_key:
+                    emoji = "💡"
+                elif "example" in heading_key:
+                    emoji = "🔍"
+                elif "point" in heading_key:
+                    emoji = "⭐"
+                elif "type" in heading_key or "categor" in heading_key:
+                    emoji = "🧊💧🌬"
+                elif "not" in heading_key:
+                    emoji = "❌"
+                elif "exam" in heading_key:
+                    emoji = "✍️"
+                elif "takeaway" in heading_key:
+                    emoji = "🎯"
+                else:
+                    emoji = "✨"
+            output.append(f"{emoji} {stripped}")
         else:
-            output_lines.append("")
+            output.append(stripped)
+
+    # Ensure blank lines between every section
+    result = []
+    prev_empty = False
+    for line in output:
+        if line == "":
+            if not prev_empty:
+                result.append(line)
+                prev_empty = True
+        else:
+            result.append(line)
+            prev_empty = False
 
     # Remove trailing empty lines
-    while output_lines and output_lines[-1] == "":
-        output_lines.pop()
+    while result and result[-1] == "":
+        result.pop()
 
-    return "\n".join(output_lines)
+    final = "\n".join(result)
+    # Safety: if the final text is too short, return the original text unchanged
+    if len(final) < 20:
+        return text
+    return final
 
 
 def _persist_interaction(
@@ -876,7 +835,7 @@ def coach_agent(request, db=None) -> dict:
     }
 
 
-# ─── STREAMING GENERATOR – True multi‑agent with deterministic formatting ────
+# ─── STREAMING GENERATOR – Robust, always delivers full answer ─────────────
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if db is None:
         yield "Coach needs database access to personalize advice."
@@ -941,35 +900,34 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         fallback = recommendation if intent == "planning" else "I'm having trouble explaining that right now."
         draft = fallback
 
-    # ── Agent 2: Reviewer (LLM) – produces structured output ─────────────────
-    review_prompt = _build_structured_review_prompt(
+    # ── Agent 2: Reviewer (LLM) – enriched with natural headings ────────────
+    review_prompt = _build_review_prompt(
         coach=coach,
         question=question,
         draft=draft,
         topic_snapshot=topic_snapshot,
     )
-    enriched_structured = ""
+    enriched = ""
     try:
         review_resp = groq_client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": review_prompt},
-                {"role": "user", "content": f"Please review and structure this answer:\n\n{draft}"},
+                {"role": "user", "content": f"Please review and improve this answer:\n\n{draft}"},
             ],
             temperature=0.3,
             max_tokens=550,
             stream=False,
         )
-        enriched_structured = review_resp.choices[0].message.content.strip()
+        enriched = review_resp.choices[0].message.content.strip()
     except Exception as exc:
         logger.error("[COACH REVIEW] Groq error: %s", exc)
-        # Fallback: wrap the draft in a basic structure
-        enriched_structured = f"### Main Title\n✨ Concept Explanation\n\n### Definition\n{draft}"
+        enriched = draft   # fallback to draft
 
-    # ── Agent 3: Formatter (deterministic Python code) ──────────────────────
-    final_answer = _apply_deterministic_format(enriched_structured)
-    if not final_answer.strip():
-        final_answer = enriched_structured  # fallback
+    # ── Agent 3: Formatter (Python) – always outputs full content ───────────
+    final_answer = _apply_deterministic_format(enriched)
+    if not final_answer or len(final_answer) < 20:
+        final_answer = enriched   # safety net
 
     # Stream the final answer
     yield final_answer
