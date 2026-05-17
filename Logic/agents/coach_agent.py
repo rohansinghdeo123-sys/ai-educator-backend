@@ -274,7 +274,6 @@ def _make_rule_based_recommendation(
     else:
         base = "Do one focused practice block, then review mistakes immediately while memory is fresh."
 
-    # ── Enrich with Knowledge Graph insights ──────────────────────────────
     if knowledge_graph.concepts and weak_topics:
         w = weak_topics[0]["topic"]
         concepts = knowledge_graph.search_by_keyword(w, limit=2)
@@ -301,7 +300,6 @@ def _build_study_prompt(
 ) -> str:
     """Prompt for study_advice – detailed, friendly, no analytics."""
     graph_context = ""
-    # Search knowledge graph for concepts matching the question
     keywords = [w for w in question.lower().split() if len(w) > 2]
     for kw in keywords[:3]:
         concepts = knowledge_graph.search_by_keyword(kw, limit=2)
@@ -318,7 +316,7 @@ def _build_study_prompt(
                     graph_context += "Common Mistakes:\n  " + "\n  ".join(
                         [f"{m['mistake']} -> {m['correction']}" for m in c["common_mistakes"]]
                     ) + "\n"
-                break  # only use the first matching concept
+                break
 
     return f"""
 You are {coach.coach_name}, a personal AI study coach.
@@ -410,7 +408,6 @@ RECOMMENDATION (rule‑based):
 """.strip()
 
 
-# ─── Review prompt (new) ───────────────────────────────────────────────────
 def _build_review_prompt(
     coach: AICoachProfile,
     question: str,
@@ -457,46 +454,58 @@ Now provide the enriched answer.
 """.strip()
 
 
-# ─── Format prompt (new) ───────────────────────────────────────────────────
+# ─── FINAL FORMAT PROMPT – the magic behind beautiful answers ──────────────
 def _build_format_prompt(coach: AICoachProfile, enriched: str) -> str:
     return f"""
 You are {coach.coach_name}, a personal AI study coach. Take the enriched answer below and reformat it into a visually engaging, student‑friendly mini‑article.
 
-Follow this EXACT style – study the example carefully:
+ABSOLUTE RULES – FOLLOW WITHOUT EXCEPTION:
+1. Use ONLY plain text. Never use asterisks (*), underscores (_), or backticks (`).
+2. Every section MUST be separated by a blank line. Do NOT run sections together.
+3. Each bullet point, example, or point must be on its own line.
+4. Use emojis to introduce sections – choose appropriate emojis for the subject.
+5. Keep the overall structure exactly like the example below.
+
+EXAMPLE STRUCTURE (adapt emojis and content as needed):
 
 ✨ Main Title — Complete Explanation
-📖 Definition of the Concept
-- Definition sentence in simple words.
+
+📖 Definition
+- Simple definition in one sentence.
+
 Simple Meaning:
 - Point one
 - Point two
 
 🌍 Understanding the Concept
-Everything we see around us is related to this concept.
+A short paragraph explaining the concept in daily life.
+
 Examples:
 📘 Example 1
 💧 Example 2
 🌬 Example 3
+
 ❌ What is NOT included
 - Some things that do not fit the concept
+
 Examples:
 🔆 Non-example 1
 🔥 Non-example 2
 
-⭐ Characteristics / Key Points
+⭐ Key Points
 1️⃣ Point one
 👉 Example: ...
+
 2️⃣ Point two
 👉 Example: ...
-... up to 5️⃣
 
-🧊💧🌬 Types / Categories / States (if applicable)
+🧊💧🌬 Categories / Types / States (if applicable)
 Type    Example    Description
 🧊 Solid    Ice    Particles closely packed
 💧 Liquid    Water    Particles loosely packed
 🌬 Gas    Oxygen    Particles far apart
 
-🔍 Easy Real-Life Example
+🔍 Real-Life Example
 A relatable, everyday example explained in a few sentences.
 
 🧠 Scientific Definition
@@ -506,20 +515,13 @@ The formal definition.
 Q. Question?
 Answer: One concise sentence.
 
-🎯 Key Point to Remember
-👉 “Memorable takeaway sentence.”
-
-FORMATTING RULES – FOLLOW EXACTLY:
-- Use ONLY plain text. NO asterisks, underscores, backticks, or any markdown.
-- Use emojis to introduce sections exactly as shown.
-- Use simple dashes (-) for bullet points.
-- Use blank lines between sections.
-- Keep the language friendly, clear, and encouraging.
+🎯 Key Takeaway
+👉 “Memorable sentence to remember.”
 
 ENRICHED ANSWER:
 {enriched}
 
-Now produce the final, beautifully formatted answer following the style above EXACTLY.
+Now produce the final, beautifully formatted answer with proper blank lines and no markdown.
 """.strip()
 
 
@@ -694,7 +696,6 @@ def coach_agent(request, db=None) -> dict:
         session_id=session_id,
     )
 
-    # Use intent‑based prompt selection
     if intent == "planning":
         system_prompt = _build_planning_prompt(
             coach=coach,
@@ -838,14 +839,8 @@ def coach_agent(request, db=None) -> dict:
     }
 
 
-# ─── STREAMING GENERATOR – Three‑pass expert system ────────────────────────
+# ─── STREAMING GENERATOR – Three‑pass with perfect formatting ──────────────
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
-    """
-    Stream the coach's reply after three passes:
-    1. Draft – intent‑aware generation
-    2. Review – verify & enrich with Knowledge Graph
-    3. Format – beautiful final structure
-    """
     if db is None:
         yield "Coach needs database access to personalize advice."
         return
@@ -873,7 +868,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         recent_sessions=recent_sessions,
     )
 
-    # ── Pass 1: Draft ──────────────────────────────────────────────────────
+    # Pass 1: Draft
     if intent == "planning":
         draft_prompt = _build_planning_prompt(
             coach=coach,
@@ -909,7 +904,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         fallback = recommendation if intent == "planning" else "I'm having trouble explaining that right now."
         draft = fallback
 
-    # ── Pass 2: Review & Enrich ────────────────────────────────────────────
+    # Pass 2: Review & Enrich
     review_prompt = _build_review_prompt(
         coach=coach,
         question=question,
@@ -931,9 +926,9 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         enriched = review_resp.choices[0].message.content.strip()
     except Exception as exc:
         logger.error("[COACH REVIEW] Groq error: %s", exc)
-        enriched = draft   # fallback to draft
+        enriched = draft
 
-    # ── Pass 3: Format & Stream ────────────────────────────────────────────
+    # Pass 3: Format & Stream
     format_prompt = _build_format_prompt(coach=coach, enriched=enriched)
     full_answer = ""
     try:
@@ -950,16 +945,17 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         for chunk in format_stream:
             token = chunk.choices[0].delta.content
             if token:
-                full_answer += token
-                yield token
+                clean_token = token.replace("*", "")
+                full_answer += clean_token
+                yield clean_token
     except Exception as exc:
         logger.error("[COACH FORMAT] Groq error: %s", exc)
-        # stream enriched as fallback
         for char in enriched:
-            yield char
-            full_answer += char
+            if char != "*":
+                full_answer += char
+                yield char
 
-    # Persist after stream
+    # Persist
     coach.daily_strategy = recommendation
     coach.next_best_action = recommendation
     coach.last_interaction_at = datetime.utcnow()
