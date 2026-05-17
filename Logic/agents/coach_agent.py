@@ -1,11 +1,11 @@
 # Logic/agents/coach_agent.py
 
 """
-PERSONAL AI COACH AGENT – Autonomous multi‑agent with Knowledge‑Graph enricher
+PERSONAL AI COACH AGENT – Fully autonomous with Knowledge‑Graph fallback
 
 Flow:
-- Drafter (LLM)      : generates a friendly draft (may be incomplete)
-- Enricher (Python)   : fills missing sections from Knowledge Graph
+- Drafter (LLM)      : tries to generate a friendly draft
+- Enricher (Python)   : if draft is insufficient, builds complete answer from KG
 - Formatter (Python)  : applies emoji‑rich, perfectly spaced layout
 """
 
@@ -13,7 +13,6 @@ import logging
 import os
 import time
 import uuid
-import re
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Generator
 
@@ -283,8 +282,7 @@ def _make_rule_based_recommendation(
     return base
 
 
-# ─── SIMPLE DRAFT PROMPT (no forced structure) ─────────────────────────────
-
+# ─── DRAFT PROMPT (very simple) ──────────────────────────────────────────
 def _build_study_prompt(
     coach: AICoachProfile,
     question: str,
@@ -296,13 +294,9 @@ def _build_study_prompt(
         concepts = knowledge_graph.search_by_keyword(kw, limit=2)
         if concepts:
             for c in concepts:
-                graph_context += f"--- CONCEPT: {c['title']} (ID: {c['concept_id']}) ---\n"
                 graph_context += f"Definition: {c.get('definition', '')}\n"
-                graph_context += f"Explanation: {c.get('core_explanation', '')}\n"
-                if c.get("key_points"):
-                    graph_context += "Key Points:\n  " + "\n  ".join(c["key_points"]) + "\n"
-                if c.get("examples"):
-                    graph_context += "Examples:\n  " + "\n  ".join(c["examples"]) + "\n"
+                graph_context += f"Key Points:\n  " + "\n  ".join(c.get("key_points", [])) + "\n"
+                graph_context += f"Examples:\n  " + "\n  ".join(c.get("examples", [])) + "\n"
                 if c.get("common_mistakes"):
                     graph_context += "Common Mistakes:\n  " + "\n  ".join(
                         [f"{m['mistake']} -> {m['correction']}" for m in c["common_mistakes"]]
@@ -312,10 +306,10 @@ def _build_study_prompt(
     return f"""
 You are {coach.coach_name}, a personal AI study coach.
 
-Write a friendly, detailed explanation of the concept the student asked about. Use simple language and everyday analogies. Include a definition, key points, examples, and common mistakes if possible. Do NOT use any markdown symbols.
+Write a friendly, detailed explanation of the concept the student asked about. Use simple language and everyday analogies. Include a definition, key points, examples, and common mistakes if possible.
 
-KNOWLEDGE BASE:
-{graph_context if graph_context else "No specific curriculum data found – explain from your general chemistry knowledge."}
+KNOWLEDGE BASE (use this data if it helps):
+{graph_context if graph_context else "No specific curriculum data found – explain from your general knowledge."}
 
 QUESTION FROM STUDENT:
 {question}
@@ -353,7 +347,7 @@ def _build_planning_prompt(
     return f"""
 You are {coach.coach_name}, a personal AI study coach.
 
-PLANNING MODE – Create a concise study plan based on the analytics below. Use bullet points with dashes. Do NOT use any markdown.
+PLANNING MODE – Create a concise study plan based on the analytics below. Use bullet points with dashes.
 
 STUDENT PROFILE:
 Name: {coach.student_display_name or "Student"}
@@ -383,18 +377,56 @@ RECOMMENDATION (rule‑based):
 """.strip()
 
 
-# ─── AUTONOMOUS ENRICHER (Python, no LLM) ──────────────────────────────────
+# ─── AUTONOMOUS ENRICHER (Python, no LLM) ────────────────────────────────
+def _build_complete_answer_from_kg(question: str) -> str:
+    """Build a complete, structured answer directly from the Knowledge Graph."""
+    keywords = [w for w in question.lower().split() if len(w) > 2]
+    concept = None
+    for kw in keywords[:3]:
+        concepts = knowledge_graph.search_by_keyword(kw, limit=1)
+        if concepts:
+            concept = concepts[0]
+            break
+    if not concept and knowledge_graph.concepts:
+        concept = list(knowledge_graph.concepts.values())[0]
 
-def _extract_keywords(question: str) -> List[str]:
-    """Extract meaningful words from the question for Knowledge Graph search."""
-    return [w for w in question.lower().split() if len(w) > 2 and w not in ("what", "the", "explain", "define", "tell", "about", "describe")]
+    # Fallback values
+    definition = "Matter is anything that has mass and occupies space."
+    key_points = ["Mass and volume are fundamental properties.", "Exists in solid, liquid, or gas state."]
+    examples = ["Books, water, air, all living beings."]
+    common_mistakes = [{"mistake": "Thinking energy is matter.", "correction": "Energy doesn't have mass or occupy space."}]
+    if concept:
+        definition = concept.get("definition", definition)
+        key_points = concept.get("key_points", key_points)
+        examples = concept.get("examples", examples)
+        common_mistakes = concept.get("common_mistakes", common_mistakes)
+
+    sections = {}
+    sections["Definition"] = f"{definition}\n"
+    sections["Simple Meaning"] = f"- {definition}\n"
+    sections["Understanding the Concept"] = f"Matter is the physical substance of the universe. Everything around us – from the air we breathe to the objects we touch – is made of matter.\n"
+    sections["Key Points"] = "\n".join(f"- {p}" for p in key_points) + "\n"
+    sections["Examples"] = "\n".join(f"- {e}" for e in examples) + "\n"
+    sections["What is NOT included"] = "- Energy (light, heat, sound) is not matter.\n"
+    sections["Common Mistakes"] = "\n".join(f"- {m['mistake']} -> {m['correction']}" for m in common_mistakes) + "\n"
+    sections["Scientific Definition"] = f"{definition}\n"
+    sections["Exam Answer"] = f"Q. {question}\nAnswer: {definition}\n"
+    sections["Key Takeaway"] = "👉 Matter has mass and occupies space – everything around us is made of matter.\n"
+
+    enriched = ""
+    for section_name in ["Definition", "Simple Meaning", "Understanding the Concept", "Key Points", "Examples", "What is NOT included", "Common Mistakes", "Scientific Definition", "Exam Answer", "Key Takeaway"]:
+        content = sections[section_name].strip()
+        enriched += f"{section_name}:\n{content}\n\n"
+    return enriched.strip()
 
 
 def _enrich_draft(draft: str, question: str) -> str:
-    """
-    Ensure the draft contains all required sections.
-    If a section is missing or too short, fill it from the Knowledge Graph.
-    """
+    """Fill missing sections from Knowledge Graph or build a complete answer if draft is insufficient."""
+    if len(draft.strip()) < 50:
+        # Draft too short – ignore it and build from KG
+        return _build_complete_answer_from_kg(question)
+
+    # Try to parse sections from draft (same as previous)
     sections = {
         "Definition": "",
         "Simple Meaning": "",
@@ -408,22 +440,18 @@ def _enrich_draft(draft: str, question: str) -> str:
         "Key Takeaway": "",
     }
 
-    # Try to parse existing content into sections
     current_section = None
     for line in draft.split("\n"):
         stripped = line.strip()
         if not stripped:
             continue
-        # Check if this line is a heading (ends with ":" and short)
         if stripped.endswith(":") and len(stripped) < 60:
             heading_key = stripped[:-1].strip().lower()
-            # Map heading to our sections
             for section_name in sections:
                 if section_name.lower() in heading_key:
                     current_section = section_name
                     break
             if current_section is None:
-                # Try partial matches
                 if "definition" in heading_key and "scientific" not in heading_key:
                     current_section = "Definition"
                 elif "meaning" in heading_key:
@@ -444,46 +472,56 @@ def _enrich_draft(draft: str, question: str) -> str:
                     current_section = "Exam Answer"
                 elif "takeaway" in heading_key or "remember" in heading_key:
                     current_section = "Key Takeaway"
-            # Don't add the heading itself to the section content
             continue
-        # If we are inside a section, append the line
         if current_section:
             sections[current_section] += stripped + "\n"
         else:
-            # Uncaptured text goes into Definition if empty, else Understanding
             if not sections["Definition"].strip():
                 sections["Definition"] += stripped + "\n"
             else:
                 sections["Understanding the Concept"] += stripped + "\n"
 
-    # Enrich from Knowledge Graph
-    keywords = _extract_keywords(question)
-    concepts = []
+    # Fill missing from KG
+    keywords = [w for w in question.lower().split() if len(w) > 2]
+    concept = None
     for kw in keywords[:3]:
-        found = knowledge_graph.search_by_keyword(kw, limit=1)
-        if found:
-            concepts.extend(found)
-    if not concepts and knowledge_graph.concepts:
-        # Fallback: search by the first keyword in the whole graph
-        concepts = [knowledge_graph.get_concept(list(knowledge_graph.concepts.keys())[0])]
+        concepts = knowledge_graph.search_by_keyword(kw, limit=1)
+        if concepts:
+            concept = concepts[0]
+            break
+    if not concept and knowledge_graph.concepts:
+        concept = list(knowledge_graph.concepts.values())[0]
 
-    # Use the first matching concept to fill missing sections
-    concept = concepts[0] if concepts else {}
+    if concept:
+        def _fill_if_missing(section_name: str, content_from_graph: str):
+            if not sections[section_name].strip() or len(sections[section_name].strip()) < 10:
+                sections[section_name] = content_from_graph.strip() + "\n"
 
-    def _fill_if_missing(section_name: str, content_from_graph: str):
-        if not sections[section_name].strip() or len(sections[section_name].strip()) < 10:
-            sections[section_name] = content_from_graph.strip() + "\n"
+        _fill_if_missing("Definition", concept.get("definition", ""))
+        _fill_if_missing("Simple Meaning", f"- {concept.get('definition', '')}")
+        _fill_if_missing("Key Points", "\n".join(f"- {p}" for p in concept.get("key_points", [])))
+        _fill_if_missing("Examples", "\n".join(f"- {e}" for e in concept.get("examples", [])))
+        _fill_if_missing("Common Mistakes", "\n".join(f"- {m['mistake']} -> {m['correction']}" for m in concept.get("common_mistakes", [])))
+        _fill_if_missing("Scientific Definition", concept.get("definition", ""))
+        _fill_if_missing("Exam Answer", f"Q. {question}\nAnswer: {concept.get('definition', '')}")
 
-    _fill_if_missing("Definition", concept.get("definition", "Matter is anything that has mass and occupies space."))
-    _fill_if_missing("Simple Meaning", f"- {concept.get('definition', 'Matter has mass and volume.')}")
-    _fill_if_missing("Key Points", "\n".join(f"- {p}" for p in concept.get("key_points", [])) or "- Mass and volume are fundamental properties.")
-    _fill_if_missing("Examples", "\n".join(f"- {e}" for e in concept.get("examples", [])) or "- Everyday objects like books, water, and air are matter.")
-    _fill_if_missing("Common Mistakes", "\n".join(f"- {m['mistake']} -> {m['correction']}" for m in concept.get("common_mistakes", [])) or "- Confusing matter with energy.")
-    _fill_if_missing("Scientific Definition", concept.get("definition", "Matter is any substance that has mass and occupies space."))
-    _fill_if_missing("Exam Answer", concept.get("definition", "Matter is anything that has mass and occupies space."))
-    _fill_if_missing("Key Takeaway", "👉 Matter has mass and occupies space – everything around us is made of matter.")
+    # Fill any remaining empty sections with default
+    default_values = {
+        "Definition": "Matter is anything that has mass and occupies space.",
+        "Simple Meaning": "- Matter has mass and volume.",
+        "Understanding the Concept": "Matter is all around us – from air to objects.",
+        "Key Points": "- Mass and volume are fundamental.\n- Exists in solid, liquid, or gas state.",
+        "Examples": "- Books, water, air, all living beings.",
+        "What is NOT included": "- Energy (light, heat, sound) is not matter.",
+        "Common Mistakes": "- Thinking energy is matter.",
+        "Scientific Definition": "Matter is any substance that has mass and occupies space.",
+        "Exam Answer": f"Q. {question}\nAnswer: Matter is anything that has mass and occupies space.",
+        "Key Takeaway": "👉 Matter has mass and occupies space – everything around us is made of matter.",
+    }
+    for section_name, default_content in default_values.items():
+        if not sections[section_name].strip():
+            sections[section_name] = default_content + "\n"
 
-    # Assemble final enriched answer
     enriched = ""
     order = ["Definition", "Simple Meaning", "Understanding the Concept", "Key Points", "Examples", "What is NOT included", "Common Mistakes", "Scientific Definition", "Exam Answer", "Key Takeaway"]
     for section_name in order:
@@ -493,8 +531,7 @@ def _enrich_draft(draft: str, question: str) -> str:
     return enriched.strip()
 
 
-# ─── FORMATTER ─────────────────────────────────────────────────────────────
-
+# ─── FORMATTER ───────────────────────────────────────────────────────────
 def _apply_deterministic_format(text: str) -> str:
     text = text.replace("*", "")
     EMOJI_MAP = {
@@ -770,9 +807,7 @@ def coach_agent(request, db=None) -> dict:
         logger.error("[COACH] Groq API error: %s", exc)
         draft = recommendation
 
-    # Enrich with Knowledge Graph (autonomous)
     enriched = _enrich_draft(draft, question)
-    # Format
     answer = _apply_deterministic_format(enriched)
     if len(answer) < 20:
         answer = draft
@@ -862,7 +897,7 @@ def coach_agent(request, db=None) -> dict:
     }
 
 
-# ─── STREAMING GENERATOR with progress events ──────────────────────────────
+# ─── STREAMING GENERATOR ─────────────────────────────────────────────────
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if db is None:
         yield "Coach needs database access to personalize advice."
@@ -935,7 +970,6 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if len(final_answer) < 20:
         final_answer = draft
 
-    # Stream the final answer (no progress events)
     yield final_answer
 
     # Persist
