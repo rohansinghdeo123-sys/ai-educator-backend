@@ -773,7 +773,7 @@ def coach_agent(request, db=None) -> dict:
 # ─── STREAMING GENERATOR ─────────────────────────────────────────────────────
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if db is None:
-        yield "Coach needs database access to personalize advice."
+        yield "data: Coach needs database access to personalize advice.\n\n"
         return
 
     user_id = getattr(request, "user_id", None) or getattr(request, "session_id", "anonymous")
@@ -844,7 +844,8 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         if len(final_answer) < 20:
             final_answer = draft
 
-    yield final_answer
+    # Stream as SSE so the frontend can read it
+    yield f"data: {final_answer}\n\n"
 
     # Persist
     coach.daily_strategy = recommendation
