@@ -642,7 +642,6 @@ def coach_agent(request, db=None) -> dict:
         recent_sessions=recent_sessions,
     )
 
-    # ── Choose the answer source ──────────────────────────────────────────
     if _is_definition_question(question):
         answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
     else:
@@ -767,7 +766,7 @@ def coach_agent(request, db=None) -> dict:
     }
 
 
-# ─── STREAMING GENERATOR (Plain‑Text Markers) ───────────────────────────────
+# ─── STREAMING GENERATOR (Base64‑Encoded Answer) ──────────────────────────
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if db is None:
         yield "data: Coach needs database access to personalize advice.\n\n"
@@ -840,10 +839,10 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         if len(final_answer) < 20:
             final_answer = draft
 
-    # ── Send the final answer with plain-text markers ──────────────────
-    yield "data: [ANSWER_START]\n"
-    yield f"data: {final_answer}\n"
-    yield "data: [ANSWER_END]\n"
+    # ── Base64‑encode the entire answer to protect newlines ─────────────
+    import base64
+    encoded = base64.b64encode(final_answer.encode("utf-8")).decode("ascii")
+    yield f"data: {encoded}\n\n"
     yield "data: [DONE]\n\n"
 
     # Persist
