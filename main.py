@@ -1136,11 +1136,32 @@ def leaderboard(db: Session = Depends(get_db)):
 
     leaderboard_data = []
 
+    # Batch fetch Firebase user info if possible
+    firebase_users = {}
+    if FIREBASE_ADMIN_READY and firebase_auth:
+        uids = [user.user_id for user in users]
+        try:
+            # firebase_admin.auth.get_users (plural) fetches up to 100 UIDs in one call
+            auth_result = firebase_auth.get_users([firebase_auth.UidIdentifier(uid) for uid in uids])
+            for firebase_user in auth_result.users:
+                firebase_users[firebase_user.uid] = firebase_user
+        except Exception:
+            logger.warning("Failed to batch fetch Firebase users for leaderboard")
+
     for rank, user in enumerate(users, start=1):
+        fb_user = firebase_users.get(user.user_id)
+        display_name = None
+        email = None
+        if fb_user:
+            display_name = fb_user.display_name or None
+            email = fb_user.email or None
+
         leaderboard_data.append(
             {
                 "rank": rank,
                 "user_id": user.user_id,
+                "display_name": display_name,
+                "email": email,
                 "xp": int(user.xp or 0),
                 "streak": int(user.streak or 0),
                 "total_tests": int(user.total_tests or 0),
@@ -1148,7 +1169,6 @@ def leaderboard(db: Session = Depends(get_db)):
         )
 
     return leaderboard_data
-
 
 # =====================================================
 # ANALYTICS
