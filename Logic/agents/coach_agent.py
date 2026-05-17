@@ -459,22 +459,67 @@ Now provide the enriched answer.
 
 # ─── Format prompt (new) ───────────────────────────────────────────────────
 def _build_format_prompt(coach: AICoachProfile, enriched: str) -> str:
-    """Prompt that takes an enriched answer and formats it beautifully."""
     return f"""
-You are {coach.coach_name}, a personal AI study coach. Take the enriched answer below and reformat it into a beautiful, student‑friendly mini‑article.
+You are {coach.coach_name}, a personal AI study coach. Take the enriched answer below and reformat it into a visually engaging, student‑friendly mini‑article.
 
-FORMATTING RULES:
-- Use clear, bold‑looking headings (e.g., "What is Matter?") by using a blank line before and after the heading.
-- Use short paragraphs (2‑3 sentences each).
-- Use simple bullet points with a dash (-) for lists.
-- Highlight important words by placing them on their own line or repeating them naturally.
-- Keep the language warm and encouraging.
-- Do NOT use any markdown symbols like asterisks or underscores.
+Follow this EXACT style – study the example carefully:
+
+✨ Main Title — Complete Explanation
+📖 Definition of the Concept
+- Definition sentence in simple words.
+Simple Meaning:
+- Point one
+- Point two
+
+🌍 Understanding the Concept
+Everything we see around us is related to this concept.
+Examples:
+📘 Example 1
+💧 Example 2
+🌬 Example 3
+❌ What is NOT included
+- Some things that do not fit the concept
+Examples:
+🔆 Non-example 1
+🔥 Non-example 2
+
+⭐ Characteristics / Key Points
+1️⃣ Point one
+👉 Example: ...
+2️⃣ Point two
+👉 Example: ...
+... up to 5️⃣
+
+🧊💧🌬 Types / Categories / States (if applicable)
+Type    Example    Description
+🧊 Solid    Ice    Particles closely packed
+💧 Liquid    Water    Particles loosely packed
+🌬 Gas    Oxygen    Particles far apart
+
+🔍 Easy Real-Life Example
+A relatable, everyday example explained in a few sentences.
+
+🧠 Scientific Definition
+The formal definition.
+
+✍️ Short Exam Answer
+Q. Question?
+Answer: One concise sentence.
+
+🎯 Key Point to Remember
+👉 “Memorable takeaway sentence.”
+
+FORMATTING RULES – FOLLOW EXACTLY:
+- Use ONLY plain text. NO asterisks, underscores, backticks, or any markdown.
+- Use emojis to introduce sections exactly as shown.
+- Use simple dashes (-) for bullet points.
+- Use blank lines between sections.
+- Keep the language friendly, clear, and encouraging.
 
 ENRICHED ANSWER:
 {enriched}
 
-Now provide the final, beautifully formatted answer.
+Now produce the final, beautifully formatted answer following the style above EXACTLY.
 """.strip()
 
 
