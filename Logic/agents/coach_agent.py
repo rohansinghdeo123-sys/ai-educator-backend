@@ -967,11 +967,6 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         detail="Preparing the final formatted response.",
     )
     time.sleep(0.25)
-
-    # ── Base64‑encode the entire answer to protect newlines ─────────────
-    import base64
-    encoded = base64.b64encode(final_answer.encode("utf-8")).decode("ascii")
-    yield f"data: {encoded}\n\n"
     yield _stage_event(
         stage="delivering",
         status="done",
@@ -980,6 +975,11 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         detail="Final answer delivered.",
     )
     time.sleep(0.2)
+
+    # ── Base64‑encode the entire answer to protect newlines ─────────────
+    import base64
+    encoded = base64.b64encode(final_answer.encode("utf-8")).decode("ascii")
+    yield f"data: {encoded}\n\n"
     yield "data: [DONE]\n\n"
 
     # Persist
