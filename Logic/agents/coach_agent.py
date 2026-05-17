@@ -12,6 +12,7 @@ import os
 import time
 import uuid
 import base64
+import re
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Generator
 
@@ -289,44 +290,116 @@ def _is_definition_question(question: str) -> bool:
 
 # ─── KNOWLEDGE-GRAPH ANSWER BUILDER (no LLM) ────────────────────────────────
 
-def _build_complete_answer_from_kg(question: str) -> str:
-    keywords = [w for w in question.lower().split() if len(w) > 2]
-    concept = None
-    for kw in keywords[:5]:
-        concepts = knowledge_graph.search_by_keyword(kw, limit=1)
-        if concepts:
-            concept = concepts[0]
-            break
-    if not concept and knowledge_graph.concepts:
-        concept = list(knowledge_graph.concepts.values())[0]
+_QUESTION_STOPWORDS = {
+    "define", "definition", "what", "what's", "explain", "meaning", "describe",
+    "tell", "about", "the", "is", "are", "of", "for", "with", "give", "me",
+    "please", "concept", "short", "brief", "detailed",
+}
 
+
+def _extract_search_terms(question: str) -> List[str]:
+    words = re.findall(r"[a-zA-Z0-9]+", question.lower())
+    terms = [word for word in words if len(word) > 2 and word not in _QUESTION_STOPWORDS]
+    return terms[:8]
+
+
+def _find_relevant_concept(question: str) -> Optional[Dict[str, Any]]:
+    terms = _extract_search_terms(question)
+    if not terms or not knowledge_graph.concepts:
+        return None
+
+    scored: Dict[str, Dict[str, Any]] = {}
+    for term in terms:
+        for concept in knowledge_graph.search_by_keyword(term, limit=4):
+            title = str(concept.get("title", "")).lower()
+            definition = str(concept.get("definition", "")).lower()
+            concept_id = str(concept.get("id") or concept.get("title") or id(concept))
+            score = 2 if term in title else 1
+            if term in definition:
+                score += 1
+            if concept_id not in scored:
+                scored[concept_id] = {"concept": concept, "score": 0}
+            scored[concept_id]["score"] += score
+
+    if not scored:
+        return None
+
+    best = max(scored.values(), key=lambda item: item["score"])
+    return best["concept"] if best["score"] >= 1 else None
+
+
+def _can_answer_definition_locally(question: str) -> bool:
+    terms = _extract_search_terms(question)
+    return "matter" in terms or _find_relevant_concept(question) is not None
+
+
+def _build_complete_answer_from_kg(question: str) -> str:
+    concept = _find_relevant_concept(question)
+
+    title = "Matter"
     definition = "Matter is anything that has mass and occupies space."
-    key_points = ["Mass and volume are fundamental properties.", "Exists in solid, liquid, or gas state."]
-    examples = ["Books, water, air, all living beings."]
-    common_mistakes = [{"mistake": "Thinking energy is matter.", "correction": "Energy doesn't have mass or occupy space."}]
+    key_points = [
+        "Matter has mass, so it can be measured.",
+        "Matter occupies space, so it has volume.",
+        "Matter is commonly found as solid, liquid, or gas.",
+    ]
+    examples = ["A book", "Water in a glass", "Air inside a balloon", "The human body"]
+    common_mistakes = [
+        {
+            "mistake": "Thinking light, heat, or sound are matter.",
+            "correction": "They are forms of energy; they do not occupy space like matter.",
+        }
+    ]
+
     if concept:
+        title = concept.get("title", title)
         definition = concept.get("definition", definition)
         key_points = concept.get("key_points", key_points)
         examples = concept.get("examples", examples)
         common_mistakes = concept.get("common_mistakes", common_mistakes)
 
-    sections = {}
-    sections["Definition"] = f"{definition}\n"
-    sections["Simple Meaning"] = f"- {definition}\n"
-    sections["Understanding the Concept"] = "Matter is the physical substance of the universe. Everything around us – from the air we breathe to the objects we touch – is made of matter.\n"
-    sections["Key Points"] = "\n".join(f"- {p}" for p in key_points) + "\n"
-    sections["Examples"] = "\n".join(f"- {e}" for e in examples) + "\n"
-    sections["What is NOT included"] = "- Energy (light, heat, sound) is not matter.\n"
-    sections["Common Mistakes"] = "\n".join(f"- {m['mistake']} -> {m['correction']}" for m in common_mistakes) + "\n"
-    sections["Scientific Definition"] = f"{definition}\n"
-    sections["Exam Answer"] = f"Q. {question}\nAnswer: {definition}\n"
-    sections["Key Takeaway"] = "👉 Matter has mass and occupies space – everything around us is made of matter.\n"
+    mistake_lines = []
+    for item in common_mistakes[:3]:
+        if isinstance(item, dict):
+            mistake = item.get("mistake", "")
+            correction = item.get("correction", "")
+            if mistake and correction:
+                mistake_lines.append(f"- {mistake} Correction: {correction}")
+            elif mistake:
+                mistake_lines.append(f"- {mistake}")
+        elif item:
+            mistake_lines.append(f"- {item}")
 
-    enriched = ""
-    for section_name in ["Definition", "Simple Meaning", "Understanding the Concept", "Key Points", "Examples", "What is NOT included", "Common Mistakes", "Scientific Definition", "Exam Answer", "Key Takeaway"]:
-        content = sections[section_name].strip()
-        enriched += f"{section_name}:\n{content}\n\n"
-    return enriched.strip()
+    simple_explanation = (
+        "In simple words, matter is the physical material around us. If something "
+        "has weight or mass and takes up space, it is matter."
+    )
+    if str(title).lower() != "matter":
+        simple_explanation = (
+            f"In simple words, {title} is the idea described above. First learn the "
+            "definition, then connect it with examples and exam points."
+        )
+
+    sections = [
+        ("Direct Answer", definition),
+        ("Simple Explanation", simple_explanation),
+        ("Important Points", "\n".join(f"- {point}" for point in key_points[:5])),
+        ("Examples", "\n".join(f"- {example}" for example in examples[:5])),
+        (
+            "Common Mistakes",
+            "\n".join(mistake_lines)
+            if mistake_lines
+            else "- Do not memorize only words; understand the property or reason behind the definition.",
+        ),
+        ("Exam-Ready Answer", f"{title} can be defined as: {definition}"),
+        ("Quick Revision", f"Remember: {definition}"),
+    ]
+
+    return "\n\n".join(
+        f"{heading}:\n{content.strip()}"
+        for heading, content in sections
+        if content and content.strip()
+    )
 
 
 # ─── LLM DRAFT PROMPTS ──────────────────────────────────────────────────────
@@ -352,9 +425,18 @@ def _build_study_prompt(
                 break
 
     return f"""
-You are {coach.coach_name}, a personal AI study coach.
+You are {coach.coach_name}, a specialist subject tutor and personal study coach.
 
-Write a friendly, detailed explanation of the concept the student asked about. Use simple language and everyday analogies. Include a definition, key points, examples, and common mistakes if possible.
+Write the answer like a patient expert teacher. The student should be able to revise directly from your response.
+
+Formatting rules:
+- Use clear section headings ending with a colon.
+- Put a blank line between sections.
+- Use short paragraphs and dash bullets.
+- Start with a direct answer, then explain in simple language.
+- Include important points, examples, common mistakes, and an exam-ready answer when relevant.
+- Avoid raw markdown tables, decorative symbols, and long unbroken paragraphs.
+- If the question is too broad, answer the core concept first and then add what to study next.
 
 KNOWLEDGE BASE (use this data if it helps):
 {graph_context if graph_context else "No specific curriculum data found – explain from your general knowledge."}
@@ -395,7 +477,13 @@ def _build_planning_prompt(
     return f"""
 You are {coach.coach_name}, a personal AI study coach.
 
-PLANNING MODE – Create a concise study plan based on the analytics below. Use bullet points with dashes.
+PLANNING MODE – Create a clear study plan based on the analytics below.
+
+Formatting rules:
+- Use headings ending with a colon.
+- Use dash bullets under each heading.
+- Include Today's Priority, Study Blocks, Practice Plan, Revision Method, and Next Checkpoint.
+- Keep each bullet specific and actionable.
 
 STUDENT PROFILE:
 Name: {coach.student_display_name or "Student"}
@@ -428,47 +516,27 @@ RECOMMENDATION (rule‑based):
 # ─── FORMATTER ───────────────────────────────────────────────────────────────
 
 def _apply_deterministic_format(text: str) -> str:
-    text = text.replace("*", "")
-    EMOJI_MAP = {
-        "definition": "📖",
-        "simple meaning": "💡",
-        "understanding the concept": "🌍",
-        "key points": "⭐",
-        "examples": "📘",
-        "what is not included": "❌",
-        "common mistakes": "⚠️",
-        "scientific definition": "🧠",
-        "exam answer": "✍️",
-        "key takeaway": "🎯",
-    }
-
+    text = text.replace("*", "").replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
-    output = []
+    formatted = []
+
     for line in lines:
         stripped = line.strip()
         if not stripped:
-            output.append("")
+            formatted.append("")
             continue
 
         is_heading = stripped.endswith(":") and len(stripped) < 60
         if is_heading:
-            heading_key = stripped[:-1].strip().lower()
-            emoji = EMOJI_MAP.get(heading_key, "✨")
-            output.append(f"{emoji} {stripped}")
+            if formatted and formatted[-1] != "":
+                formatted.append("")
+            formatted.append(stripped)
         else:
-            output.append(stripped)
-
-    result = []
-    for i, line in enumerate(output):
-        result.append(line)
-        if line and line[0] in "✨📖💡🌍📘❌⭐🧊🔍🧠✍️🎯⚠️" and i < len(output) - 1:
-            next_line = output[i + 1]
-            if next_line != "":
-                result.append("")
+            formatted.append(stripped)
 
     final_lines = []
     prev_blank = False
-    for line in result:
+    for line in formatted:
         if line == "":
             if not prev_blank:
                 final_lines.append(line)
@@ -642,7 +710,7 @@ def coach_agent(request, db=None) -> dict:
         recent_sessions=recent_sessions,
     )
 
-    if _is_definition_question(question):
+    if _is_definition_question(question) and _can_answer_definition_locally(question):
         answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
     else:
         if intent == "planning":
@@ -677,7 +745,11 @@ def coach_agent(request, db=None) -> dict:
             logger.error("[COACH] Groq API error: %s", exc)
             draft = recommendation
 
-        enriched = _build_complete_answer_from_kg(question) if len(draft.strip()) < 50 else draft
+        enriched = (
+            _build_complete_answer_from_kg(question)
+            if len(draft.strip()) < 50 and _can_answer_definition_locally(question)
+            else draft
+        )
         answer = _apply_deterministic_format(enriched)
         if len(answer) < 20:
             answer = draft
@@ -796,7 +868,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     )
 
     # ── Answer source ──────────────────────────────────────────────────
-    if _is_definition_question(question):
+    if _is_definition_question(question) and _can_answer_definition_locally(question):
         final_answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
     else:
         if intent == "planning":
@@ -834,7 +906,11 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             fallback = recommendation if intent == "planning" else "I'm having trouble explaining that right now."
             draft = fallback
 
-        enriched = _build_complete_answer_from_kg(question) if len(draft.strip()) < 50 else draft
+        enriched = (
+            _build_complete_answer_from_kg(question)
+            if len(draft.strip()) < 50 and _can_answer_definition_locally(question)
+            else draft
+        )
         final_answer = _apply_deterministic_format(enriched)
         if len(final_answer) < 20:
             final_answer = draft
