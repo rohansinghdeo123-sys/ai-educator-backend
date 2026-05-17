@@ -1,12 +1,12 @@
 # Logic/agents/coach_agent.py
 
 """
-PERSONAL AI COACH AGENT – Multi‑agent system with robust formatting
+PERSONAL AI COACH AGENT – Reliable two‑pass system
 
-Agents:
-- Drafter  (LLM) : generates a detailed, friendly first draft
-- Reviewer (LLM) : enriches the draft with curriculum knowledge
-- Formatter (code): applies beautiful emoji‑rich layout with perfect spacing
+Pass 1 – Draft (LLM) : generates a detailed, friendly first answer
+Pass 2 – Format (code): applies beautiful emoji‑rich layout with perfect spacing
+
+No reviewer agent that can drop content – the full draft is always shown.
 """
 
 import logging
@@ -283,7 +283,7 @@ def _make_rule_based_recommendation(
     return base
 
 
-# ─── Prompt builders ────────────────────────────────────────────────────────
+# ─── Draft prompt (intent‑aware) ────────────────────────────────────────────
 
 def _build_study_prompt(
     coach: AICoachProfile,
@@ -385,56 +385,6 @@ RECOMMENDATION (rule‑based):
 """.strip()
 
 
-def _build_review_prompt(
-    coach: AICoachProfile,
-    question: str,
-    draft: str,
-    topic_snapshot: Dict[str, Any],
-) -> str:
-    graph_context = ""
-    keywords = [w for w in question.lower().split() if len(w) > 2]
-    for kw in keywords[:3]:
-        concepts = knowledge_graph.search_by_keyword(kw, limit=2)
-        if concepts:
-            for c in concepts:
-                graph_context += f"--- CONCEPT: {c['title']} (ID: {c['concept_id']}) ---\n"
-                graph_context += f"Definition: {c.get('definition', '')}\n"
-                graph_context += f"Explanation: {c.get('core_explanation', '')}\n"
-                if c.get("key_points"):
-                    graph_context += "Key Points:\n  " + "\n  ".join(c["key_points"]) + "\n"
-                if c.get("examples"):
-                    graph_context += "Examples:\n  " + "\n  ".join(c["examples"]) + "\n"
-                if c.get("common_mistakes"):
-                    graph_context += "Common Mistakes:\n  " + "\n  ".join(
-                        [f"{m['mistake']} -> {m['correction']}" for m in c["common_mistakes"]]
-                    ) + "\n"
-                break
-
-    return f"""
-You are {coach.coach_name}, a personal AI study coach. Review the draft answer below and produce an enriched version.
-
-TASKS:
-- Correct any factual errors using the provided curriculum data.
-- Add any missing key points, examples, or common mistakes from the curriculum.
-- Keep the tone friendly and encouraging.
-
-FORMAT YOUR ANSWER AS FOLLOWS:
-- Use clear section headings like "Definition:", "Simple Meaning:", "Understanding the Concept:", "Examples:", "What is NOT included:", "Key Points:", "Types / Categories (if applicable):", "Real-Life Example:", "Scientific Definition:", "Exam Answer:", "Key Takeaway:".
-- Write the heading on its own line, followed by the content.
-- Use a blank line between each section.
-- Use simple dashes (-) for bullet points.
-- Do NOT use any markdown symbols like asterisks or underscores.
-
-CURRICULUM DATA:
-{graph_context if graph_context else "No specific curriculum data found – keep the draft's content."}
-
-DRAFT ANSWER:
-{draft}
-
-Now provide the enriched answer following the format above.
-""".strip()
-
-
 # ─── Deterministic Formatter ────────────────────────────────────────────────
 
 def _apply_deterministic_format(text: str) -> str:
@@ -478,7 +428,6 @@ def _apply_deterministic_format(text: str) -> str:
                     emoji = e
                     break
             if not emoji:
-                # Try partial match
                 if "definition" in heading_key:
                     emoji = "📖"
                 elif "meaning" in heading_key:
@@ -505,8 +454,6 @@ def _apply_deterministic_format(text: str) -> str:
     result = []
     for i, line in enumerate(output):
         result.append(line)
-        # If this is a heading line (starts with an emoji) and not the last line,
-        # and the next line is not empty, insert a blank line
         if line and line[0] in "✨📖💡🌍📘❌⭐🧊🔍🧠✍️🎯" and i < len(output) - 1:
             next_line = output[i + 1]
             if next_line != "":
@@ -524,12 +471,10 @@ def _apply_deterministic_format(text: str) -> str:
             final_lines.append(line)
             prev_blank = False
 
-    # Remove trailing empty lines
     while final_lines and final_lines[-1] == "":
         final_lines.pop()
 
     final = "\n".join(final_lines)
-    # Safety: if the final text is too short, return the original text unchanged
     if len(final) < 20:
         return text
     return final
@@ -849,7 +794,7 @@ def coach_agent(request, db=None) -> dict:
     }
 
 
-# ─── STREAMING GENERATOR – Robust, always delivers full answer ─────────────
+# ─── STREAMING GENERATOR – Simple, reliable ───────────────────────────────
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if db is None:
         yield "Coach needs database access to personalize advice."
@@ -878,7 +823,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         recent_sessions=recent_sessions,
     )
 
-    # ── Agent 1: Drafter (LLM) ──────────────────────────────────────────────
+    # ── Only step: Draft (LLM) ──────────────────────────────────────────────
     if intent == "planning":
         draft_prompt = _build_planning_prompt(
             coach=coach,
@@ -914,36 +859,11 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         fallback = recommendation if intent == "planning" else "I'm having trouble explaining that right now."
         draft = fallback
 
-    # ── Agent 2: Reviewer (LLM) – enriched with natural headings ────────────
-    review_prompt = _build_review_prompt(
-        coach=coach,
-        question=question,
-        draft=draft,
-        topic_snapshot=topic_snapshot,
-    )
-    enriched = ""
-    try:
-        review_resp = groq_client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": review_prompt},
-                {"role": "user", "content": f"Please review and improve this answer:\n\n{draft}"},
-            ],
-            temperature=0.3,
-            max_tokens=550,
-            stream=False,
-        )
-        enriched = review_resp.choices[0].message.content.strip()
-    except Exception as exc:
-        logger.error("[COACH REVIEW] Groq error: %s", exc)
-        enriched = draft   # fallback to draft
+    # ── Format with code ────────────────────────────────────────────────────
+    final_answer = _apply_deterministic_format(draft)
+    if len(final_answer) < 20:
+        final_answer = draft
 
-    # ── Agent 3: Formatter (Python) – always outputs full content ───────────
-    final_answer = _apply_deterministic_format(enriched)
-    if not final_answer or len(final_answer) < 20:
-        final_answer = enriched   # safety net
-
-    # Stream the final answer
     yield final_answer
 
     # Persist
@@ -981,7 +901,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         "task_complete",
         {
             "status": "success",
-            "message": f"Coach reviewed and delivered by {coach.coach_name}",
+            "message": f"Coach response delivered by {coach.coach_name}",
             "latency_ms": 0,
             "quality_score": 0.9,
             "quality_passed": True,
