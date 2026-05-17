@@ -3,10 +3,8 @@
 """
 PERSONAL AI COACH AGENT – Reliable two‑pass system
 
-Pass 1 – Draft (LLM) : generates a detailed, friendly first answer
+Pass 1 – Draft (LLM) : generates a structured, detailed answer
 Pass 2 – Format (code): applies beautiful emoji‑rich layout with perfect spacing
-
-No reviewer agent that can drop content – the full draft is always shown.
 """
 
 import logging
@@ -283,7 +281,7 @@ def _make_rule_based_recommendation(
     return base
 
 
-# ─── Draft prompt (intent‑aware) ────────────────────────────────────────────
+# ─── STRUCTURED DRAFT PROMPTS ──────────────────────────────────────────────
 
 def _build_study_prompt(
     coach: AICoachProfile,
@@ -312,12 +310,23 @@ def _build_study_prompt(
     return f"""
 You are {coach.coach_name}, a personal AI study coach.
 
-STUDY MODE – Provide a clear, detailed, and friendly explanation of the concept the student asks about. Use the provided knowledge base. Do NOT mention any analytics like Xp, streaks, focus scores, or study plans unless the student explicitly asks for them.
+STUDY MODE – Write a comprehensive, student‑friendly explanation of the concept asked by the student.
 
-Use simple language, everyday analogies, and break down complex ideas step-by-step. Highlight common mistakes to help the student avoid them.
+STRUCTURE YOUR ANSWER EXACTLY AS FOLLOWS – each section heading must end with a colon:
+Definition:
+Simple Meaning:
+Understanding the Concept:
+Key Points:
+Examples:
+What is NOT included:
+Scientific Definition:
+Exam Answer:
+Key Takeaway:
+
+Make sure every section has at least one full sentence. Use simple language, everyday analogies, and highlight common mistakes. Do NOT use any markdown symbols like asterisks or underscores.
 
 KNOWLEDGE BASE:
-{graph_context if graph_context else "No specific curriculum data found – explain from your general chemistry knowledge."}
+{graph_context if graph_context else "No specific curriculum data found – explain from your general knowledge."}
 
 QUESTION FROM STUDENT:
 {question}
@@ -355,7 +364,15 @@ def _build_planning_prompt(
     return f"""
 You are {coach.coach_name}, a personal AI study coach.
 
-PLANNING MODE – The student wants a study plan or performance review. Use the analytics below to give concise, actionable advice. Focus on weak topics, recent performance, and clear next steps. End with exactly one recommended action.
+PLANNING MODE – Create a structured study plan for the student.
+
+FORMAT YOUR ANSWER WITH THESE SECTIONS (each heading must end with a colon):
+Current Status:
+Weak Topics:
+Recommended Plan:
+Next Action:
+
+Use clear bullet points with dashes (-). Keep the plan concise and actionable. Do NOT use any markdown symbols like asterisks or underscores.
 
 STUDENT PROFILE:
 Name: {coach.student_display_name or "Student"}
@@ -385,29 +402,26 @@ RECOMMENDATION (rule‑based):
 """.strip()
 
 
-# ─── Deterministic Formatter ────────────────────────────────────────────────
+# ─── DETERMINISTIC FORMATTER ───────────────────────────────────────────────
 
 def _apply_deterministic_format(text: str) -> str:
-    """
-    Parse plain text with natural headings (e.g. "Definition:") and
-    convert to beautifully spaced, emoji‑rich final answer.
-    """
-    # 1. Strip ALL asterisks to prevent markdown leakage
-    text = text.replace("*", "")
+    """Add emojis to headings and enforce blank‑line spacing."""
+    text = text.replace("*", "")   # strip accidental asterisks
 
-    # Emoji map for known headings
     EMOJI_MAP = {
         "definition": "📖",
         "simple meaning": "💡",
         "understanding the concept": "🌍",
+        "key points": "⭐",
         "examples": "📘",
         "what is not included": "❌",
-        "key points": "⭐",
-        "types / categories": "🧊💧🌬",
-        "real-life example": "🔍",
         "scientific definition": "🧠",
         "exam answer": "✍️",
         "key takeaway": "🎯",
+        "current status": "📊",
+        "weak topics": "⚠️",
+        "recommended plan": "📋",
+        "next action": "✅",
     }
 
     lines = text.split("\n")
@@ -418,7 +432,7 @@ def _apply_deterministic_format(text: str) -> str:
             output.append("")
             continue
 
-        # Check if this line is a heading (ends with ":" and is relatively short)
+        # heading detection
         is_heading = stripped.endswith(":") and len(stripped) < 60
         if is_heading:
             heading_key = stripped[:-1].strip().lower()
@@ -428,38 +442,33 @@ def _apply_deterministic_format(text: str) -> str:
                     emoji = e
                     break
             if not emoji:
-                if "definition" in heading_key:
-                    emoji = "📖"
-                elif "meaning" in heading_key:
-                    emoji = "💡"
-                elif "example" in heading_key:
-                    emoji = "🔍"
-                elif "point" in heading_key:
-                    emoji = "⭐"
-                elif "type" in heading_key or "categor" in heading_key:
-                    emoji = "🧊💧🌬"
-                elif "not" in heading_key:
-                    emoji = "❌"
-                elif "exam" in heading_key:
-                    emoji = "✍️"
-                elif "takeaway" in heading_key:
-                    emoji = "🎯"
-                else:
-                    emoji = "✨"
+                # general fallback
+                if "definition" in heading_key: emoji = "📖"
+                elif "meaning" in heading_key: emoji = "💡"
+                elif "example" in heading_key: emoji = "🔍"
+                elif "point" in heading_key: emoji = "⭐"
+                elif "not" in heading_key: emoji = "❌"
+                elif "exam" in heading_key: emoji = "✍️"
+                elif "takeaway" in heading_key: emoji = "🎯"
+                elif "status" in heading_key: emoji = "📊"
+                elif "weak" in heading_key: emoji = "⚠️"
+                elif "plan" in heading_key: emoji = "📋"
+                elif "next action" in heading_key: emoji = "✅"
+                else: emoji = "✨"
             output.append(f"{emoji} {stripped}")
         else:
             output.append(stripped)
 
-    # Step 2: Ensure blank line after every heading
+    # insert blank line after each heading
     result = []
     for i, line in enumerate(output):
         result.append(line)
-        if line and line[0] in "✨📖💡🌍📘❌⭐🧊🔍🧠✍️🎯" and i < len(output) - 1:
+        if line and line[0] in "✨📖💡🌍📘❌⭐🧊🔍🧠✍️🎯📊⚠️📋✅" and i < len(output) - 1:
             next_line = output[i + 1]
             if next_line != "":
                 result.append("")
 
-    # Step 3: Collapse multiple blank lines
+    # collapse multiple blank lines
     final_lines = []
     prev_blank = False
     for line in result:
@@ -476,7 +485,7 @@ def _apply_deterministic_format(text: str) -> str:
 
     final = "\n".join(final_lines)
     if len(final) < 20:
-        return text
+        return text   # safety net
     return final
 
 
@@ -691,7 +700,7 @@ def coach_agent(request, db=None) -> dict:
                 {"role": "user", "content": question},
             ],
             temperature=0.35,
-            max_tokens=600,
+            max_tokens=700,
         )
         answer = response.choices[0].message.content.strip()
     except Exception as exc:
@@ -794,7 +803,7 @@ def coach_agent(request, db=None) -> dict:
     }
 
 
-# ─── STREAMING GENERATOR – Simple, reliable ───────────────────────────────
+# ─── STREAMING GENERATOR ───────────────────────────────────────────────────
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if db is None:
         yield "Coach needs database access to personalize advice."
@@ -823,7 +832,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         recent_sessions=recent_sessions,
     )
 
-    # ── Only step: Draft (LLM) ──────────────────────────────────────────────
+    # ── Draft (LLM) ────────────────────────────────────────────────────────
     if intent == "planning":
         draft_prompt = _build_planning_prompt(
             coach=coach,
@@ -850,7 +859,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 {"role": "user", "content": question},
             ],
             temperature=0.35,
-            max_tokens=450,
+            max_tokens=700,
             stream=False,
         )
         draft = draft_resp.choices[0].message.content.strip()
