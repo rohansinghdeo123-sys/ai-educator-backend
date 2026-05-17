@@ -891,9 +891,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         recent_sessions=recent_sessions,
     )
 
-    # ── Progress: Drafter ──────────────────────────────────────────────────
-    yield "event: progress\ndata: 🧠 Thinking about your question...\n\n"
-
+    # ── Drafter ──────────────────────────────────────────────────────────
     if intent == "planning":
         draft_prompt = _build_planning_prompt(
             coach=coach,
@@ -929,18 +927,16 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         fallback = recommendation if intent == "planning" else "I'm having trouble explaining that right now."
         draft = fallback
 
-    # ── Progress: Enricher ─────────────────────────────────────────────────
-    yield "event: progress\ndata: 📚 Enriching with curriculum data...\n\n"
+    # ── Enricher ─────────────────────────────────────────────────────────
     enriched = _enrich_draft(draft, question)
 
-    # ── Progress: Formatter ────────────────────────────────────────────────
-    yield "event: progress\ndata: ✨ Polishing the answer...\n\n"
+    # ── Formatter ────────────────────────────────────────────────────────
     final_answer = _apply_deterministic_format(enriched)
     if len(final_answer) < 20:
         final_answer = draft
 
-    # ── Final answer ───────────────────────────────────────────────────────
-    yield f"data: {final_answer}\n\n"
+    # Stream the final answer (no progress events)
+    yield final_answer
 
     # Persist
     coach.daily_strategy = recommendation
