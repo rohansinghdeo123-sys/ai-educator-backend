@@ -1,20 +1,21 @@
 # Logic/agents/coach_agent.py
 
 """
-PERSONAL AI COACH AGENT – Three‑pass expert system with automatic formatting
+PERSONAL AI COACH AGENT – Multi‑agent system with deterministic formatting
 
-Pass 1 – Draft (intent‑aware)
-Pass 2 – Review (verify & enrich with Knowledge Graph)
-Pass 3 – Format & Post‑Process (beautiful, student‑friendly final output)
+Agents:
+- Drafter  (LLM) : generates a detailed, friendly first draft
+- Reviewer (LLM) : enriches the draft with curriculum knowledge, outputs structured sections
+- Formatter (code): applies the beautiful emoji‑rich, perfectly spaced layout
 
-- intent = "study_advice" → detailed, friendly study explanation, no analytics
-- intent = "planning"      → analytics, weak topics, next best action
+No formatting hallucinations – the final step is pure Python.
 """
 
 import logging
 import os
 import time
 import uuid
+import re
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Generator
 
@@ -40,14 +41,7 @@ MODEL_NAME = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 
 COACH_NAMES = [
-    "Astra",
-    "Nova",
-    "Kiran",
-    "Orion",
-    "Mira",
-    "Veda",
-    "Aria",
-    "Nexus",
+    "Astra", "Nova", "Kiran", "Orion", "Mira", "Veda", "Aria", "Nexus",
 ]
 
 
@@ -291,7 +285,7 @@ def _make_rule_based_recommendation(
     return base
 
 
-# ─── Intent‑based prompt builders ───────────────────────────────────────────
+# ─── Prompt builders (unchanged) ────────────────────────────────────────────
 
 def _build_study_prompt(
     coach: AICoachProfile,
@@ -323,13 +317,6 @@ You are {coach.coach_name}, a personal AI study coach.
 STUDY MODE – Provide a clear, detailed, and friendly explanation of the concept the student asks about. Use the provided knowledge base. Do NOT mention any analytics like Xp, streaks, focus scores, or study plans unless the student explicitly asks for them.
 
 Use simple language, everyday analogies, and break down complex ideas step-by-step. Highlight common mistakes to help the student avoid them.
-
-FORMATTING RULES (STRICT):
-- Use plain text only. Do NOT use markdown symbols like asterisks (**), underscores, or backticks.
-- Use blank lines between paragraphs.
-- Use simple bullet points with a dash (-) or a simple colon if listing items.
-- Keep sentences short and friendly.
-- Present the answer as a well-structured mini-article.
 
 KNOWLEDGE BASE:
 {graph_context if graph_context else "No specific curriculum data found – explain from your general chemistry knowledge."}
@@ -372,12 +359,6 @@ You are {coach.coach_name}, a personal AI study coach.
 
 PLANNING MODE – The student wants a study plan or performance review. Use the analytics below to give concise, actionable advice. Focus on weak topics, recent performance, and clear next steps. End with exactly one recommended action.
 
-FORMATTING RULES (STRICT):
-- Use plain text only. Do NOT use markdown symbols like asterisks (**), underscores, or backticks.
-- Use numbered phases (1., 2., 3.) and sub-points with dashes (-) or simple indentation.
-- Keep the plan structured, easy to scan, and friendly.
-- Do not write a long essay; use short paragraphs and clear sections.
-
 STUDENT PROFILE:
 Name: {coach.student_display_name or "Student"}
 Target exam: {coach.target_exam or "Not set"}
@@ -406,7 +387,7 @@ RECOMMENDATION (rule‑based):
 """.strip()
 
 
-def _build_review_prompt(
+def _build_structured_review_prompt(
     coach: AICoachProfile,
     question: str,
     draft: str,
@@ -432,14 +413,61 @@ def _build_review_prompt(
                 break
 
     return f"""
-You are {coach.coach_name}, a personal AI study coach. Review the draft answer below and produce an enriched version.
+You are {coach.coach_name}, a personal AI study coach. Review the draft answer below and produce an enriched version in a structured format.
 
 TASKS:
 - Correct any factual errors using the provided curriculum data.
 - Add any missing key points, examples, or common mistakes from the curriculum.
 - Keep the tone friendly and encouraging.
-- Do NOT use markdown symbols. Use plain text with dashes (-) for bullet points.
-- Do NOT mention analytics, XP, streaks, or study plans unless asked.
+
+FORMAT YOUR ANSWER EXACTLY LIKE THIS (use ### to start each section, followed by the section content):
+
+### Main Title
+A short, catchy title for the answer (e.g., "✨ Matter — Complete Explanation")
+
+### Definition
+- Simple definition in one or two sentences.
+
+### Simple Meaning
+- Point one
+- Point two
+
+### Understanding the Concept
+A short paragraph explaining the concept in daily life.
+
+### Examples
+- Example 1
+- Example 2
+
+### What is NOT included
+- Some things that do not fit the concept
+
+### Key Points
+1. Point one
+2. Point two
+
+### Types / Categories (if applicable)
+Type    Example    Description
+...
+
+### Real-Life Example
+A relatable, everyday example explained in a few sentences.
+
+### Scientific Definition
+The formal definition.
+
+### Exam Answer
+Q. Question?
+Answer: One concise sentence.
+
+### Key Takeaway
+👉 “Memorable sentence to remember.”
+
+IMPORTANT:
+- Use ### at the start of each section heading. The heading must be on its own line immediately after ###.
+- Do NOT use any markdown other than ### for section headings.
+- Use plain text for bullet points (just dashes -).
+- Ensure there is a blank line between each section.
 
 CURRICULUM DATA:
 {graph_context if graph_context else "No specific curriculum data found – keep the draft's content."}
@@ -447,78 +475,91 @@ CURRICULUM DATA:
 DRAFT ANSWER:
 {draft}
 
-Now provide the enriched answer.
+Now provide the enriched answer in the structured format above.
 """.strip()
 
 
-def _build_format_prompt(coach: AICoachProfile, enriched: str) -> str:
-    return f"""
-You are {coach.coach_name}, a personal AI study coach. Take the enriched answer below and reformat it into a visually engaging, student‑friendly mini‑article.
+# ─── Deterministic Formatter (Code Agent) ───────────────────────────────────
 
-ABSOLUTE RULES – FOLLOW WITHOUT EXCEPTION:
-1. Use ONLY plain text. Never use asterisks (*), underscores (_), or backticks (`).
-2. Every section MUST be separated by a blank line. Do NOT run sections together.
-3. Each bullet point, example, or point must be on its own line.
-4. Use emojis to introduce sections – choose appropriate emojis for the subject.
-5. Keep the overall structure exactly like the example below.
+def _apply_deterministic_format(structured_text: str) -> str:
+    """
+    Parse a structured text with ### sections and transform it into
+    the beautiful, perfectly spaced emoji‑rich final answer.
+    """
+    # Emoji mapping for common section headings
+    EMOJI_MAP = {
+        "main title": "✨",
+        "definition": "📖",
+        "simple meaning": "💡",
+        "understanding the concept": "🌍",
+        "examples": "📘",
+        "what is not included": "❌",
+        "key points": "⭐",
+        "types / categories": "🧊💧🌬",
+        "real-life example": "🔍",
+        "scientific definition": "🧠",
+        "exam answer": "✍️",
+        "key takeaway": "🎯",
+    }
 
-EXAMPLE STRUCTURE (adapt emojis and content as needed):
+    sections = re.split(r"\n###\s+", structured_text.strip())
+    output_lines = []
 
-✨ Main Title — Complete Explanation
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
 
-📖 Definition
-- Simple definition in one sentence.
+        # Split into heading and body (first line is heading, rest is body)
+        lines = section.split("\n", 1)
+        heading = lines[0].strip()
+        body = lines[1].strip() if len(lines) > 1 else ""
 
-Simple Meaning:
-- Point one
-- Point two
+        # Determine emoji
+        heading_lower = heading.lower()
+        emoji = ""
+        for key, e in EMOJI_MAP.items():
+            if key in heading_lower:
+                emoji = e
+                break
+        if not emoji:
+            # Try to pick a relevant emoji based on keywords in the heading
+            if "definition" in heading_lower:
+                emoji = "📖"
+            elif "meaning" in heading_lower:
+                emoji = "💡"
+            elif "example" in heading_lower:
+                emoji = "🔍"
+            elif "point" in heading_lower:
+                emoji = "⭐"
+            elif "type" in heading_lower or "categor" in heading_lower:
+                emoji = "🧊💧🌬"
+            elif "not" in heading_lower:
+                emoji = "❌"
+            elif "exam" in heading_lower:
+                emoji = "✍️"
+            elif "takeaway" in heading_lower or "remember" in heading_lower:
+                emoji = "🎯"
+            else:
+                emoji = "✨"
 
-🌍 Understanding the Concept
-A short paragraph explaining the concept in daily life.
+        # Format the section
+        output_lines.append(f"{emoji} {heading}")
+        output_lines.append("")
+        if body:
+            # Ensure body lines are individually clean
+            body_lines = body.split("\n")
+            for line in body_lines:
+                output_lines.append(line.strip())
+            output_lines.append("")
+        else:
+            output_lines.append("")
 
-Examples:
-📘 Example 1
-💧 Example 2
-🌬 Example 3
+    # Remove trailing empty lines
+    while output_lines and output_lines[-1] == "":
+        output_lines.pop()
 
-❌ What is NOT included
-- Some things that do not fit the concept
-
-Examples:
-🔆 Non-example 1
-🔥 Non-example 2
-
-⭐ Key Points
-1️⃣ Point one
-👉 Example: ...
-
-2️⃣ Point two
-👉 Example: ...
-
-🧊💧🌬 Categories / Types / States (if applicable)
-Type    Example    Description
-🧊 Solid    Ice    Particles closely packed
-💧 Liquid    Water    Particles loosely packed
-🌬 Gas    Oxygen    Particles far apart
-
-🔍 Real-Life Example
-A relatable, everyday example explained in a few sentences.
-
-🧠 Scientific Definition
-The formal definition.
-
-✍️ Short Exam Answer
-Q. Question?
-Answer: One concise sentence.
-
-🎯 Key Takeaway
-👉 “Memorable sentence to remember.”
-
-ENRICHED ANSWER:
-{enriched}
-
-Now produce the final, beautifully formatted answer with proper blank lines and no markdown.
-""".strip()
+    return "\n".join(output_lines)
 
 
 def _persist_interaction(
@@ -835,44 +876,7 @@ def coach_agent(request, db=None) -> dict:
     }
 
 
-# ─── Spacing post‑processor ────────────────────────────────────────────────
-def _enforce_spacing(text: str) -> str:
-    """
-    Ensure every line is separated by at least one blank line,
-    but preserve intentional multi-line blocks (like tables).
-    """
-    lines = text.split("\n")
-    result = []
-    prev_blank = False
-
-    for line in lines:
-        stripped = line.strip()
-
-        # If the line is empty, we'll add a blank line marker
-        if not stripped:
-            if not prev_blank:
-                result.append("")
-                prev_blank = True
-            continue
-
-        # If the line looks like a table row, keep it with the previous line
-        if ("\t" in stripped or "|" in stripped) and result and not prev_blank:
-            result[-1] = result[-1] + "\n" + stripped
-            prev_blank = False
-        else:
-            if result and not prev_blank:
-                result.append("")
-            result.append(stripped)
-            prev_blank = False
-
-    # Remove trailing empty lines
-    while result and not result[-1]:
-        result.pop()
-
-    return "\n".join(result)
-
-
-# ─── STREAMING GENERATOR – Three‑pass with spacing enforcement ─────────────
+# ─── STREAMING GENERATOR – True multi‑agent with deterministic formatting ────
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if db is None:
         yield "Coach needs database access to personalize advice."
@@ -901,7 +905,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         recent_sessions=recent_sessions,
     )
 
-    # Pass 1: Draft
+    # ── Agent 1: Drafter (LLM) ──────────────────────────────────────────────
     if intent == "planning":
         draft_prompt = _build_planning_prompt(
             coach=coach,
@@ -937,61 +941,38 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         fallback = recommendation if intent == "planning" else "I'm having trouble explaining that right now."
         draft = fallback
 
-    # Pass 2: Review & Enrich
-    review_prompt = _build_review_prompt(
+    # ── Agent 2: Reviewer (LLM) – produces structured output ─────────────────
+    review_prompt = _build_structured_review_prompt(
         coach=coach,
         question=question,
         draft=draft,
         topic_snapshot=topic_snapshot,
     )
-    enriched = ""
+    enriched_structured = ""
     try:
         review_resp = groq_client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": review_prompt},
-                {"role": "user", "content": f"Please review and improve this answer:\n\n{draft}"},
+                {"role": "user", "content": f"Please review and structure this answer:\n\n{draft}"},
             ],
             temperature=0.3,
             max_tokens=550,
             stream=False,
         )
-        enriched = review_resp.choices[0].message.content.strip()
+        enriched_structured = review_resp.choices[0].message.content.strip()
     except Exception as exc:
         logger.error("[COACH REVIEW] Groq error: %s", exc)
-        enriched = draft
+        # Fallback: wrap the draft in a basic structure
+        enriched_structured = f"### Main Title\n✨ Concept Explanation\n\n### Definition\n{draft}"
 
-    # Pass 3: Format, Post‑Process, and Stream
-    format_prompt = _build_format_prompt(coach=coach, enriched=enriched)
-    full_answer = ""
-    try:
-        format_stream = groq_client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": format_prompt},
-                {"role": "user", "content": "Please format this answer."},
-            ],
-            temperature=0.25,
-            max_tokens=600,
-            stream=True,
-        )
-        raw_tokens = []
-        for chunk in format_stream:
-            token = chunk.choices[0].delta.content
-            if token:
-                raw_tokens.append(token)
+    # ── Agent 3: Formatter (deterministic Python code) ──────────────────────
+    final_answer = _apply_deterministic_format(enriched_structured)
+    if not final_answer.strip():
+        final_answer = enriched_structured  # fallback
 
-        # Join, clean, and enforce spacing
-        raw_text = "".join(raw_tokens).replace("*", "")
-        final_text = _enforce_spacing(raw_text)
-        full_answer = final_text
-        yield final_text
-    except Exception as exc:
-        logger.error("[COACH FORMAT] Groq error: %s", exc)
-        enriched_clean = enriched.replace("*", "")
-        final_text = _enforce_spacing(enriched_clean)
-        full_answer = final_text
-        yield final_text
+    # Stream the final answer
+    yield final_answer
 
     # Persist
     coach.daily_strategy = recommendation
@@ -1012,7 +993,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         db=db,
         coach=coach,
         role="assistant",
-        message=full_answer,
+        message=final_answer,
         intent=intent,
         mode=mode,
         metadata={
