@@ -1,11 +1,11 @@
 # Logic/agents/coach_agent.py
 
 """
-PERSONAL AI COACH AGENT – Three‑pass expert system
+PERSONAL AI COACH AGENT – Three‑pass expert system with automatic formatting
 
 Pass 1 – Draft (intent‑aware)
 Pass 2 – Review (verify & enrich with Knowledge Graph)
-Pass 3 – Format (beautiful, student‑friendly final output)
+Pass 3 – Format & Post‑Process (beautiful, student‑friendly final output)
 
 - intent = "study_advice" → detailed, friendly study explanation, no analytics
 - intent = "planning"      → analytics, weak topics, next best action
@@ -298,7 +298,6 @@ def _build_study_prompt(
     question: str,
     topic_snapshot: Dict[str, Any],
 ) -> str:
-    """Prompt for study_advice – detailed, friendly, no analytics."""
     graph_context = ""
     keywords = [w for w in question.lower().split() if len(w) > 2]
     for kw in keywords[:3]:
@@ -349,7 +348,6 @@ def _build_planning_prompt(
     analytics_snapshot: Dict[str, Any],
     recommendation: str,
 ) -> str:
-    """Prompt for planning – includes analytics and recommendations."""
     memory_text = "\n".join(
         f"- {memory.title}: {memory.summary}"
         for memory in memories
@@ -414,7 +412,6 @@ def _build_review_prompt(
     draft: str,
     topic_snapshot: Dict[str, Any],
 ) -> str:
-    """Prompt that reviews a draft answer, corrects errors, adds missing data."""
     graph_context = ""
     keywords = [w for w in question.lower().split() if len(w) > 2]
     for kw in keywords[:3]:
@@ -454,7 +451,6 @@ Now provide the enriched answer.
 """.strip()
 
 
-# ─── FINAL FORMAT PROMPT – the magic behind beautiful answers ──────────────
 def _build_format_prompt(coach: AICoachProfile, enriched: str) -> str:
     return f"""
 You are {coach.coach_name}, a personal AI study coach. Take the enriched answer below and reformat it into a visually engaging, student‑friendly mini‑article.
@@ -839,7 +835,44 @@ def coach_agent(request, db=None) -> dict:
     }
 
 
-# ─── STREAMING GENERATOR – Three‑pass with perfect formatting ──────────────
+# ─── Spacing post‑processor ────────────────────────────────────────────────
+def _enforce_spacing(text: str) -> str:
+    """
+    Ensure every line is separated by at least one blank line,
+    but preserve intentional multi-line blocks (like tables).
+    """
+    lines = text.split("\n")
+    result = []
+    prev_blank = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # If the line is empty, we'll add a blank line marker
+        if not stripped:
+            if not prev_blank:
+                result.append("")
+                prev_blank = True
+            continue
+
+        # If the line looks like a table row, keep it with the previous line
+        if ("\t" in stripped or "|" in stripped) and result and not prev_blank:
+            result[-1] = result[-1] + "\n" + stripped
+            prev_blank = False
+        else:
+            if result and not prev_blank:
+                result.append("")
+            result.append(stripped)
+            prev_blank = False
+
+    # Remove trailing empty lines
+    while result and not result[-1]:
+        result.pop()
+
+    return "\n".join(result)
+
+
+# ─── STREAMING GENERATOR – Three‑pass with spacing enforcement ─────────────
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if db is None:
         yield "Coach needs database access to personalize advice."
@@ -928,7 +961,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         logger.error("[COACH REVIEW] Groq error: %s", exc)
         enriched = draft
 
-    # Pass 3: Format & Stream
+    # Pass 3: Format, Post‑Process, and Stream
     format_prompt = _build_format_prompt(coach=coach, enriched=enriched)
     full_answer = ""
     try:
@@ -942,18 +975,23 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             max_tokens=600,
             stream=True,
         )
+        raw_tokens = []
         for chunk in format_stream:
             token = chunk.choices[0].delta.content
             if token:
-                clean_token = token.replace("*", "")
-                full_answer += clean_token
-                yield clean_token
+                raw_tokens.append(token)
+
+        # Join, clean, and enforce spacing
+        raw_text = "".join(raw_tokens).replace("*", "")
+        final_text = _enforce_spacing(raw_text)
+        full_answer = final_text
+        yield final_text
     except Exception as exc:
         logger.error("[COACH FORMAT] Groq error: %s", exc)
-        for char in enriched:
-            if char != "*":
-                full_answer += char
-                yield char
+        enriched_clean = enriched.replace("*", "")
+        final_text = _enforce_spacing(enriched_clean)
+        full_answer = final_text
+        yield final_text
 
     # Persist
     coach.daily_strategy = recommendation
