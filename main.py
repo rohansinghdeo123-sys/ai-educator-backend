@@ -709,8 +709,8 @@ async def coach_chat_stream(payload: CoachChatRequest, db: Session = Depends(get
 
     def event_stream():
         for token in coach_agent_stream(CoachRequest(), db=db):
-            # SSE format: data: <token>\n\n
-            yield f"data: {token}\n\n"
+            # coach_agent_stream already returns complete SSE frames.
+            yield token
 
     return StreamingResponse(
         event_stream(),
