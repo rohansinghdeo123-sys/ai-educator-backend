@@ -1,18 +1,10 @@
 # Logic/agents/coach_agent.py
 
 """
-PERSONAL AI COACH AGENT
+PERSONAL AI COACH AGENT – intent‑aware prompts
 
-A durable per-user coach that learns from:
-- user progress
-- topic performance
-- test/session history
-- coach memory
-- daily study signals
-
-The coach is not a generic tutor. It gives study strategy, weak-area advice,
-exam guidance, motivation, and next best actions for one specific user.
-Now enriched with structured curriculum data from the Knowledge Graph.
+- intent = "study_advice" → detailed, friendly study explanation, no analytics
+- intent = "planning"      → analytics, weak topics, next best action
 """
 
 import logging
@@ -296,14 +288,59 @@ def _make_rule_based_recommendation(
     return base
 
 
-def _build_coach_system_prompt(
+# ─── Intent‑based prompt builders ───────────────────────────────────────────
+
+def _build_study_prompt(
+    coach: AICoachProfile,
+    question: str,
+    topic_snapshot: Dict[str, Any],
+) -> str:
+    """Prompt for study_advice – detailed, friendly, no analytics."""
+    graph_context = ""
+    # Search knowledge graph for concepts matching the question
+    keywords = [w for w in question.lower().split() if len(w) > 2]
+    for kw in keywords[:3]:
+        concepts = knowledge_graph.search_by_keyword(kw, limit=2)
+        if concepts:
+            for c in concepts:
+                graph_context += f"--- CONCEPT: {c['title']} (ID: {c['concept_id']}) ---\n"
+                graph_context += f"Definition: {c.get('definition', '')}\n"
+                graph_context += f"Explanation: {c.get('core_explanation', '')}\n"
+                if c.get("key_points"):
+                    graph_context += "Key Points:\n  " + "\n  ".join(c["key_points"]) + "\n"
+                if c.get("examples"):
+                    graph_context += "Examples:\n  " + "\n  ".join(c["examples"]) + "\n"
+                if c.get("common_mistakes"):
+                    graph_context += "Common Mistakes:\n  " + "\n  ".join(
+                        [f"{m['mistake']} -> {m['correction']}" for m in c["common_mistakes"]]
+                    ) + "\n"
+                break  # only use the first matching concept
+
+    return f"""
+You are {coach.coach_name}, a personal AI study coach.
+
+STUDY MODE – Focus on providing a clear, detailed, and friendly explanation of the concept the student asks about. Use the provided knowledge base. Do NOT mention any analytics like Xp, streaks, focus scores, or study plans unless the student explicitly asks for them.
+
+Use simple language, everyday analogies, and break down complex ideas step-by-step. Highlight common mistakes to help the student avoid them.
+
+KNOWLEDGE BASE:
+{graph_context if graph_context else "No specific curriculum data found – explain from your general chemistry knowledge."}
+
+QUESTION FROM STUDENT:
+{question}
+""".strip()
+
+
+def _build_planning_prompt(
     coach: AICoachProfile,
     progress: Dict[str, Any],
     topic_snapshot: Dict[str, Any],
     recent_sessions: List[Dict[str, Any]],
     memories: List[AICoachMemory],
     analytics_snapshot: Dict[str, Any],
+    recommendation: str,
 ) -> str:
+    """Prompt for planning – includes analytics and recommendations."""
     memory_text = "\n".join(
         f"- {memory.title}: {memory.summary}"
         for memory in memories
@@ -320,20 +357,13 @@ def _build_coach_system_prompt(
                 if c.get('common_mistakes'):
                     hint += f", common mistakes: {[m['mistake'] for m in c['common_mistakes'][:2]]}"
                 graph_hints += hint + "\n"
-
     if graph_hints:
         graph_hints = "\nCURRICULUM INSIGHTS (use these to prioritise):\n" + graph_hints
 
     return f"""
-You are {coach.coach_name}, a personal AI study coach for one learner.
+You are {coach.coach_name}, a personal AI study coach.
 
-COACH STYLE:
-- Tone: focused, supportive, honest, exam-oriented.
-- Give practical advice, not generic motivation.
-- Use the learner's actual analytics and recent performance.
-- Keep answers concise unless the student asks for detail.
-- Never shame the student. Be direct and useful.
-- End with one clear next action.
+PLANNING MODE – The student wants a study plan or performance review. Use the analytics below to give concise, actionable advice. Focus on weak topics, recent performance, and clear next steps. End with exactly one recommended action.
 
 STUDENT PROFILE:
 Name: {coach.student_display_name or "Student"}
@@ -358,11 +388,8 @@ COACH MEMORY:
 {memory_text}
 {graph_hints}
 
-RESPONSE FORMAT:
-1. Start with a personalized, natural answer.
-2. Mention the most important performance signal if useful.
-3. Give a short recommendation.
-4. Give exactly one next action.
+RECOMMENDATION (rule‑based):
+{recommendation}
 """.strip()
 
 
@@ -537,14 +564,23 @@ def coach_agent(request, db=None) -> dict:
         session_id=session_id,
     )
 
-    system_prompt = _build_coach_system_prompt(
-        coach=coach,
-        progress=progress,
-        topic_snapshot=topic_snapshot,
-        recent_sessions=recent_sessions,
-        memories=memories,
-        analytics_snapshot=analytics_snapshot,
-    )
+    # Use intent‑based prompt selection
+    if intent == "planning":
+        system_prompt = _build_planning_prompt(
+            coach=coach,
+            progress=progress,
+            topic_snapshot=topic_snapshot,
+            recent_sessions=recent_sessions,
+            memories=memories,
+            analytics_snapshot=analytics_snapshot,
+            recommendation=recommendation,
+        )
+    else:
+        system_prompt = _build_study_prompt(
+            coach=coach,
+            question=question,
+            topic_snapshot=topic_snapshot,
+        )
 
     event_bus.emit(
         "coach",
@@ -569,7 +605,7 @@ def coach_agent(request, db=None) -> dict:
                 {"role": "user", "content": question},
             ],
             temperature=0.35,
-            max_tokens=450,
+            max_tokens=600,
         )
         answer = response.choices[0].message.content.strip()
     except Exception as exc:
@@ -672,11 +708,10 @@ def coach_agent(request, db=None) -> dict:
     }
 
 
-# ================= NEW STREAMING GENERATOR =================
+# ─── STREAMING GENERATOR – now intent‑aware ────────────────────────────────
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     """
-    Same as coach_agent, but yields tokens one by one from Groq.
-    After the stream ends, it persists the interaction and emits events.
+    Stream the coach's reply token by token, using intent to select the prompt.
     """
     if db is None:
         yield "Coach needs database access to personalize advice."
@@ -685,7 +720,8 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     user_id = getattr(request, "user_id", None) or getattr(request, "session_id", "anonymous")
     question = getattr(request, "question", "")
     session_id = getattr(request, "session_id", f"coach-{user_id}")
-    intent = getattr(request, "intent", "general")
+    intent = getattr(request, "intent", "study_advice")   # default to study
+    mode = getattr(request, "mode", "coach")
 
     coach = get_or_create_coach(db, user_id)
     progress = _build_progress_snapshot(db, user_id)
@@ -704,16 +740,24 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         recent_sessions=recent_sessions,
     )
 
-    system_prompt = _build_coach_system_prompt(
-        coach=coach,
-        progress=progress,
-        topic_snapshot=topic_snapshot,
-        recent_sessions=recent_sessions,
-        memories=memories,
-        analytics_snapshot=analytics_snapshot,
-    )
+    # Choose prompt based on intent
+    if intent == "planning":
+        system_prompt = _build_planning_prompt(
+            coach=coach,
+            progress=progress,
+            topic_snapshot=topic_snapshot,
+            recent_sessions=recent_sessions,
+            memories=memories,
+            analytics_snapshot=analytics_snapshot,
+            recommendation=recommendation,
+        )
+    else:  # study_advice or anything else
+        system_prompt = _build_study_prompt(
+            coach=coach,
+            question=question,
+            topic_snapshot=topic_snapshot,
+        )
 
-    # ── Stream tokens ─────────────────────────────────────────────────────
     full_answer = ""
     try:
         stream = groq_client.chat.completions.create(
@@ -723,23 +767,21 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 {"role": "user", "content": question},
             ],
             temperature=0.35,
-            max_tokens=450,
+            max_tokens=600,          # increased for descriptive answers
             stream=True,
         )
-
         for chunk in stream:
             token = chunk.choices[0].delta.content
             if token:
                 full_answer += token
                 yield token
-
     except Exception as exc:
         logger.error("[COACH STREAM] Groq API error: %s", exc)
-        fallback = recommendation
+        fallback = recommendation if intent == "planning" else "I'm having trouble explaining that right now."
         full_answer = fallback
         yield fallback
 
-    # ── Persist after stream ──────────────────────────────────────────────
+    # Persist after stream
     coach.daily_strategy = recommendation
     coach.next_best_action = recommendation
     coach.last_interaction_at = datetime.utcnow()
@@ -751,17 +793,16 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         role="user",
         message=question,
         intent=intent,
-        mode="coach",
+        mode=mode,
         metadata={"session_id": session_id},
     )
-
     _persist_interaction(
         db=db,
         coach=coach,
         role="assistant",
         message=full_answer,
         intent=intent,
-        mode="coach",
+        mode=mode,
         metadata={
             "session_id": session_id,
             "progress": progress,
