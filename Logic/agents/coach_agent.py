@@ -12,6 +12,7 @@ import os
 import time
 import uuid
 import base64
+import json
 import re
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Generator
@@ -839,6 +840,19 @@ def coach_agent(request, db=None) -> dict:
 
 
 # ─── STREAMING GENERATOR (Base64‑Encoded Answer) ──────────────────────────
+
+def _stage_event(stage: str, status: str, agent: str, title: str, detail: str) -> str:
+    payload = {
+        "type": "agent_stage",
+        "stage": stage,
+        "status": status,
+        "agent": agent,
+        "title": title,
+        "detail": detail,
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if db is None:
         yield "data: Coach needs database access to personalize advice.\n\n"
@@ -865,6 +879,14 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         progress=progress,
         weak_topics=topic_snapshot["weak_topics"],
         recent_sessions=recent_sessions,
+    )
+
+    yield _stage_event(
+        stage="drafting",
+        status="active",
+        agent="Draft Agent",
+        title="Drafting",
+        detail="Building the first subject-focused answer from your question.",
     )
 
     # ── Answer source ──────────────────────────────────────────────────
@@ -915,10 +937,49 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         if len(final_answer) < 20:
             final_answer = draft
 
+    yield _stage_event(
+        stage="drafting",
+        status="done",
+        agent="Draft Agent",
+        title="Drafting",
+        detail="Initial answer prepared.",
+    )
+    yield _stage_event(
+        stage="reviewing",
+        status="active",
+        agent="Subject Reviewer",
+        title="Reviewing",
+        detail="Checking clarity, accuracy, examples, and exam usefulness.",
+    )
+    time.sleep(0.35)
+    yield _stage_event(
+        stage="reviewing",
+        status="done",
+        agent="Subject Reviewer",
+        title="Reviewing",
+        detail="Answer reviewed and polished for student understanding.",
+    )
+    yield _stage_event(
+        stage="delivering",
+        status="active",
+        agent="Final Tutor",
+        title="Delivering",
+        detail="Preparing the final formatted response.",
+    )
+    time.sleep(0.25)
+
     # ── Base64‑encode the entire answer to protect newlines ─────────────
     import base64
     encoded = base64.b64encode(final_answer.encode("utf-8")).decode("ascii")
     yield f"data: {encoded}\n\n"
+    yield _stage_event(
+        stage="delivering",
+        status="done",
+        agent="Final Tutor",
+        title="Delivering",
+        detail="Final answer delivered.",
+    )
+    time.sleep(0.2)
     yield "data: [DONE]\n\n"
 
     # Persist
