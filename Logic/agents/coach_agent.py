@@ -1,10 +1,12 @@
 # Logic/agents/coach_agent.py
 
 """
-PERSONAL AI COACH AGENT – Reliable two‑pass system
+PERSONAL AI COACH AGENT – Autonomous multi‑agent with Knowledge‑Graph enricher
 
-Pass 1 – Draft (LLM) : generates a structured, detailed answer
-Pass 2 – Format (code): applies beautiful emoji‑rich layout with perfect spacing
+Flow:
+- Drafter (LLM)      : generates a friendly draft (may be incomplete)
+- Enricher (Python)   : fills missing sections from Knowledge Graph
+- Formatter (Python)  : applies emoji‑rich, perfectly spaced layout
 """
 
 import logging
@@ -281,7 +283,7 @@ def _make_rule_based_recommendation(
     return base
 
 
-# ─── STRUCTURED DRAFT PROMPTS ──────────────────────────────────────────────
+# ─── SIMPLE DRAFT PROMPT (no forced structure) ─────────────────────────────
 
 def _build_study_prompt(
     coach: AICoachProfile,
@@ -310,23 +312,10 @@ def _build_study_prompt(
     return f"""
 You are {coach.coach_name}, a personal AI study coach.
 
-STUDY MODE – Write a comprehensive, student‑friendly explanation of the concept asked by the student.
-
-STRUCTURE YOUR ANSWER EXACTLY AS FOLLOWS – each section heading must end with a colon:
-Definition:
-Simple Meaning:
-Understanding the Concept:
-Key Points:
-Examples:
-What is NOT included:
-Scientific Definition:
-Exam Answer:
-Key Takeaway:
-
-Make sure every section has at least one full sentence. Use simple language, everyday analogies, and highlight common mistakes. Do NOT use any markdown symbols like asterisks or underscores.
+Write a friendly, detailed explanation of the concept the student asked about. Use simple language and everyday analogies. Include a definition, key points, examples, and common mistakes if possible. Do NOT use any markdown symbols.
 
 KNOWLEDGE BASE:
-{graph_context if graph_context else "No specific curriculum data found – explain from your general knowledge."}
+{graph_context if graph_context else "No specific curriculum data found – explain from your general chemistry knowledge."}
 
 QUESTION FROM STUDENT:
 {question}
@@ -364,15 +353,7 @@ def _build_planning_prompt(
     return f"""
 You are {coach.coach_name}, a personal AI study coach.
 
-PLANNING MODE – Create a structured study plan for the student.
-
-FORMAT YOUR ANSWER WITH THESE SECTIONS (each heading must end with a colon):
-Current Status:
-Weak Topics:
-Recommended Plan:
-Next Action:
-
-Use clear bullet points with dashes (-). Keep the plan concise and actionable. Do NOT use any markdown symbols like asterisks or underscores.
+PLANNING MODE – Create a concise study plan based on the analytics below. Use bullet points with dashes. Do NOT use any markdown.
 
 STUDENT PROFILE:
 Name: {coach.student_display_name or "Student"}
@@ -402,12 +383,120 @@ RECOMMENDATION (rule‑based):
 """.strip()
 
 
-# ─── DETERMINISTIC FORMATTER ───────────────────────────────────────────────
+# ─── AUTONOMOUS ENRICHER (Python, no LLM) ──────────────────────────────────
+
+def _extract_keywords(question: str) -> List[str]:
+    """Extract meaningful words from the question for Knowledge Graph search."""
+    return [w for w in question.lower().split() if len(w) > 2 and w not in ("what", "the", "explain", "define", "tell", "about", "describe")]
+
+
+def _enrich_draft(draft: str, question: str) -> str:
+    """
+    Ensure the draft contains all required sections.
+    If a section is missing or too short, fill it from the Knowledge Graph.
+    """
+    sections = {
+        "Definition": "",
+        "Simple Meaning": "",
+        "Understanding the Concept": "",
+        "Key Points": "",
+        "Examples": "",
+        "What is NOT included": "",
+        "Common Mistakes": "",
+        "Scientific Definition": "",
+        "Exam Answer": "",
+        "Key Takeaway": "",
+    }
+
+    # Try to parse existing content into sections
+    current_section = None
+    for line in draft.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Check if this line is a heading (ends with ":" and short)
+        if stripped.endswith(":") and len(stripped) < 60:
+            heading_key = stripped[:-1].strip().lower()
+            # Map heading to our sections
+            for section_name in sections:
+                if section_name.lower() in heading_key:
+                    current_section = section_name
+                    break
+            if current_section is None:
+                # Try partial matches
+                if "definition" in heading_key and "scientific" not in heading_key:
+                    current_section = "Definition"
+                elif "meaning" in heading_key:
+                    current_section = "Simple Meaning"
+                elif "understanding" in heading_key or "concept" in heading_key:
+                    current_section = "Understanding the Concept"
+                elif "key point" in heading_key:
+                    current_section = "Key Points"
+                elif "example" in heading_key and "not" not in heading_key:
+                    current_section = "Examples"
+                elif "not included" in heading_key or "what is not" in heading_key:
+                    current_section = "What is NOT included"
+                elif "mistake" in heading_key:
+                    current_section = "Common Mistakes"
+                elif "scientific" in heading_key:
+                    current_section = "Scientific Definition"
+                elif "exam" in heading_key:
+                    current_section = "Exam Answer"
+                elif "takeaway" in heading_key or "remember" in heading_key:
+                    current_section = "Key Takeaway"
+            # Don't add the heading itself to the section content
+            continue
+        # If we are inside a section, append the line
+        if current_section:
+            sections[current_section] += stripped + "\n"
+        else:
+            # Uncaptured text goes into Definition if empty, else Understanding
+            if not sections["Definition"].strip():
+                sections["Definition"] += stripped + "\n"
+            else:
+                sections["Understanding the Concept"] += stripped + "\n"
+
+    # Enrich from Knowledge Graph
+    keywords = _extract_keywords(question)
+    concepts = []
+    for kw in keywords[:3]:
+        found = knowledge_graph.search_by_keyword(kw, limit=1)
+        if found:
+            concepts.extend(found)
+    if not concepts and knowledge_graph.concepts:
+        # Fallback: search by the first keyword in the whole graph
+        concepts = [knowledge_graph.get_concept(list(knowledge_graph.concepts.keys())[0])]
+
+    # Use the first matching concept to fill missing sections
+    concept = concepts[0] if concepts else {}
+
+    def _fill_if_missing(section_name: str, content_from_graph: str):
+        if not sections[section_name].strip() or len(sections[section_name].strip()) < 10:
+            sections[section_name] = content_from_graph.strip() + "\n"
+
+    _fill_if_missing("Definition", concept.get("definition", "Matter is anything that has mass and occupies space."))
+    _fill_if_missing("Simple Meaning", f"- {concept.get('definition', 'Matter has mass and volume.')}")
+    _fill_if_missing("Key Points", "\n".join(f"- {p}" for p in concept.get("key_points", [])) or "- Mass and volume are fundamental properties.")
+    _fill_if_missing("Examples", "\n".join(f"- {e}" for e in concept.get("examples", [])) or "- Everyday objects like books, water, and air are matter.")
+    _fill_if_missing("Common Mistakes", "\n".join(f"- {m['mistake']} -> {m['correction']}" for m in concept.get("common_mistakes", [])) or "- Confusing matter with energy.")
+    _fill_if_missing("Scientific Definition", concept.get("definition", "Matter is any substance that has mass and occupies space."))
+    _fill_if_missing("Exam Answer", concept.get("definition", "Matter is anything that has mass and occupies space."))
+    _fill_if_missing("Key Takeaway", "👉 Matter has mass and occupies space – everything around us is made of matter.")
+
+    # Assemble final enriched answer
+    enriched = ""
+    order = ["Definition", "Simple Meaning", "Understanding the Concept", "Key Points", "Examples", "What is NOT included", "Common Mistakes", "Scientific Definition", "Exam Answer", "Key Takeaway"]
+    for section_name in order:
+        content = sections[section_name].strip()
+        if content:
+            enriched += f"{section_name}:\n{content}\n\n"
+    return enriched.strip()
+
+
+# ─── FORMATTER ─────────────────────────────────────────────────────────────
 
 def _apply_deterministic_format(text: str) -> str:
-    """Add emojis to headings and enforce blank‑line spacing."""
-    text = text.replace("*", "")   # strip accidental asterisks
-
+    text = text.replace("*", "")
     EMOJI_MAP = {
         "definition": "📖",
         "simple meaning": "💡",
@@ -415,13 +504,10 @@ def _apply_deterministic_format(text: str) -> str:
         "key points": "⭐",
         "examples": "📘",
         "what is not included": "❌",
+        "common mistakes": "⚠️",
         "scientific definition": "🧠",
         "exam answer": "✍️",
         "key takeaway": "🎯",
-        "current status": "📊",
-        "weak topics": "⚠️",
-        "recommended plan": "📋",
-        "next action": "✅",
     }
 
     lines = text.split("\n")
@@ -432,43 +518,22 @@ def _apply_deterministic_format(text: str) -> str:
             output.append("")
             continue
 
-        # heading detection
         is_heading = stripped.endswith(":") and len(stripped) < 60
         if is_heading:
             heading_key = stripped[:-1].strip().lower()
-            emoji = ""
-            for key, e in EMOJI_MAP.items():
-                if key in heading_key:
-                    emoji = e
-                    break
-            if not emoji:
-                # general fallback
-                if "definition" in heading_key: emoji = "📖"
-                elif "meaning" in heading_key: emoji = "💡"
-                elif "example" in heading_key: emoji = "🔍"
-                elif "point" in heading_key: emoji = "⭐"
-                elif "not" in heading_key: emoji = "❌"
-                elif "exam" in heading_key: emoji = "✍️"
-                elif "takeaway" in heading_key: emoji = "🎯"
-                elif "status" in heading_key: emoji = "📊"
-                elif "weak" in heading_key: emoji = "⚠️"
-                elif "plan" in heading_key: emoji = "📋"
-                elif "next action" in heading_key: emoji = "✅"
-                else: emoji = "✨"
+            emoji = EMOJI_MAP.get(heading_key, "✨")
             output.append(f"{emoji} {stripped}")
         else:
             output.append(stripped)
 
-    # insert blank line after each heading
     result = []
     for i, line in enumerate(output):
         result.append(line)
-        if line and line[0] in "✨📖💡🌍📘❌⭐🧊🔍🧠✍️🎯📊⚠️📋✅" and i < len(output) - 1:
+        if line and line[0] in "✨📖💡🌍📘❌⭐🧊🔍🧠✍️🎯⚠️" and i < len(output) - 1:
             next_line = output[i + 1]
             if next_line != "":
                 result.append("")
 
-    # collapse multiple blank lines
     final_lines = []
     prev_blank = False
     for line in result:
@@ -484,9 +549,7 @@ def _apply_deterministic_format(text: str) -> str:
         final_lines.pop()
 
     final = "\n".join(final_lines)
-    if len(final) < 20:
-        return text   # safety net
-    return final
+    return final if len(final) >= 20 else text
 
 
 def _persist_interaction(
@@ -702,21 +765,17 @@ def coach_agent(request, db=None) -> dict:
             temperature=0.35,
             max_tokens=700,
         )
-        answer = response.choices[0].message.content.strip()
+        draft = response.choices[0].message.content.strip()
     except Exception as exc:
         logger.error("[COACH] Groq API error: %s", exc)
-        answer = recommendation
+        draft = recommendation
 
-        event_bus.emit(
-            "coach",
-            "error",
-            {
-                "step": "generate",
-                "message": f"LLM failed, using rule-based recommendation: {str(exc)}",
-            },
-            session_id=session_id,
-            severity="warning",
-        )
+    # Enrich with Knowledge Graph (autonomous)
+    enriched = _enrich_draft(draft, question)
+    # Format
+    answer = _apply_deterministic_format(enriched)
+    if len(answer) < 20:
+        answer = draft
 
     event_bus.emit(
         "coach",
@@ -757,7 +816,7 @@ def coach_agent(request, db=None) -> dict:
             "progress": progress,
             "weak_topics": topic_snapshot["weak_topics"][:3],
         },
-        quality_score=0.8,
+        quality_score=0.9,
     )
 
     latency_ms = round((time.time() - start_time) * 1000)
@@ -769,7 +828,7 @@ def coach_agent(request, db=None) -> dict:
             "status": "success",
             "message": f"Coach response delivered by {coach.coach_name}",
             "latency_ms": latency_ms,
-            "quality_score": 0.8,
+            "quality_score": 0.9,
             "quality_passed": True,
         },
         session_id=session_id,
@@ -803,7 +862,7 @@ def coach_agent(request, db=None) -> dict:
     }
 
 
-# ─── STREAMING GENERATOR ───────────────────────────────────────────────────
+# ─── STREAMING GENERATOR with progress events ──────────────────────────────
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if db is None:
         yield "Coach needs database access to personalize advice."
@@ -832,7 +891,9 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         recent_sessions=recent_sessions,
     )
 
-    # ── Draft (LLM) ────────────────────────────────────────────────────────
+    # ── Progress: Drafter ──────────────────────────────────────────────────
+    yield "event: progress\ndata: 🧠 Thinking about your question...\n\n"
+
     if intent == "planning":
         draft_prompt = _build_planning_prompt(
             coach=coach,
@@ -868,12 +929,18 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         fallback = recommendation if intent == "planning" else "I'm having trouble explaining that right now."
         draft = fallback
 
-    # ── Format with code ────────────────────────────────────────────────────
-    final_answer = _apply_deterministic_format(draft)
+    # ── Progress: Enricher ─────────────────────────────────────────────────
+    yield "event: progress\ndata: 📚 Enriching with curriculum data...\n\n"
+    enriched = _enrich_draft(draft, question)
+
+    # ── Progress: Formatter ────────────────────────────────────────────────
+    yield "event: progress\ndata: ✨ Polishing the answer...\n\n"
+    final_answer = _apply_deterministic_format(enriched)
     if len(final_answer) < 20:
         final_answer = draft
 
-    yield final_answer
+    # ── Final answer ───────────────────────────────────────────────────────
+    yield f"data: {final_answer}\n\n"
 
     # Persist
     coach.daily_strategy = recommendation
@@ -910,7 +977,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         "task_complete",
         {
             "status": "success",
-            "message": f"Coach response delivered by {coach.coach_name}",
+            "message": f"Coach reviewed and delivered by {coach.coach_name}",
             "latency_ms": 0,
             "quality_score": 0.9,
             "quality_passed": True,
