@@ -799,11 +799,10 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         recent_sessions=recent_sessions,
     )
 
-    # ── Answer source ────────────────────────────────────────────────────
+    # ── Answer source ──────────────────────────────────────────────────
     if _is_definition_question(question):
         final_answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
     else:
-        # LLM draft
         if intent == "planning":
             draft_prompt = _build_planning_prompt(
                 coach=coach,
@@ -844,8 +843,16 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         if len(final_answer) < 20:
             final_answer = draft
 
-    # Stream as SSE so the frontend can read it
-    yield f"data: {final_answer}\n\n"
+    # ── Simulate token streaming ───────────────────────────────────────
+    # Send the answer in small chunks so the frontend SSE reader
+    # accumulates the full content without breaking on blank lines.
+    chunk_size = 5   # characters per chunk – feels like fast typing
+    for i in range(0, len(final_answer), chunk_size):
+        chunk = final_answer[i:i+chunk_size]
+        yield f"data: {chunk}\n\n"
+
+    # Signal the end of stream (optional)
+    yield "data: [DONE]\n\n"
 
     # Persist
     coach.daily_strategy = recommendation
