@@ -843,15 +843,10 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         if len(final_answer) < 20:
             final_answer = draft
 
-    # ── Simulate token streaming ───────────────────────────────────────
-    # Send the answer in small chunks so the frontend SSE reader
-    # accumulates the full content without breaking on blank lines.
-    chunk_size = 5   # characters per chunk – feels like fast typing
-    for i in range(0, len(final_answer), chunk_size):
-        chunk = final_answer[i:i+chunk_size]
-        yield f"data: {chunk}\n\n"
-
-    # Signal the end of stream (optional)
+    # ── Base64‑encode the answer to avoid blank-line issues ────────────
+    import base64
+    encoded = base64.b64encode(final_answer.encode("utf-8")).decode("ascii")
+    yield f"data: {encoded}\n\n"
     yield "data: [DONE]\n\n"
 
     # Persist
