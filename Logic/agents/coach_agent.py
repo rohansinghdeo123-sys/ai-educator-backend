@@ -11,6 +11,7 @@ import logging
 import os
 import time
 import uuid
+import base64
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Generator
 
@@ -281,7 +282,6 @@ def _make_rule_based_recommendation(
 
 
 def _is_definition_question(question: str) -> bool:
-    """Detect if the question is asking to define or explain a concept."""
     definition_keywords = ["define", "what is", "explain", "meaning", "definition", "describe", "tell me about", "what are"]
     q = question.lower()
     return any(kw in q for kw in definition_keywords)
@@ -290,7 +290,6 @@ def _is_definition_question(question: str) -> bool:
 # ─── KNOWLEDGE-GRAPH ANSWER BUILDER (no LLM) ────────────────────────────────
 
 def _build_complete_answer_from_kg(question: str) -> str:
-    """Build a complete, structured answer directly from the Knowledge Graph."""
     keywords = [w for w in question.lower().split() if len(w) > 2]
     concept = None
     for kw in keywords[:5]:
@@ -330,7 +329,7 @@ def _build_complete_answer_from_kg(question: str) -> str:
     return enriched.strip()
 
 
-# ─── LLM DRAFT PROMPTS (unchanged) ──────────────────────────────────────────
+# ─── LLM DRAFT PROMPTS ──────────────────────────────────────────────────────
 
 def _build_study_prompt(
     coach: AICoachProfile,
@@ -647,7 +646,6 @@ def coach_agent(request, db=None) -> dict:
     if _is_definition_question(question):
         answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
     else:
-        # LLM draft for planning/other questions
         if intent == "planning":
             system_prompt = _build_planning_prompt(
                 coach=coach,
@@ -680,7 +678,6 @@ def coach_agent(request, db=None) -> dict:
             logger.error("[COACH] Groq API error: %s", exc)
             draft = recommendation
 
-        # Enrich with KG
         enriched = _build_complete_answer_from_kg(question) if len(draft.strip()) < 50 else draft
         answer = _apply_deterministic_format(enriched)
         if len(answer) < 20:
@@ -770,7 +767,7 @@ def coach_agent(request, db=None) -> dict:
     }
 
 
-# ─── STREAMING GENERATOR ─────────────────────────────────────────────────────
+# ─── STREAMING GENERATOR (Plain‑Text Markers) ───────────────────────────────
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if db is None:
         yield "data: Coach needs database access to personalize advice.\n\n"
@@ -843,10 +840,10 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         if len(final_answer) < 20:
             final_answer = draft
 
-    # ── Base64‑encode the answer to avoid blank-line issues ────────────
-    import base64
-    encoded = base64.b64encode(final_answer.encode("utf-8")).decode("ascii")
-    yield f"data: {encoded}\n\n"
+    # ── Send the final answer with plain-text markers ──────────────────
+    yield "data: [ANSWER_START]\n"
+    yield f"data: {final_answer}\n"
+    yield "data: [ANSWER_END]\n"
     yield "data: [DONE]\n\n"
 
     # Persist
