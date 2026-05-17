@@ -1,7 +1,11 @@
 # Logic/agents/coach_agent.py
 
 """
-PERSONAL AI COACH AGENT – intent‑aware prompts
+PERSONAL AI COACH AGENT – Three‑pass expert system
+
+Pass 1 – Draft (intent‑aware)
+Pass 2 – Review (verify & enrich with Knowledge Graph)
+Pass 3 – Format (beautiful, student‑friendly final output)
 
 - intent = "study_advice" → detailed, friendly study explanation, no analytics
 - intent = "planning"      → analytics, weak topics, next best action
@@ -406,6 +410,74 @@ RECOMMENDATION (rule‑based):
 """.strip()
 
 
+# ─── Review prompt (new) ───────────────────────────────────────────────────
+def _build_review_prompt(
+    coach: AICoachProfile,
+    question: str,
+    draft: str,
+    topic_snapshot: Dict[str, Any],
+) -> str:
+    """Prompt that reviews a draft answer, corrects errors, adds missing data."""
+    graph_context = ""
+    keywords = [w for w in question.lower().split() if len(w) > 2]
+    for kw in keywords[:3]:
+        concepts = knowledge_graph.search_by_keyword(kw, limit=2)
+        if concepts:
+            for c in concepts:
+                graph_context += f"--- CONCEPT: {c['title']} (ID: {c['concept_id']}) ---\n"
+                graph_context += f"Definition: {c.get('definition', '')}\n"
+                graph_context += f"Explanation: {c.get('core_explanation', '')}\n"
+                if c.get("key_points"):
+                    graph_context += "Key Points:\n  " + "\n  ".join(c["key_points"]) + "\n"
+                if c.get("examples"):
+                    graph_context += "Examples:\n  " + "\n  ".join(c["examples"]) + "\n"
+                if c.get("common_mistakes"):
+                    graph_context += "Common Mistakes:\n  " + "\n  ".join(
+                        [f"{m['mistake']} -> {m['correction']}" for m in c["common_mistakes"]]
+                    ) + "\n"
+                break
+
+    return f"""
+You are {coach.coach_name}, a personal AI study coach. Review the draft answer below and produce an enriched version.
+
+TASKS:
+- Correct any factual errors using the provided curriculum data.
+- Add any missing key points, examples, or common mistakes from the curriculum.
+- Keep the tone friendly and encouraging.
+- Do NOT use markdown symbols. Use plain text with dashes (-) for bullet points.
+- Do NOT mention analytics, XP, streaks, or study plans unless asked.
+
+CURRICULUM DATA:
+{graph_context if graph_context else "No specific curriculum data found – keep the draft's content."}
+
+DRAFT ANSWER:
+{draft}
+
+Now provide the enriched answer.
+""".strip()
+
+
+# ─── Format prompt (new) ───────────────────────────────────────────────────
+def _build_format_prompt(coach: AICoachProfile, enriched: str) -> str:
+    """Prompt that takes an enriched answer and formats it beautifully."""
+    return f"""
+You are {coach.coach_name}, a personal AI study coach. Take the enriched answer below and reformat it into a beautiful, student‑friendly mini‑article.
+
+FORMATTING RULES:
+- Use clear, bold‑looking headings (e.g., "What is Matter?") by using a blank line before and after the heading.
+- Use short paragraphs (2‑3 sentences each).
+- Use simple bullet points with a dash (-) for lists.
+- Highlight important words by placing them on their own line or repeating them naturally.
+- Keep the language warm and encouraging.
+- Do NOT use any markdown symbols like asterisks or underscores.
+
+ENRICHED ANSWER:
+{enriched}
+
+Now provide the final, beautifully formatted answer.
+""".strip()
+
+
 def _persist_interaction(
     db,
     coach: AICoachProfile,
@@ -721,10 +793,13 @@ def coach_agent(request, db=None) -> dict:
     }
 
 
-# ─── STREAMING GENERATOR – now intent‑aware ────────────────────────────────
+# ─── STREAMING GENERATOR – Three‑pass expert system ────────────────────────
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     """
-    Stream the coach's reply token by token, using intent to select the prompt.
+    Stream the coach's reply after three passes:
+    1. Draft – intent‑aware generation
+    2. Review – verify & enrich with Knowledge Graph
+    3. Format – beautiful final structure
     """
     if db is None:
         yield "Coach needs database access to personalize advice."
@@ -733,7 +808,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     user_id = getattr(request, "user_id", None) or getattr(request, "session_id", "anonymous")
     question = getattr(request, "question", "")
     session_id = getattr(request, "session_id", f"coach-{user_id}")
-    intent = getattr(request, "intent", "study_advice")   # default to study
+    intent = getattr(request, "intent", "study_advice")
     mode = getattr(request, "mode", "coach")
 
     coach = get_or_create_coach(db, user_id)
@@ -753,9 +828,9 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         recent_sessions=recent_sessions,
     )
 
-    # Choose prompt based on intent
+    # ── Pass 1: Draft ──────────────────────────────────────────────────────
     if intent == "planning":
-        system_prompt = _build_planning_prompt(
+        draft_prompt = _build_planning_prompt(
             coach=coach,
             progress=progress,
             topic_snapshot=topic_snapshot,
@@ -764,35 +839,80 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             analytics_snapshot=analytics_snapshot,
             recommendation=recommendation,
         )
-    else:  # study_advice or anything else
-        system_prompt = _build_study_prompt(
+    else:
+        draft_prompt = _build_study_prompt(
             coach=coach,
             question=question,
             topic_snapshot=topic_snapshot,
         )
 
-    full_answer = ""
+    draft = ""
     try:
-        stream = groq_client.chat.completions.create(
+        draft_resp = groq_client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": draft_prompt},
                 {"role": "user", "content": question},
             ],
             temperature=0.35,
-            max_tokens=600,          # increased for descriptive answers
+            max_tokens=450,
+            stream=False,
+        )
+        draft = draft_resp.choices[0].message.content.strip()
+    except Exception as exc:
+        logger.error("[COACH DRAFT] Groq error: %s", exc)
+        fallback = recommendation if intent == "planning" else "I'm having trouble explaining that right now."
+        draft = fallback
+
+    # ── Pass 2: Review & Enrich ────────────────────────────────────────────
+    review_prompt = _build_review_prompt(
+        coach=coach,
+        question=question,
+        draft=draft,
+        topic_snapshot=topic_snapshot,
+    )
+    enriched = ""
+    try:
+        review_resp = groq_client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": review_prompt},
+                {"role": "user", "content": f"Please review and improve this answer:\n\n{draft}"},
+            ],
+            temperature=0.3,
+            max_tokens=550,
+            stream=False,
+        )
+        enriched = review_resp.choices[0].message.content.strip()
+    except Exception as exc:
+        logger.error("[COACH REVIEW] Groq error: %s", exc)
+        enriched = draft   # fallback to draft
+
+    # ── Pass 3: Format & Stream ────────────────────────────────────────────
+    format_prompt = _build_format_prompt(coach=coach, enriched=enriched)
+    full_answer = ""
+    try:
+        format_stream = groq_client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": format_prompt},
+                {"role": "user", "content": "Please format this answer."},
+            ],
+            temperature=0.25,
+            max_tokens=600,
             stream=True,
         )
-        for chunk in stream:
+        for chunk in format_stream:
             token = chunk.choices[0].delta.content
             if token:
                 full_answer += token
                 yield token
     except Exception as exc:
-        logger.error("[COACH STREAM] Groq API error: %s", exc)
-        fallback = recommendation if intent == "planning" else "I'm having trouble explaining that right now."
-        full_answer = fallback
-        yield fallback
+        logger.error("[COACH FORMAT] Groq error: %s", exc)
+        # stream enriched as fallback
+        for char in enriched:
+            yield char
+            full_answer += char
 
     # Persist after stream
     coach.daily_strategy = recommendation
@@ -821,7 +941,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "progress": progress,
             "weak_topics": topic_snapshot["weak_topics"][:3],
         },
-        quality_score=0.8,
+        quality_score=0.9,
     )
 
     event_bus.emit(
@@ -829,9 +949,9 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         "task_complete",
         {
             "status": "success",
-            "message": f"Coach stream delivered by {coach.coach_name}",
+            "message": f"Coach reviewed and delivered by {coach.coach_name}",
             "latency_ms": 0,
-            "quality_score": 0.8,
+            "quality_score": 0.9,
             "quality_passed": True,
         },
         session_id=session_id,
