@@ -442,6 +442,9 @@ def _apply_deterministic_format(text: str) -> str:
     Parse plain text with natural headings (e.g. "Definition:") and
     convert to beautifully spaced, emoji‑rich final answer.
     """
+    # 1. Strip ALL asterisks to prevent markdown leakage
+    text = text.replace("*", "")
+
     # Emoji map for known headings
     EMOJI_MAP = {
         "definition": "📖",
@@ -498,23 +501,34 @@ def _apply_deterministic_format(text: str) -> str:
         else:
             output.append(stripped)
 
-    # Ensure blank lines between every section
+    # Step 2: Ensure blank line after every heading
     result = []
-    prev_empty = False
-    for line in output:
+    for i, line in enumerate(output):
+        result.append(line)
+        # If this is a heading line (starts with an emoji) and not the last line,
+        # and the next line is not empty, insert a blank line
+        if line and line[0] in "✨📖💡🌍📘❌⭐🧊🔍🧠✍️🎯" and i < len(output) - 1:
+            next_line = output[i + 1]
+            if next_line != "":
+                result.append("")
+
+    # Step 3: Collapse multiple blank lines
+    final_lines = []
+    prev_blank = False
+    for line in result:
         if line == "":
-            if not prev_empty:
-                result.append(line)
-                prev_empty = True
+            if not prev_blank:
+                final_lines.append(line)
+                prev_blank = True
         else:
-            result.append(line)
-            prev_empty = False
+            final_lines.append(line)
+            prev_blank = False
 
     # Remove trailing empty lines
-    while result and result[-1] == "":
-        result.pop()
+    while final_lines and final_lines[-1] == "":
+        final_lines.pop()
 
-    final = "\n".join(result)
+    final = "\n".join(final_lines)
     # Safety: if the final text is too short, return the original text unchanged
     if len(final) < 20:
         return text
