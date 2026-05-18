@@ -43,7 +43,7 @@ from schemas import (
 )
 
 from Logic.agent_event_bus import event_bus
-from Logic.agent_router import route_to_agent
+from Logic.agent_router import get_agent_registry, route_to_agent
 from Logic.analytics_engine import get_user_analytics, update_topic_performance
 from Logic.agents.coach_agent import (
     get_or_create_coach,
@@ -265,15 +265,28 @@ def require_same_user_or_admin(
     user_id: str,
     decoded_token: Dict[str, Any],
 ) -> None:
-    token_uid = str(decoded_token.get("uid", ""))
+    token_uid = str(decoded_token.get("uid", "")).strip()
+    target_uid = str(user_id or "").strip()
 
-    if token_uid == user_id or is_backend_admin(decoded_token):
+    if token_uid and (token_uid == target_uid or is_backend_admin(decoded_token)):
         return
 
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Not allowed for this user",
     )
+
+
+def require_authenticated_user_id(decoded_token: Dict[str, Any]) -> str:
+    token_uid = str(decoded_token.get("uid", "")).strip()
+
+    if not token_uid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authenticated user id missing from token",
+        )
+
+    return token_uid
 
 
 # ================= DATABASE =================
@@ -573,7 +586,10 @@ def create_test_history(
 # SECTION AI
 # =====================================================
 @app.post("/section-ai")
-def section_ai(request: SectionAIRequest):
+def section_ai(
+    request: SectionAIRequest,
+    _current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
     answer = section_doubt(
         question=request.question,
         section_id=request.section_id,
@@ -588,7 +604,10 @@ def section_ai(request: SectionAIRequest):
 # STRUCTURED EXAM GENERATION
 # =====================================================
 @app.post("/generate-mcqs")
-def generate_mcqs(request: GenerateMCQRequest):
+def generate_mcqs(
+    request: GenerateMCQRequest,
+    _current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
     section_id = normalize_topic(request.section_id or request.topic)
 
     return generate_structured_mcqs(
@@ -601,7 +620,10 @@ def generate_mcqs(request: GenerateMCQRequest):
 
 
 @app.post("/generate-probable-questions")
-def generate_probable_questions(request: GenerateProbableRequest):
+def generate_probable_questions(
+    request: GenerateProbableRequest,
+    _current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
     section_id = normalize_topic(request.section_id or request.topic)
 
     return generate_structured_probable_questions(
@@ -616,7 +638,11 @@ def generate_probable_questions(request: GenerateProbableRequest):
 # AGENT ENDPOINT
 # =====================================================
 @app.post("/agent")
-def agent_endpoint(request: SectionAIRequest, db: Session = Depends(get_db)):
+def agent_endpoint(
+    request: SectionAIRequest,
+    db: Session = Depends(get_db),
+    _current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
     return route_to_agent(request, db=db)
 
 
@@ -624,7 +650,13 @@ def agent_endpoint(request: SectionAIRequest, db: Session = Depends(get_db)):
 # PERSONAL AI COACH API
 # =====================================================
 @app.post("/coach/bootstrap", response_model=CoachProfileResponse)
-def coach_bootstrap(payload: CoachBootstrapRequest, db: Session = Depends(get_db)):
+def coach_bootstrap(
+    payload: CoachBootstrapRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(payload.user_id, current_user)
+
     coach = get_or_create_coach(
         db=db,
         user_id=payload.user_id,
@@ -638,7 +670,13 @@ def coach_bootstrap(payload: CoachBootstrapRequest, db: Session = Depends(get_db
 
 
 @app.get("/coach/{user_id}", response_model=CoachDashboardResponse)
-def coach_dashboard(user_id: str, db: Session = Depends(get_db)):
+def coach_dashboard(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+
     coach = get_or_create_coach(db=db, user_id=user_id)
 
     memories = (
@@ -674,7 +712,13 @@ def coach_dashboard(user_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/coach/chat")
-def coach_chat(payload: CoachChatRequest, db: Session = Depends(get_db)):
+def coach_chat(
+    payload: CoachChatRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(payload.user_id, current_user)
+
     class CoachRequest:
         def __init__(self):
             self.user_id = payload.user_id
@@ -691,12 +735,18 @@ def coach_chat(payload: CoachChatRequest, db: Session = Depends(get_db)):
 
 # ─── STREAMING ENDPOINT ────────────────────────────────────────────────────
 @app.post("/coach/chat/stream")
-async def coach_chat_stream(payload: CoachChatRequest, db: Session = Depends(get_db)):
+async def coach_chat_stream(
+    payload: CoachChatRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
     """
     Stream the coach's reply via Server‑Sent Events (SSE).
     The frontend will receive tokens one by one and display them
     as they arrive, creating a real‑time typing effect.
     """
+    require_same_user_or_admin(payload.user_id, current_user)
+
     class CoachRequest:
         def __init__(self):
             self.user_id = payload.user_id
@@ -724,7 +774,13 @@ async def coach_chat_stream(payload: CoachChatRequest, db: Session = Depends(get
 
 
 @app.post("/coach/daily-learning/{user_id}", response_model=CoachDailySignalResponse)
-def coach_daily_learning(user_id: str, db: Session = Depends(get_db)):
+def coach_daily_learning(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+
     signal = run_daily_learning_cycle(db=db, user_id=user_id)
     return CoachDailySignalResponse(**serialize_daily_signal(signal))
 
@@ -733,7 +789,10 @@ def coach_daily_learning(user_id: str, db: Session = Depends(get_db)):
 # RESET CHAT
 # =====================================================
 @app.post("/reset-chat")
-def reset_chat(request: ResetRequest):
+def reset_chat(
+    request: ResetRequest,
+    _current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
     reset_conversation(request.session_id)
     return {"status": "cleared", "message": "Agent memory reset successfully"}
 
@@ -774,6 +833,14 @@ def admin_me(current_admin: Dict[str, Any] = Depends(require_admin)):
 def admin_get_agents(_current_admin: Dict[str, Any] = Depends(require_admin)):
     return {
         "agents": event_bus.get_all_agents(),
+        "system": event_bus.get_system_stats(),
+    }
+
+
+@app.get("/admin/agent-registry")
+def admin_get_agent_registry(_current_admin: Dict[str, Any] = Depends(require_admin)):
+    return {
+        "agents": get_agent_registry(),
         "system": event_bus.get_system_stats(),
     }
 
@@ -972,7 +1039,13 @@ Be concise, but warm and proactive. Offer insights or suggestions where relevant
 # PROGRESS API
 # =====================================================
 @app.post("/update-progress")
-def update_progress(progress: ProgressUpdate, db: Session = Depends(get_db)):
+def update_progress(
+    progress: ProgressUpdate,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(progress.user_id, current_user)
+
     user = get_or_create_progress(db, progress.user_id)
 
     user.total_tests = progress.total_tests
@@ -993,7 +1066,13 @@ def update_progress(progress: ProgressUpdate, db: Session = Depends(get_db)):
 
 
 @app.get("/get-progress/{user_id}", response_model=ProgressResponse)
-def get_progress(user_id: str, db: Session = Depends(get_db)):
+def get_progress(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+
     user = get_or_create_progress(db, user_id)
     payload = progress_payload(user)
 
@@ -1004,7 +1083,13 @@ def get_progress(user_id: str, db: Session = Depends(get_db)):
 # SESSION WRITE API
 # =====================================================
 @app.post("/submit-session")
-def submit_session(payload: SubmitSessionRequest, db: Session = Depends(get_db)):
+def submit_session(
+    payload: SubmitSessionRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(payload.user_id, current_user)
+
     if payload.total_questions <= 0:
         raise HTTPException(status_code=400, detail="total_questions must be greater than zero")
 
@@ -1045,7 +1130,13 @@ def submit_session(payload: SubmitSessionRequest, db: Session = Depends(get_db))
 
 
 @app.post("/save-test")
-def save_test(test: TestHistoryCreate, db: Session = Depends(get_db)):
+def save_test(
+    test: TestHistoryCreate,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(test.user_id, current_user)
+
     topic = normalize_topic(test.topic)
     correct = int(test.score)
     total = int(test.total_questions)
@@ -1079,7 +1170,13 @@ def save_test(test: TestHistoryCreate, db: Session = Depends(get_db)):
 # SESSION READ API
 # =====================================================
 @app.get("/sessions/{user_id}")
-def get_sessions(user_id: str, db: Session = Depends(get_db)):
+def get_sessions(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+
     tests = (
         db.query(TestHistory)
         .filter(TestHistory.user_id == user_id)
@@ -1094,7 +1191,13 @@ def get_sessions(user_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/test-history/{user_id}", response_model=List[TestHistoryResponse])
-def get_test_history(user_id: str, db: Session = Depends(get_db)):
+def get_test_history(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+
     tests = (
         db.query(TestHistory)
         .filter(TestHistory.user_id == user_id)
@@ -1106,11 +1209,17 @@ def get_test_history(user_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/session-replay/{test_id}")
-def get_session_replay(test_id: int, db: Session = Depends(get_db)):
+def get_session_replay(
+    test_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
     test = db.query(TestHistory).filter(TestHistory.id == test_id).first()
 
     if not test:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    require_same_user_or_admin(test.user_id, current_user)
 
     replay = test.details.replay_data if test.details else {}
 
@@ -1125,8 +1234,13 @@ def get_session_replay(test_id: int, db: Session = Depends(get_db)):
 # =====================================================
 # LEADERBOARD
 # =====================================================
-@app.get("/leaderboard")
-def leaderboard(db: Session = Depends(get_db)):
+def build_leaderboard(
+    db: Session,
+    decoded_token: Optional[Dict[str, Any]] = None,
+):
+    token_uid = str((decoded_token or {}).get("uid", "")).strip()
+    admin_view = bool(decoded_token and is_backend_admin(decoded_token))
+
     users = (
         db.query(UserProgress)
         .order_by(UserProgress.xp.desc())
@@ -1154,7 +1268,8 @@ def leaderboard(db: Session = Depends(get_db)):
         email = None
         if fb_user:
             display_name = fb_user.display_name or None
-            email = fb_user.email or None
+            if admin_view or user.user_id == token_uid:
+                email = fb_user.email or None
 
         leaderboard_data.append(
             {
@@ -1170,16 +1285,35 @@ def leaderboard(db: Session = Depends(get_db)):
 
     return leaderboard_data
 
+
+@app.get("/leaderboard")
+def leaderboard(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    return build_leaderboard(db, current_user)
+
 # =====================================================
 # ANALYTICS
 # =====================================================
 @app.get("/analytics/{user_id}")
-def analytics(user_id: str, db: Session = Depends(get_db)):
+def analytics(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
     return get_user_analytics(db, user_id)
 
 
 @app.get("/dashboard/{user_id}")
-def get_dashboard_data(user_id: str, db: Session = Depends(get_db)):
+def get_dashboard_data(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+
     user = get_or_create_progress(db, user_id)
 
     tests = (
@@ -1194,5 +1328,5 @@ def get_dashboard_data(user_id: str, db: Session = Depends(get_db)):
         "progress": progress_payload(user),
         "sessions": [format_test_session(test) for test in tests],
         "analytics": get_user_analytics(db, user_id),
-        "leaderboard": leaderboard(db),
+        "leaderboard": build_leaderboard(db, current_user),
     }

@@ -97,12 +97,12 @@ class AgentEventBus:
     def _register_default_agents(self):
         """Register all known agents with their default status."""
         defaults = [
-            ("orchestrator", "Agent Orchestrator"),
-            ("tutor", "Tutor Agent"),
-            ("revision", "Revision Agent"),
-            ("exam", "Exam Agent"),
-            ("coach", "Coach Agent"),
-            ("planner", "Planner Agent"),
+            ("orchestrator", "Supervisor Orchestrator"),
+            ("coach", "Personal AI Coach"),
+            ("tutor", "Subject Tutor"),
+            ("revision", "Revision Specialist"),
+            ("exam", "Exam Generator"),
+            ("planner", "Study Planner"),
         ]
         for agent_id, display_name in defaults:
             self._agents[agent_id] = AgentStatus(

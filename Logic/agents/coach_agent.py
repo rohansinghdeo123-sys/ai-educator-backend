@@ -516,6 +516,75 @@ RECOMMENDATION (rule‑based):
 
 # ─── FORMATTER ───────────────────────────────────────────────────────────────
 
+def _build_review_prompt(
+    coach: AICoachProfile,
+    question: str,
+    draft: str,
+    intent: str,
+) -> str:
+    return f"""
+You are the Subject Reviewer and Final Tutor for {coach.coach_name}.
+
+Your job is to transform the draft into the final answer a specialist teacher would confidently give a student.
+
+Review rules:
+- Fix factual errors, vague wording, and missing reasoning.
+- Keep the answer easy to revise from directly.
+- Use clear headings ending with a colon.
+- Put a blank line between sections.
+- Prefer short paragraphs and dash bullets.
+- Include a direct answer first.
+- Include examples, common mistakes, and an exam-ready answer when useful.
+- Do not mention that you reviewed the answer.
+- Do not include JSON, metadata, markdown tables, or decorative symbols.
+- If the draft is already strong, polish it without changing the meaning.
+
+Intent: {intent}
+
+Student question:
+{question}
+
+Draft answer:
+{draft}
+
+Return only the final polished answer.
+""".strip()
+
+
+def _review_and_polish_answer(
+    coach: AICoachProfile,
+    question: str,
+    draft: str,
+    intent: str,
+) -> str:
+    if not draft or len(draft.strip()) < 20:
+        return draft
+
+    try:
+        response = groq_client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": _build_review_prompt(
+                        coach=coach,
+                        question=question,
+                        draft=draft,
+                        intent=intent,
+                    ),
+                },
+                {"role": "user", "content": "Polish the draft into the final student answer."},
+            ],
+            temperature=0.18,
+            max_tokens=850,
+        )
+        reviewed = response.choices[0].message.content.strip()
+        return reviewed or draft
+    except Exception as exc:
+        logger.error("[COACH REVIEW] Groq API error: %s", exc)
+        return draft
+
+
 def _apply_deterministic_format(text: str) -> str:
     text = text.replace("*", "").replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
@@ -751,7 +820,13 @@ def coach_agent(request, db=None) -> dict:
             if len(draft.strip()) < 50 and _can_answer_definition_locally(question)
             else draft
         )
-        answer = _apply_deterministic_format(enriched)
+        reviewed = _review_and_polish_answer(
+            coach=coach,
+            question=question,
+            draft=enriched,
+            intent=intent,
+        )
+        answer = _apply_deterministic_format(reviewed)
         if len(answer) < 20:
             answer = draft
 
@@ -890,8 +965,10 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     )
 
     # ── Answer source ──────────────────────────────────────────────────
+    should_review_answer = True
     if _is_definition_question(question) and _can_answer_definition_locally(question):
         final_answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
+        should_review_answer = False
     else:
         if intent == "planning":
             draft_prompt = _build_planning_prompt(
@@ -951,7 +1028,16 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         title="Reviewing",
         detail="Checking clarity, accuracy, examples, and exam usefulness.",
     )
-    time.sleep(0.35)
+    if should_review_answer:
+        reviewed = _review_and_polish_answer(
+            coach=coach,
+            question=question,
+            draft=final_answer,
+            intent=intent,
+        )
+        final_answer = _apply_deterministic_format(reviewed)
+    else:
+        time.sleep(0.2)
     yield _stage_event(
         stage="reviewing",
         status="done",
