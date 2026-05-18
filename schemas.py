@@ -233,6 +233,31 @@ class CoachDashboardResponse(BaseModel):
     analytics_snapshot: Dict[str, Any] = Field(default_factory=dict)
 
 
+class AutonomousStudyRequest(BaseModel):
+    current_topic: Optional[str] = None
+    current_chapter: Optional[str] = None
+    subject: str = "Chemistry"
+
+
+class AutonomousStudyResponse(BaseModel):
+    mission_id: str
+    status: str
+    subject: str
+    chapter: str = ""
+    target_topic: str
+    target_source: str
+    primary_agent: str
+    mode: str
+    difficulty: str
+    objective: str
+    why: str
+    steps: List[str] = Field(default_factory=list)
+    next_actions: List[str] = Field(default_factory=list)
+    result: Dict[str, Any] = Field(default_factory=dict)
+    analytics_summary: Dict[str, Any] = Field(default_factory=dict)
+    latency_ms: int = 0
+
+
 # =========================================================
 # LEADERBOARD SCHEMAS
 # =========================================================

@@ -30,6 +30,8 @@ from models import (
     UserProgress,
 )
 from schemas import (
+    AutonomousStudyRequest,
+    AutonomousStudyResponse,
     CoachBootstrapRequest,
     CoachChatRequest,
     CoachDailySignalResponse,
@@ -45,6 +47,7 @@ from schemas import (
 from Logic.agent_event_bus import event_bus
 from Logic.agent_router import get_agent_registry, route_to_agent
 from Logic.analytics_engine import get_user_analytics, update_topic_performance
+from Logic.autonomous_study_loop import run_autonomous_study_loop
 from Logic.agents.coach_agent import (
     get_or_create_coach,
     run_daily_learning_cycle,
@@ -783,6 +786,25 @@ def coach_daily_learning(
 
     signal = run_daily_learning_cycle(db=db, user_id=user_id)
     return CoachDailySignalResponse(**serialize_daily_signal(signal))
+
+
+@app.post("/coach/autonomous-study/{user_id}", response_model=AutonomousStudyResponse)
+def coach_autonomous_study(
+    user_id: str,
+    payload: AutonomousStudyRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+
+    mission = run_autonomous_study_loop(
+        db=db,
+        user_id=user_id,
+        current_topic=payload.current_topic,
+        current_chapter=payload.current_chapter,
+        subject=payload.subject,
+    )
+    return AutonomousStudyResponse(**mission)
 
 
 # =====================================================
