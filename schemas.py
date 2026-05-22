@@ -246,6 +246,10 @@ class AutonomousStudyResponse(BaseModel):
     chapter: str = ""
     target_topic: str
     target_source: str
+    mission_type: str = "study"
+    priority: str = "medium"
+    mastery_band: str = "unknown"
+    estimated_minutes: int = 15
     primary_agent: str
     mode: str
     difficulty: str
@@ -253,6 +257,11 @@ class AutonomousStudyResponse(BaseModel):
     why: str
     steps: List[str] = Field(default_factory=list)
     next_actions: List[str] = Field(default_factory=list)
+    success_criteria: List[str] = Field(default_factory=list)
+    agent_sequence: List[Dict[str, Any]] = Field(default_factory=list)
+    checkpoints: List[Dict[str, Any]] = Field(default_factory=list)
+    student_state: Dict[str, Any] = Field(default_factory=dict)
+    completion_report: Dict[str, Any] = Field(default_factory=dict)
     result: Dict[str, Any] = Field(default_factory=dict)
     analytics_summary: Dict[str, Any] = Field(default_factory=dict)
     latency_ms: int = 0

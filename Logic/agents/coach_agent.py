@@ -289,6 +289,207 @@ def _is_definition_question(question: str) -> bool:
     return any(kw in q for kw in definition_keywords)
 
 
+ANSWER_FORMATS: Dict[str, Dict[str, Any]] = {
+    "definition": {
+        "label": "Definition Tutor",
+        "description": "Best for short concept definitions and basic explanations.",
+        "sections": [
+            "Direct Answer",
+            "Simple Explanation",
+            "Important Points",
+            "Examples",
+            "Common Mistakes",
+            "Exam-Ready Answer",
+            "Quick Revision",
+        ],
+        "rules": [
+            "Start with the exact definition in one or two lines.",
+            "Then explain it in simple student-friendly language.",
+            "Include examples and common mistakes only when they improve understanding.",
+        ],
+    },
+    "numerical": {
+        "label": "Numerical Solver",
+        "description": "Best for calculations, formula-based questions, and step-by-step problem solving.",
+        "sections": [
+            "Given",
+            "Formula",
+            "Substitution",
+            "Calculation",
+            "Final Answer",
+            "Check",
+        ],
+        "rules": [
+            "Extract the given values first.",
+            "Write the formula before substituting values.",
+            "Show the calculation step by step and keep units visible.",
+            "End with the final answer and a quick reasonableness check.",
+        ],
+    },
+    "comparison": {
+        "label": "Comparison Explainer",
+        "description": "Best for difference-between, compare, vs, and distinguish questions.",
+        "sections": [
+            "Core Difference",
+            "Point-by-Point Comparison",
+            "Memory Trick",
+            "Exam Line",
+        ],
+        "rules": [
+            "Start with the most important difference.",
+            "Use aligned bullet points instead of a dense paragraph.",
+            "Add a memory trick if it helps the student remember.",
+        ],
+    },
+    "quiz": {
+        "label": "Quiz Coach",
+        "description": "Best when the student wants practice questions or a quick self-test.",
+        "sections": [
+            "Practice Set",
+            "Answer Key",
+            "Explanation",
+            "Next Drill",
+        ],
+        "rules": [
+            "Create exam-style questions at the requested level.",
+            "Keep options clear and avoid ambiguous distractors.",
+            "Explain why the correct answer is correct.",
+        ],
+    },
+    "revision": {
+        "label": "Revision Sheet",
+        "description": "Best for summary, key points, last-minute recall, and chapter revision.",
+        "sections": [
+            "High-Yield Summary",
+            "Must-Remember Points",
+            "Common Mistakes",
+            "Quick Recall",
+            "Next Practice",
+        ],
+        "rules": [
+            "Compress the topic into high-yield revision notes.",
+            "Prefer bullets and recall prompts over long teaching paragraphs.",
+            "End with what to practice next.",
+        ],
+    },
+    "exam_answer": {
+        "label": "Exam Answer Writer",
+        "description": "Best for marks-oriented written answers.",
+        "sections": [
+            "Exam-Ready Answer",
+            "Keywords",
+            "How To Score Full Marks",
+        ],
+        "rules": [
+            "Write the answer in polished exam language.",
+            "Include keywords that a teacher or examiner expects.",
+            "Avoid unnecessary extra explanation unless it improves marks.",
+        ],
+    },
+    "stuck": {
+        "label": "Confusion Resolver",
+        "description": "Best when the student says they are confused, stuck, or not understanding.",
+        "sections": [
+            "Start Here",
+            "Why It Feels Confusing",
+            "Step-by-Step Explanation",
+            "Tiny Check",
+            "Next Step",
+        ],
+        "rules": [
+            "Reduce cognitive load and explain from the simplest point.",
+            "Use one analogy or simple example if useful.",
+            "End with a tiny check question or next action.",
+        ],
+    },
+    "planning": {
+        "label": "Study Planner",
+        "description": "Best for schedules, roadmaps, daily plans, and what-to-study-next requests.",
+        "sections": [
+            "Today's Priority",
+            "Study Blocks",
+            "Practice Plan",
+            "Revision Method",
+            "Next Checkpoint",
+        ],
+        "rules": [
+            "Make the plan specific, timed, and realistic.",
+            "Use the student's weak areas and recent progress when available.",
+            "End with the next measurable checkpoint.",
+        ],
+    },
+    "concept": {
+        "label": "Concept Builder",
+        "description": "Best for open doubts and normal concept explanations.",
+        "sections": [
+            "Core Idea",
+            "How It Works",
+            "Example",
+            "Common Trap",
+            "Try This Next",
+        ],
+        "rules": [
+            "Teach the concept in a natural order instead of forcing every possible section.",
+            "Use examples only where they make the idea clearer.",
+            "End with one useful follow-up action.",
+        ],
+    },
+}
+
+
+def _detect_answer_format(question: str, intent: str = "general", mode: str = "coach") -> Dict[str, Any]:
+    q = (question or "").lower().strip()
+    intent_lower = (intent or "").lower()
+    mode_lower = (mode or "").lower()
+
+    if intent_lower == "planning" or mode_lower in {"plan", "planner", "study_plan"}:
+        format_id = "planning"
+    elif any(keyword in q for keyword in ("don't understand", "do not understand", "confused", "stuck", "not getting", "explain simply")):
+        format_id = "stuck"
+    elif any(keyword in q for keyword in ("numerical", "calculate", "find the", "solve", "formula", "mole", "moles", "mass", "volume", "density")) and re.search(r"\d", q):
+        format_id = "numerical"
+    elif any(keyword in q for keyword in ("difference between", "differentiate", "compare", " vs ", "versus", "distinguish")):
+        format_id = "comparison"
+    elif any(keyword in q for keyword in ("quiz me", "mcq", "test me", "ask me questions", "practice questions")):
+        format_id = "quiz"
+    elif any(keyword in q for keyword in ("exam answer", "write answer", "marks", "board answer", "answer in exam")):
+        format_id = "exam_answer"
+    elif any(keyword in q for keyword in ("revise", "revision", "summary", "summarize", "key points", "quick notes")):
+        format_id = "revision"
+    elif _is_definition_question(question):
+        format_id = "definition"
+    else:
+        format_id = "concept"
+
+    selected = ANSWER_FORMATS[format_id]
+    return {
+        "id": format_id,
+        "label": selected["label"],
+        "description": selected["description"],
+        "sections": list(selected["sections"]),
+        "rules": list(selected["rules"]),
+    }
+
+
+def _build_answer_format_instruction(answer_format: Dict[str, Any]) -> str:
+    sections = "\n".join(f"- {section}" for section in answer_format.get("sections", []))
+    rules = "\n".join(f"- {rule}" for rule in answer_format.get("rules", []))
+
+    return f"""
+ADAPTIVE ANSWER FORMAT:
+Selected format: {answer_format.get("label", "Concept Builder")}
+When to use: {answer_format.get("description", "")}
+
+Recommended sections:
+{sections}
+
+Format-specific rules:
+{rules}
+
+Do not force every section if the question is simple. Use only the sections that genuinely help the student.
+""".strip()
+
+
 # ─── KNOWLEDGE-GRAPH ANSWER BUILDER (no LLM) ────────────────────────────────
 
 _QUESTION_STOPWORDS = {
@@ -409,6 +610,7 @@ def _build_study_prompt(
     coach: AICoachProfile,
     question: str,
     topic_snapshot: Dict[str, Any],
+    answer_format: Dict[str, Any],
 ) -> str:
     graph_context = ""
     keywords = [w for w in question.lower().split() if len(w) > 2]
@@ -425,19 +627,22 @@ def _build_study_prompt(
                     ) + "\n"
                 break
 
+    adaptive_format = _build_answer_format_instruction(answer_format)
+
     return f"""
 You are {coach.coach_name}, a specialist subject tutor and personal study coach.
 
 Write the answer like a patient expert teacher. The student should be able to revise directly from your response.
 
-Formatting rules:
+Base formatting rules:
 - Use clear section headings ending with a colon.
 - Put a blank line between sections.
 - Use short paragraphs and dash bullets.
-- Start with a direct answer, then explain in simple language.
-- Include important points, examples, common mistakes, and an exam-ready answer when relevant.
+- Start with the most useful answer for this exact question.
 - Avoid raw markdown tables, decorative symbols, and long unbroken paragraphs.
 - If the question is too broad, answer the core concept first and then add what to study next.
+
+{adaptive_format}
 
 KNOWLEDGE BASE (use this data if it helps):
 {graph_context if graph_context else "No specific curriculum data found – explain from your general knowledge."}
@@ -521,7 +726,10 @@ def _build_review_prompt(
     question: str,
     draft: str,
     intent: str,
+    answer_format: Dict[str, Any],
 ) -> str:
+    adaptive_format = _build_answer_format_instruction(answer_format)
+
     return f"""
 You are the Subject Reviewer and Final Tutor for {coach.coach_name}.
 
@@ -533,13 +741,14 @@ Review rules:
 - Use clear headings ending with a colon.
 - Put a blank line between sections.
 - Prefer short paragraphs and dash bullets.
-- Include a direct answer first.
-- Include examples, common mistakes, and an exam-ready answer when useful.
+- Preserve the selected answer structure unless the question clearly needs something simpler.
 - Do not mention that you reviewed the answer.
 - Do not include JSON, metadata, markdown tables, or decorative symbols.
 - If the draft is already strong, polish it without changing the meaning.
 
 Intent: {intent}
+
+{adaptive_format}
 
 Student question:
 {question}
@@ -556,11 +765,13 @@ def _review_and_polish_answer(
     question: str,
     draft: str,
     intent: str,
+    answer_format: Optional[Dict[str, Any]] = None,
 ) -> str:
     if not draft or len(draft.strip()) < 20:
         return draft
 
     try:
+        selected_format = answer_format or _detect_answer_format(question, intent=intent)
         response = groq_client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
@@ -571,6 +782,7 @@ def _review_and_polish_answer(
                         question=question,
                         draft=draft,
                         intent=intent,
+                        answer_format=selected_format,
                     ),
                 },
                 {"role": "user", "content": "Polish the draft into the final student answer."},
@@ -751,6 +963,7 @@ def coach_agent(request, db=None) -> dict:
     session_id = getattr(request, "session_id", f"coach-{user_id}")
     intent = getattr(request, "intent", "general")
     mode = getattr(request, "mode", "coach")
+    answer_format = _detect_answer_format(question, intent=intent, mode=mode)
 
     event_bus.emit(
         "coach",
@@ -780,7 +993,7 @@ def coach_agent(request, db=None) -> dict:
         recent_sessions=recent_sessions,
     )
 
-    if _is_definition_question(question) and _can_answer_definition_locally(question):
+    if answer_format["id"] == "definition" and _can_answer_definition_locally(question):
         answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
     else:
         if intent == "planning":
@@ -798,6 +1011,7 @@ def coach_agent(request, db=None) -> dict:
                 coach=coach,
                 question=question,
                 topic_snapshot=topic_snapshot,
+                answer_format=answer_format,
             )
 
         try:
@@ -825,6 +1039,7 @@ def coach_agent(request, db=None) -> dict:
             question=question,
             draft=enriched,
             intent=intent,
+            answer_format=answer_format,
         )
         answer = _apply_deterministic_format(reviewed)
         if len(answer) < 20:
@@ -867,6 +1082,7 @@ def coach_agent(request, db=None) -> dict:
             "session_id": session_id,
             "progress": progress,
             "weak_topics": topic_snapshot["weak_topics"][:3],
+            "answer_format": answer_format,
         },
         quality_score=0.9,
     )
@@ -910,6 +1126,7 @@ def coach_agent(request, db=None) -> dict:
             "agent": "coach",
             "latency_ms": latency_ms,
             "model": MODEL_NAME,
+            "answer_format": answer_format,
         },
     }
 
@@ -938,6 +1155,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     session_id = getattr(request, "session_id", f"coach-{user_id}")
     intent = getattr(request, "intent", "study_advice")
     mode = getattr(request, "mode", "coach")
+    answer_format = _detect_answer_format(question, intent=intent, mode=mode)
 
     coach = get_or_create_coach(db, user_id)
     progress = _build_progress_snapshot(db, user_id)
@@ -960,13 +1178,13 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         stage="drafting",
         status="active",
         agent="Draft Agent",
-        title="Drafting",
-        detail="Building the first subject-focused answer from your question.",
+        title=f"Drafting: {answer_format['label']}",
+        detail=f"Selected {answer_format['label']} format for this question.",
     )
 
     # ── Answer source ──────────────────────────────────────────────────
     should_review_answer = True
-    if _is_definition_question(question) and _can_answer_definition_locally(question):
+    if answer_format["id"] == "definition" and _can_answer_definition_locally(question):
         final_answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
         should_review_answer = False
     else:
@@ -985,6 +1203,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 coach=coach,
                 question=question,
                 topic_snapshot=topic_snapshot,
+                answer_format=answer_format,
             )
 
         draft = ""
@@ -1026,7 +1245,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         status="active",
         agent="Subject Reviewer",
         title="Reviewing",
-        detail="Checking clarity, accuracy, examples, and exam usefulness.",
+        detail=f"Checking clarity, accuracy, and {answer_format['label']} structure.",
     )
     if should_review_answer:
         reviewed = _review_and_polish_answer(
@@ -1034,6 +1253,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             question=question,
             draft=final_answer,
             intent=intent,
+            answer_format=answer_format,
         )
         final_answer = _apply_deterministic_format(reviewed)
     else:
@@ -1050,7 +1270,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         status="active",
         agent="Final Tutor",
         title="Delivering",
-        detail="Preparing the final formatted response.",
+        detail=f"Preparing the final {answer_format['label']} response.",
     )
     time.sleep(0.25)
     yield _stage_event(
@@ -1094,6 +1314,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "session_id": session_id,
             "progress": progress,
             "weak_topics": topic_snapshot["weak_topics"][:3],
+            "answer_format": answer_format,
         },
         quality_score=0.9,
     )

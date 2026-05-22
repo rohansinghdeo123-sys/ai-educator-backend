@@ -14,7 +14,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from Logic.agent_event_bus import event_bus
 from Logic.agent_router import route_to_agent
@@ -157,6 +157,156 @@ def _build_mission_plan(target: Dict[str, Any], analytics: Dict[str, Any]) -> Di
     }
 
 
+def _mastery_band(accuracy: float, total_topics: int) -> str:
+    if total_topics == 0:
+        return "baseline"
+    if accuracy < 40:
+        return "critical"
+    if accuracy < 60:
+        return "weak"
+    if accuracy < 80:
+        return "building"
+    return "strong"
+
+
+def _mission_priority(mastery_band: str) -> str:
+    if mastery_band in {"baseline", "critical", "weak"}:
+        return "high"
+    if mastery_band == "building":
+        return "medium"
+    return "stretch"
+
+
+def _estimate_minutes(mode: str, mastery_band: str) -> int:
+    if mastery_band == "baseline":
+        return 12
+    if mode == "explain":
+        return 18
+    if mode == "exam":
+        return 20
+    if mode == "probable":
+        return 25
+    return 15
+
+
+def _build_agent_sequence(plan: Dict[str, Any]) -> List[Dict[str, str]]:
+    specialist = "Revision Specialist" if plan["primary_agent"] == "revision" else "Exam Generator"
+    specialist_action = "Rebuilds the concept" if plan["primary_agent"] == "revision" else "Creates targeted practice"
+
+    return [
+        {
+            "agent": "Supervisor Orchestrator",
+            "role": "diagnose",
+            "status": "complete",
+            "detail": "Selects the highest-value mission from analytics and current context.",
+        },
+        {
+            "agent": "Personal Coach",
+            "role": "plan",
+            "status": "complete",
+            "detail": "Turns the mission into a student-friendly objective and next action.",
+        },
+        {
+            "agent": specialist,
+            "role": "execute",
+            "status": "complete",
+            "detail": specialist_action,
+        },
+        {
+            "agent": "Subject Reviewer",
+            "role": "verify",
+            "status": "complete",
+            "detail": "Checks usefulness, clarity, and exam readiness before delivery.",
+        },
+    ]
+
+
+def _build_success_criteria(plan: Dict[str, Any], mastery_band: str) -> List[str]:
+    if mastery_band == "baseline":
+        return [
+            "Attempt every diagnostic question without notes.",
+            "Save the result so the coach can create a first weak-topic signal.",
+            "Review each wrong answer before starting the next mission.",
+        ]
+    if plan["mode"] == "explain":
+        return [
+            "Explain the concept back in your own words.",
+            "Write one exam-ready answer without copying.",
+            "Move to MCQs only after the common mistakes feel clear.",
+        ]
+    if plan["mode"] == "probable":
+        return [
+            "Write one probable answer in exam language.",
+            "Check whether your answer includes the expected keywords.",
+            "Convert missing points into a short revision note.",
+        ]
+    return [
+        "Attempt the full practice set.",
+        "Score at least 80% or review every wrong answer.",
+        "Ask for mistake analysis if the same concept fails twice.",
+    ]
+
+
+def _build_checkpoints(plan: Dict[str, Any], success_criteria: List[str]) -> List[Dict[str, str]]:
+    return [
+        {
+            "title": "Mission selected",
+            "owner": "Supervisor",
+            "status": "complete",
+            "detail": plan["objective"],
+        },
+        {
+            "title": "Specialist output ready",
+            "owner": plan["primary_agent"],
+            "status": "complete",
+            "detail": plan["steps"][0],
+        },
+        {
+            "title": "Student action required",
+            "owner": "student",
+            "status": "pending",
+            "detail": success_criteria[0],
+        },
+        {
+            "title": "Memory update",
+            "owner": "coach",
+            "status": "pending",
+            "detail": "Save the result or continue the chat so the coach can update memory.",
+        },
+    ]
+
+
+def _build_mission_contract(plan: Dict[str, Any], target: Dict[str, Any], analytics: Dict[str, Any]) -> Dict[str, Any]:
+    summary = analytics.get("summary") or {}
+    total_topics = int(summary.get("total_topics") or 0)
+    accuracy = float(target.get("accuracy") or 0)
+    mastery_band = _mastery_band(accuracy, total_topics)
+    success_criteria = _build_success_criteria(plan, mastery_band)
+
+    return {
+        "mission_type": "diagnostic" if mastery_band == "baseline" else plan["mode"],
+        "priority": _mission_priority(mastery_band),
+        "mastery_band": mastery_band,
+        "estimated_minutes": _estimate_minutes(plan["mode"], mastery_band),
+        "student_state": {
+            "accuracy": accuracy,
+            "source": target.get("source", "current_context"),
+            "total_topics": total_topics,
+            "average_accuracy": float(summary.get("avg_accuracy") or 0),
+            "streak": int(summary.get("streak") or 0),
+        },
+        "agent_sequence": _build_agent_sequence(plan),
+        "success_criteria": success_criteria,
+        "checkpoints": _build_checkpoints(plan, success_criteria),
+        "completion_report": {
+            "status": "awaiting_student_action",
+            "measure": success_criteria[0],
+            "next_memory_event": "mission_result_saved",
+            "coach_follow_up": plan["next_actions"][0],
+        },
+    }
+
+
 def run_autonomous_study_loop(
     db,
     user_id: str,
@@ -183,6 +333,7 @@ def run_autonomous_study_loop(
     analytics = get_user_analytics(db, user_id)
     target = _select_target_topic(analytics, current_topic)
     plan = _build_mission_plan(target, analytics)
+    contract = _build_mission_contract(plan, target, analytics)
 
     event_bus.emit(
         "orchestrator",
@@ -217,6 +368,9 @@ def run_autonomous_study_loop(
         "objective": plan["objective"],
         "target_topic": target["topic"],
         "primary_agent": plan["primary_agent"],
+        "mission_type": contract["mission_type"],
+        "mastery_band": contract["mastery_band"],
+        "priority": contract["priority"],
         "generated_at": datetime.utcnow().isoformat(),
     }
     coach.updated_at = datetime.utcnow()
@@ -241,6 +395,10 @@ def run_autonomous_study_loop(
         "chapter": current_chapter or "",
         "target_topic": target["topic"],
         "target_source": target["source"],
+        "mission_type": contract["mission_type"],
+        "priority": contract["priority"],
+        "mastery_band": contract["mastery_band"],
+        "estimated_minutes": contract["estimated_minutes"],
         "primary_agent": plan["primary_agent"],
         "mode": plan["mode"],
         "difficulty": plan["difficulty"],
@@ -248,6 +406,11 @@ def run_autonomous_study_loop(
         "why": plan["why"],
         "steps": plan["steps"],
         "next_actions": plan["next_actions"],
+        "success_criteria": contract["success_criteria"],
+        "agent_sequence": contract["agent_sequence"],
+        "checkpoints": contract["checkpoints"],
+        "student_state": contract["student_state"],
+        "completion_report": contract["completion_report"],
         "result": result,
         "analytics_summary": analytics.get("summary", {}),
         "latency_ms": latency_ms,
