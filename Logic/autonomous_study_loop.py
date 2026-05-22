@@ -141,6 +141,112 @@ def _build_simple_study_plan(topic: str, mastery_band: str) -> List[Dict[str, st
 
 def _build_single_diagnostic_question(topic: str) -> Dict[str, Any]:
     topic_label = topic.replace("_", " ")
+    normalized_topic = topic.lower().replace("_", " ")
+    topic_bank: Dict[str, List[Dict[str, Any]]] = {
+        "alkane": [
+            {
+                "question": "In alkanes, what type of bond is present between carbon atoms?",
+                "options": [
+                    "Only single covalent bonds",
+                    "At least one carbon-carbon double bond",
+                    "At least one carbon-carbon triple bond",
+                    "Only ionic bonds",
+                ],
+                "correct": "Only single covalent bonds",
+                "explanation": "Alkanes are saturated hydrocarbons, so carbon atoms are connected by single covalent bonds.",
+            },
+            {
+                "question": "Why are alkanes called saturated hydrocarbons?",
+                "options": [
+                    "They contain the maximum possible number of hydrogen atoms for single-bonded carbon chains",
+                    "They dissolve completely in water",
+                    "They always contain a benzene ring",
+                    "They have at least one carbon-carbon triple bond",
+                ],
+                "correct": "They contain the maximum possible number of hydrogen atoms for single-bonded carbon chains",
+                "explanation": "A saturated hydrocarbon has only single bonds, so each carbon can hold the maximum number of hydrogen atoms.",
+            },
+        ],
+        "alkene": [
+            {
+                "question": "Which feature identifies an alkene?",
+                "options": [
+                    "At least one carbon-carbon double bond",
+                    "Only carbon-carbon single bonds",
+                    "A carbon-carbon triple bond",
+                    "No hydrogen atoms",
+                ],
+                "correct": "At least one carbon-carbon double bond",
+                "explanation": "Alkenes are unsaturated hydrocarbons because they contain at least one carbon-carbon double bond.",
+            }
+        ],
+        "alkyne": [
+            {
+                "question": "Which bond is the key identifying feature of an alkyne?",
+                "options": [
+                    "A carbon-carbon triple bond",
+                    "Only single covalent bonds",
+                    "A benzene ring",
+                    "A carbon-oxygen double bond",
+                ],
+                "correct": "A carbon-carbon triple bond",
+                "explanation": "Alkynes are unsaturated hydrocarbons with at least one carbon-carbon triple bond.",
+            }
+        ],
+        "aromatic": [
+            {
+                "question": "What makes an aromatic hydrocarbon different from a simple alkane?",
+                "options": [
+                    "It has a stable ring system with delocalized electrons",
+                    "It has only single bonds in an open chain",
+                    "It has no carbon atoms",
+                    "It is always ionic",
+                ],
+                "correct": "It has a stable ring system with delocalized electrons",
+                "explanation": "Aromatic hydrocarbons, such as benzene, are known for ring stability and delocalized electrons.",
+            }
+        ],
+        "matter": [
+            {
+                "question": "Which statement correctly defines matter?",
+                "options": [
+                    "Anything that has mass and occupies space",
+                    "Anything that produces light",
+                    "Only things that are visible",
+                    "Only solids and liquids",
+                ],
+                "correct": "Anything that has mass and occupies space",
+                "explanation": "Matter is defined by two core properties: it has mass and it occupies space.",
+            }
+        ],
+        "states": [
+            {
+                "question": "What mainly changes when matter changes from solid to liquid?",
+                "options": [
+                    "Particle arrangement and freedom of movement",
+                    "The atoms stop existing",
+                    "Mass becomes zero",
+                    "The substance must become a gas first",
+                ],
+                "correct": "Particle arrangement and freedom of movement",
+                "explanation": "During melting, particles gain freedom of movement while the substance remains matter.",
+            }
+        ],
+    }
+
+    for key, questions in topic_bank.items():
+        if key in normalized_topic:
+            question = questions[int(uuid.uuid4().hex[:2], 16) % len(questions)]
+            return {
+                "id": f"mission_{uuid.uuid4().hex[:8]}",
+                "topic": topic,
+                "subtopic": topic_label,
+                "question": question["question"],
+                "options": question["options"],
+                "correct": question["correct"],
+                "explanation": question["explanation"],
+            }
+
     concept = _find_topic_concept(topic)
     definition = ""
     examples: List[str] = []
@@ -175,7 +281,7 @@ def _build_single_diagnostic_question(topic: str) -> Dict[str, Any]:
         "id": f"mission_{uuid.uuid4().hex[:8]}",
         "topic": topic,
         "subtopic": topic_label,
-        "question": f"Which option shows the best understanding of {topic_label}?",
+        "question": f"Which statement correctly describes {topic_label}?",
         "options": options,
         "correct": correct_option,
         "explanation": (
