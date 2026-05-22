@@ -12,25 +12,13 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from Logic.agent_event_bus import event_bus
-from Logic.agent_router import route_to_agent
 from Logic.analytics_engine import get_user_analytics
 from Logic.agents.coach_agent import get_or_create_coach
-
-
-@dataclass
-class AutonomousAgentRequest:
-    user_id: str
-    question: str
-    section_id: str
-    session_id: str
-    mode: str
-    difficulty: str = "medium"
-    intent: str = "autonomous_study"
+from Logic.knowledge_graph import knowledge_graph
 
 
 def _safe_topic(value: Optional[str]) -> str:
@@ -76,85 +64,146 @@ def _build_mission_plan(target: Dict[str, Any], analytics: Dict[str, Any]) -> Di
     accuracy = float(target.get("accuracy") or 0)
     summary = analytics.get("summary") or {}
     total_topics = int(summary.get("total_topics") or 0)
+    mastery_band = _mastery_band(accuracy, total_topics)
+    topic_label = topic.replace("_", " ")
 
-    if total_topics == 0:
-        return {
-            "primary_agent": "exam",
-            "mode": "exam",
-            "difficulty": "medium",
-            "objective": f"Run a quick diagnostic on {topic.replace('_', ' ')}.",
-            "question": f"Generate 5 diagnostic MCQs on {topic} with answers and explanations.",
-            "why": "The system needs a first performance signal before it can personalize deeply.",
-            "steps": [
-                "Create a short diagnostic set.",
-                "Attempt the questions without notes.",
-                "Save the session so the coach can update weak-area memory.",
-            ],
-            "next_actions": [
-                "Complete the diagnostic MCQs.",
-                "Review every wrong answer explanation.",
-                "Ask the coach for a revision plan after saving the score.",
-            ],
-        }
-
-    if accuracy < 60:
-        return {
-            "primary_agent": "revision",
-            "mode": "explain",
-            "difficulty": "medium",
-            "objective": f"Repair weak understanding in {topic.replace('_', ' ')}.",
-            "question": f"Explain {topic} clearly with direct answer, simple explanation, examples, common mistakes, and exam-ready answer.",
-            "why": target["reason"],
-            "steps": [
-                "Rebuild the concept from first principles.",
-                "Study the examples and common mistakes.",
-                "Move to practice only after the explanation feels clear.",
-            ],
-            "next_actions": [
-                "Read the explanation once slowly.",
-                "Write the exam-ready answer in your own words.",
-                "Generate MCQs on the same topic next.",
-            ],
-        }
-
-    if accuracy < 80:
-        return {
-            "primary_agent": "exam",
-            "mode": "exam",
-            "difficulty": "medium",
-            "objective": f"Convert partial mastery of {topic.replace('_', ' ')} into exam confidence.",
-            "question": f"Generate 8 medium-level MCQs on {topic} with answers and concise explanations.",
-            "why": target["reason"],
-            "steps": [
-                "Practice targeted MCQs.",
-                "Track wrong answers.",
-                "Revise only the sub-points that caused mistakes.",
-            ],
-            "next_actions": [
-                "Attempt the practice set.",
-                "Save the result.",
-                "Ask for a mistake analysis if accuracy is below 80%.",
-            ],
-        }
+    if mastery_band == "baseline":
+        why = "The coach needs one first signal before personalizing the roadmap."
+    elif mastery_band in {"critical", "weak"}:
+        why = f"{target['reason']} Start with clarity first, then one diagnostic check."
+    elif mastery_band == "building":
+        why = f"{target['reason']} One smart question will show what to revise next."
+    else:
+        why = "The topic looks stronger, so the mission checks whether the student is ready for exam-level practice."
 
     return {
-        "primary_agent": "exam",
-        "mode": "probable",
-        "difficulty": "hard",
-        "objective": f"Push strong topic {topic.replace('_', ' ')} toward exam excellence.",
-        "question": f"Generate probable exam questions from {topic} with model answer points.",
-        "why": "Current mastery is strong enough for higher-value exam practice.",
+        "primary_agent": "coach",
+        "mode": "adaptive_mission",
+        "difficulty": "medium" if mastery_band != "strong" else "hard",
+        "objective": f"Build a simple adaptive roadmap for {topic_label}.",
+        "question": f"Run one intelligent diagnostic question on {topic_label}.",
+        "why": why,
         "steps": [
-            "Attempt subjective/probable questions.",
-            "Compare your answer with model points.",
-            "Polish answer structure for marks.",
+            f"Understand the core idea of {topic_label}.",
+            "Answer one diagnostic MCQ honestly without notes.",
+            "Let the coach adjust the next study block from the result.",
         ],
         "next_actions": [
-            "Write one model answer without looking.",
-            "Check if your answer includes keywords.",
-            "Move to the next weakest topic after this challenge.",
+            "Answer the one-question diagnostic.",
+            "Read the instant feedback carefully.",
+            "Follow the personalized next block until the topic crosses 80%.",
         ],
     }
+
+
+def _find_topic_concept(topic: str) -> Optional[Dict[str, Any]]:
+    topic_words = [word for word in topic.replace("_", " ").split() if len(word) > 2]
+    for word in topic_words[:4]:
+        matches = knowledge_graph.search_by_keyword(word, limit=1)
+        if matches:
+            return matches[0]
+    return None
+
+
+def _build_simple_study_plan(topic: str, mastery_band: str) -> List[Dict[str, str]]:
+    topic_label = topic.replace("_", " ")
+    if mastery_band in {"baseline", "critical", "weak"}:
+        focus = "foundation"
+        practice = "one easy diagnostic first"
+    elif mastery_band == "building":
+        focus = "mistake repair"
+        practice = "one targeted diagnostic"
+    else:
+        focus = "exam sharpening"
+        practice = "one challenge diagnostic"
+
+    return [
+        {
+            "title": "Understand",
+            "duration": "5 min",
+            "detail": f"Read the core idea of {topic_label} and connect it with one real-life example.",
+            "focus": focus,
+        },
+        {
+            "title": "Diagnose",
+            "duration": "2 min",
+            "detail": f"Attempt {practice} without checking notes.",
+            "focus": "honest signal",
+        },
+        {
+            "title": "Adapt",
+            "duration": "8 min",
+            "detail": "If correct, move to exam application. If wrong, rebuild the weak sub-concept with the coach.",
+            "focus": "personalized next step",
+        },
+    ]
+
+
+def _build_single_diagnostic_question(topic: str) -> Dict[str, Any]:
+    topic_label = topic.replace("_", " ")
+    concept = _find_topic_concept(topic)
+    definition = ""
+    examples: List[str] = []
+    mistakes: List[Any] = []
+    if concept:
+        definition = str(concept.get("definition") or "")
+        examples = list(concept.get("examples") or [])[:2]
+        mistakes = list(concept.get("common_mistakes") or [])[:2]
+
+    correct_option = (
+        definition
+        if definition
+        else f"It explains the main idea of {topic_label} using the correct property or rule."
+    )
+    example_text = f" For example: {examples[0]}." if examples else ""
+    mistake_option = "It is only about memorizing words without understanding the reason."
+    if mistakes:
+        first = mistakes[0]
+        if isinstance(first, dict) and first.get("mistake"):
+            mistake_option = str(first["mistake"])
+        elif first:
+            mistake_option = str(first)
+
+    options = [
+        correct_option,
+        mistake_option,
+        f"It is unrelated to {topic_label} and can be skipped for exams.",
+        "It is correct only when the answer is copied exactly from notes.",
+    ]
+
+    return {
+        "id": f"mission_{uuid.uuid4().hex[:8]}",
+        "topic": topic,
+        "subtopic": topic_label,
+        "question": f"Which option shows the best understanding of {topic_label}?",
+        "options": options,
+        "correct": correct_option,
+        "explanation": (
+            f"The best answer connects {topic_label} with its core meaning, property, or rule."
+            f"{example_text} If this felt difficult, revise the definition and one example before more MCQs."
+        ),
+    }
+
+
+def _build_adaptive_roadmap(topic: str, mastery_band: str) -> List[Dict[str, str]]:
+    topic_label = topic.replace("_", " ")
+    return [
+        {
+            "condition": "If the student answers correctly",
+            "next_step": f"Move to two exam-style applications of {topic_label}.",
+            "mentor_action": "Increase challenge slowly and check answer structure.",
+        },
+        {
+            "condition": "If the student answers incorrectly",
+            "next_step": f"Explain {topic_label} again using a simpler example and one common mistake.",
+            "mentor_action": "Repair the exact misconception before giving more questions.",
+        },
+        {
+            "condition": "If the student feels unsure",
+            "next_step": "Ask the coach for a live example, then retry one similar question.",
+            "mentor_action": "Build confidence before measuring speed.",
+        },
+    ]
 
 
 def _mastery_band(accuracy: float, total_topics: int) -> str:
@@ -178,6 +227,8 @@ def _mission_priority(mastery_band: str) -> str:
 
 
 def _estimate_minutes(mode: str, mastery_band: str) -> int:
+    if mode == "adaptive_mission":
+        return 15
     if mastery_band == "baseline":
         return 12
     if mode == "explain":
@@ -190,8 +241,12 @@ def _estimate_minutes(mode: str, mastery_band: str) -> int:
 
 
 def _build_agent_sequence(plan: Dict[str, Any]) -> List[Dict[str, str]]:
-    specialist = "Revision Specialist" if plan["primary_agent"] == "revision" else "Exam Generator"
-    specialist_action = "Rebuilds the concept" if plan["primary_agent"] == "revision" else "Creates targeted practice"
+    if plan["primary_agent"] == "coach":
+        specialist = "Adaptive Tutor"
+        specialist_action = "Creates a simple plan and one diagnostic question"
+    else:
+        specialist = "Revision Specialist" if plan["primary_agent"] == "revision" else "Exam Generator"
+        specialist_action = "Rebuilds the concept" if plan["primary_agent"] == "revision" else "Creates targeted practice"
 
     return [
         {
@@ -222,6 +277,12 @@ def _build_agent_sequence(plan: Dict[str, Any]) -> List[Dict[str, str]]:
 
 
 def _build_success_criteria(plan: Dict[str, Any], mastery_band: str) -> List[str]:
+    if plan["mode"] == "adaptive_mission":
+        return [
+            "Complete the one-question diagnostic without notes.",
+            "Read the feedback and identify whether the issue is concept clarity, memory, or application.",
+            "Follow the personalized next block until the topic reaches 80%+ confidence.",
+        ]
     if mastery_band == "baseline":
         return [
             "Attempt every diagnostic question without notes.",
@@ -282,9 +343,12 @@ def _build_mission_contract(plan: Dict[str, Any], target: Dict[str, Any], analyt
     accuracy = float(target.get("accuracy") or 0)
     mastery_band = _mastery_band(accuracy, total_topics)
     success_criteria = _build_success_criteria(plan, mastery_band)
+    mission_type = "adaptive_diagnostic" if plan["mode"] == "adaptive_mission" else (
+        "diagnostic" if mastery_band == "baseline" else plan["mode"]
+    )
 
     return {
-        "mission_type": "diagnostic" if mastery_band == "baseline" else plan["mode"],
+        "mission_type": mission_type,
         "priority": _mission_priority(mastery_band),
         "mastery_band": mastery_band,
         "estimated_minutes": _estimate_minutes(plan["mode"], mastery_band),
@@ -299,10 +363,16 @@ def _build_mission_contract(plan: Dict[str, Any], target: Dict[str, Any], analyt
         "success_criteria": success_criteria,
         "checkpoints": _build_checkpoints(plan, success_criteria),
         "completion_report": {
-            "status": "awaiting_student_action",
+            "status": "awaiting_diagnostic_answer" if plan["mode"] == "adaptive_mission" else "awaiting_student_action",
             "measure": success_criteria[0],
             "next_memory_event": "mission_result_saved",
             "coach_follow_up": plan["next_actions"][0],
+            "final_report_sections": [
+                "What you understood",
+                "Weak point detected",
+                "Confidence signal",
+                "Next 80% roadmap",
+            ],
         },
     }
 
@@ -348,16 +418,36 @@ def run_autonomous_study_loop(
         session_id=session_id,
     )
 
-    request = AutonomousAgentRequest(
-        user_id=user_id,
-        question=plan["question"],
-        section_id=target["topic"],
-        session_id=session_id,
-        mode=plan["mode"],
-        difficulty=plan["difficulty"],
-    )
-
-    result = route_to_agent(request, db=db)
+    study_plan = _build_simple_study_plan(target["topic"], contract["mastery_band"])
+    diagnostic_question = _build_single_diagnostic_question(target["topic"])
+    adaptive_roadmap = _build_adaptive_roadmap(target["topic"], contract["mastery_band"])
+    plan_lines = [
+        "Simple Adaptive Study Plan:",
+        *[f"- {item['title']} ({item['duration']}): {item['detail']}" for item in study_plan],
+        "",
+        "One-Question Diagnostic:",
+        diagnostic_question["question"],
+        *[f"- {option}" for option in diagnostic_question["options"]],
+        "",
+        "After You Answer:",
+        "- Correct: move to exam application.",
+        "- Wrong or unsure: rebuild the exact weak point with the coach.",
+    ]
+    result = {
+        "type": "adaptive_mission",
+        "answer": "\n".join(plan_lines),
+        "data": {
+            "text": "\n".join(plan_lines),
+            "questions": [diagnostic_question],
+            "study_plan": study_plan,
+            "adaptive_roadmap": adaptive_roadmap,
+        },
+        "metadata": {
+            "agent": "adaptive_tutor",
+            "mission_model": "single_question_diagnostic",
+            "personalization": "roadmap_updates_after_student_answer",
+        },
+    }
     latency_ms = round((time.time() - started_at) * 1000)
 
     coach = get_or_create_coach(db, user_id)
@@ -407,6 +497,9 @@ def run_autonomous_study_loop(
         "steps": plan["steps"],
         "next_actions": plan["next_actions"],
         "success_criteria": contract["success_criteria"],
+        "study_plan": study_plan,
+        "diagnostic_question": diagnostic_question,
+        "adaptive_roadmap": adaptive_roadmap,
         "agent_sequence": contract["agent_sequence"],
         "checkpoints": contract["checkpoints"],
         "student_state": contract["student_state"],

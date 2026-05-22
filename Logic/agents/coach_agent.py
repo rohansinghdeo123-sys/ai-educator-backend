@@ -145,6 +145,126 @@ def _get_recent_memories(db, coach_id: str, limit: int = 6) -> List[AICoachMemor
     )
 
 
+def _get_recent_interactions(
+    db,
+    coach_id: str,
+    session_id: Optional[str] = None,
+    limit: int = 8,
+) -> List[AICoachInteraction]:
+    rows = (
+        db.query(AICoachInteraction)
+        .filter(AICoachInteraction.coach_id == coach_id)
+        .order_by(AICoachInteraction.id.desc())
+        .limit(limit * 3)
+        .all()
+    )
+    if session_id:
+        session_rows = [
+            row for row in rows
+            if isinstance(row.metadata_json, dict)
+            and row.metadata_json.get("session_id") == session_id
+        ]
+        if session_rows:
+            rows = session_rows
+
+    return list(reversed(rows[:limit]))
+
+
+def _looks_like_follow_up(question: str) -> bool:
+    q = (question or "").strip().lower()
+    if not q:
+        return False
+
+    words = re.findall(r"[a-zA-Z0-9]+", q)
+    if len(words) <= 5:
+        return True
+
+    followup_starts = (
+        "why", "how", "then", "and", "but", "what about", "example",
+        "give example", "more", "simpler", "explain again", "this", "it",
+        "that", "same", "next", "practice", "show",
+    )
+    return any(q.startswith(prefix) for prefix in followup_starts)
+
+
+def _build_conversation_context(
+    question: str,
+    coach: AICoachProfile,
+    interactions: List[AICoachInteraction],
+    memories: List[AICoachMemory],
+) -> Dict[str, Any]:
+    recent_lines = []
+    last_student_question = ""
+    for item in interactions[-8:]:
+        role = "Student" if item.role == "user" else "Tutor"
+        message = (item.message or "").strip().replace("\n", " ")
+        if not message:
+            continue
+        if item.role == "user":
+            last_student_question = message
+        recent_lines.append(f"{role}: {message[:260]}")
+
+    memory_lines = [
+        f"- {memory.title}: {memory.summary}"
+        for memory in memories[:6]
+        if memory.summary
+    ]
+
+    return {
+        "is_follow_up": bool(recent_lines and _looks_like_follow_up(question)),
+        "last_student_question": last_student_question,
+        "recent_thread": "\n".join(recent_lines) or "No previous lesson thread in this session.",
+        "durable_memory": "\n".join(memory_lines) or "No durable learning memories yet.",
+        "long_term_summary": coach.long_term_summary or "No long-term learning summary yet.",
+    }
+
+
+def _build_assistance_blocks(question: str, answer_format: Dict[str, Any]) -> List[Dict[str, str]]:
+    topic_hint = (question or "this concept").strip()
+    if len(topic_hint) > 90:
+        topic_hint = topic_hint[:87].rstrip() + "..."
+
+    return [
+        {
+            "label": "Need simpler explanation?",
+            "prompt": f"Explain {topic_hint} in a simpler way with a very easy example.",
+        },
+        {
+            "label": "Show live example",
+            "prompt": f"Show a real-life example of {topic_hint} and connect it to the concept.",
+        },
+        {
+            "label": "Practice this concept",
+            "prompt": f"Give me one practice question on {topic_hint}, then check my answer.",
+        },
+        {
+            "label": "Common mistake students make",
+            "prompt": f"What common mistake do students make in {topic_hint}, and how can I avoid it?",
+        },
+    ]
+
+
+def _update_learning_journey_summary(
+    coach: AICoachProfile,
+    question: str,
+    answer_format: Dict[str, Any],
+    topic_snapshot: Dict[str, Any],
+    is_follow_up: bool,
+) -> None:
+    weak_topics = [
+        item.get("topic", "")
+        for item in topic_snapshot.get("weak_topics", [])[:3]
+        if item.get("topic")
+    ]
+    followup_note = "connected follow-up" if is_follow_up else "new learning query"
+    coach.long_term_summary = (
+        f"Recent focus: {question[:160]}. "
+        f"Response style used: {answer_format.get('label', 'Concept Builder')}. "
+        f"Conversation type: {followup_note}. "
+        f"Watched weak areas: {', '.join(weak_topics) if weak_topics else 'not enough data yet'}."
+    )
+
+
 def _get_recent_sessions(db, user_id: str, limit: int = 5) -> List[TestHistory]:
     return (
         db.query(TestHistory)
@@ -611,6 +731,7 @@ def _build_study_prompt(
     question: str,
     topic_snapshot: Dict[str, Any],
     answer_format: Dict[str, Any],
+    conversation_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     graph_context = ""
     keywords = [w for w in question.lower().split() if len(w) > 2]
@@ -628,6 +749,8 @@ def _build_study_prompt(
                 break
 
     adaptive_format = _build_answer_format_instruction(answer_format)
+    conversation_context = conversation_context or {}
+    follow_up_mode = "YES" if conversation_context.get("is_follow_up") else "NO"
 
     return f"""
 You are {coach.coach_name}, a specialist subject tutor and personal study coach.
@@ -642,7 +765,27 @@ Base formatting rules:
 - Avoid raw markdown tables, decorative symbols, and long unbroken paragraphs.
 - If the question is too broad, answer the core concept first and then add what to study next.
 
+Private tuition behavior:
+- Treat the student as someone you are mentoring over time, not a one-off question.
+- If Follow-up mode is YES, infer what short words like "this", "it", "why", "example", or "again" refer to from the recent lesson thread.
+- Connect the new answer to the previous concept in one natural sentence when useful.
+- Use one real-life example, then a step-by-step breakdown when the concept needs depth.
+- End with one gentle checkpoint question or next action.
+- The UI shows clickable help blocks, so do not print button labels as plain text unless they are part of the teaching answer.
+
 {adaptive_format}
+
+CONVERSATION CONTEXT:
+Follow-up mode: {follow_up_mode}
+Last student question: {conversation_context.get("last_student_question", "None")}
+Recent lesson thread:
+{conversation_context.get("recent_thread", "No previous lesson thread.")}
+
+LONG-TERM STUDENT GUIDANCE:
+{conversation_context.get("long_term_summary", "No long-term summary yet.")}
+
+COACH MEMORY:
+{conversation_context.get("durable_memory", "No durable memory yet.")}
 
 KNOWLEDGE BASE (use this data if it helps):
 {graph_context if graph_context else "No specific curriculum data found – explain from your general knowledge."}
@@ -738,6 +881,7 @@ Your job is to transform the draft into the final answer a specialist teacher wo
 Review rules:
 - Fix factual errors, vague wording, and missing reasoning.
 - Keep the answer easy to revise from directly.
+- Preserve helpful references to the previous lesson if the student asked a follow-up.
 - Use clear headings ending with a colon.
 - Put a blank line between sections.
 - Prefer short paragraphs and dash bullets.
@@ -981,6 +1125,14 @@ def coach_agent(request, db=None) -> dict:
     topic_snapshot = _get_topic_snapshot(db, user_id)
     recent_sessions = _build_recent_session_snapshot(_get_recent_sessions(db, user_id))
     memories = _get_recent_memories(db, coach.coach_id)
+    recent_interactions = _get_recent_interactions(db, coach.coach_id, session_id=session_id)
+    conversation_context = _build_conversation_context(
+        question=question,
+        coach=coach,
+        interactions=recent_interactions,
+        memories=memories,
+    )
+    assistance_blocks = _build_assistance_blocks(question, answer_format)
 
     try:
         analytics_snapshot = get_user_analytics(db, user_id)
@@ -1012,6 +1164,7 @@ def coach_agent(request, db=None) -> dict:
                 question=question,
                 topic_snapshot=topic_snapshot,
                 answer_format=answer_format,
+                conversation_context=conversation_context,
             )
 
         try:
@@ -1061,6 +1214,13 @@ def coach_agent(request, db=None) -> dict:
     coach.next_best_action = recommendation
     coach.last_interaction_at = datetime.utcnow()
     coach.updated_at = datetime.utcnow()
+    _update_learning_journey_summary(
+        coach=coach,
+        question=question,
+        answer_format=answer_format,
+        topic_snapshot=topic_snapshot,
+        is_follow_up=bool(conversation_context.get("is_follow_up")),
+    )
 
     _persist_interaction(
         db=db,
@@ -1069,7 +1229,11 @@ def coach_agent(request, db=None) -> dict:
         message=question,
         intent=intent,
         mode=mode,
-        metadata={"session_id": session_id},
+        metadata={
+            "session_id": session_id,
+            "is_follow_up": bool(conversation_context.get("is_follow_up")),
+            "last_student_question": conversation_context.get("last_student_question"),
+        },
     )
     _persist_interaction(
         db=db,
@@ -1083,6 +1247,8 @@ def coach_agent(request, db=None) -> dict:
             "progress": progress,
             "weak_topics": topic_snapshot["weak_topics"][:3],
             "answer_format": answer_format,
+            "is_follow_up": bool(conversation_context.get("is_follow_up")),
+            "assistance_blocks": assistance_blocks,
         },
         quality_score=0.9,
     )
@@ -1127,6 +1293,8 @@ def coach_agent(request, db=None) -> dict:
             "latency_ms": latency_ms,
             "model": MODEL_NAME,
             "answer_format": answer_format,
+            "is_follow_up": bool(conversation_context.get("is_follow_up")),
+            "assistance_blocks": assistance_blocks,
         },
     }
 
@@ -1162,6 +1330,14 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     topic_snapshot = _get_topic_snapshot(db, user_id)
     recent_sessions = _build_recent_session_snapshot(_get_recent_sessions(db, user_id))
     memories = _get_recent_memories(db, coach.coach_id)
+    recent_interactions = _get_recent_interactions(db, coach.coach_id, session_id=session_id)
+    conversation_context = _build_conversation_context(
+        question=question,
+        coach=coach,
+        interactions=recent_interactions,
+        memories=memories,
+    )
+    assistance_blocks = _build_assistance_blocks(question, answer_format)
 
     try:
         analytics_snapshot = get_user_analytics(db, user_id)
@@ -1181,6 +1357,14 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         title=f"Drafting: {answer_format['label']}",
         detail=f"Selected {answer_format['label']} format for this question.",
     )
+    if conversation_context.get("is_follow_up"):
+        yield _stage_event(
+            stage="drafting",
+            status="active",
+            agent="Memory Tutor",
+            title="Connecting context",
+            detail="Using the recent lesson thread to understand this follow-up.",
+        )
 
     # ── Answer source ──────────────────────────────────────────────────
     should_review_answer = True
@@ -1204,6 +1388,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 question=question,
                 topic_snapshot=topic_snapshot,
                 answer_format=answer_format,
+                conversation_context=conversation_context,
             )
 
         draft = ""
@@ -1293,6 +1478,13 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     coach.next_best_action = recommendation
     coach.last_interaction_at = datetime.utcnow()
     coach.updated_at = datetime.utcnow()
+    _update_learning_journey_summary(
+        coach=coach,
+        question=question,
+        answer_format=answer_format,
+        topic_snapshot=topic_snapshot,
+        is_follow_up=bool(conversation_context.get("is_follow_up")),
+    )
 
     _persist_interaction(
         db=db,
@@ -1301,7 +1493,11 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         message=question,
         intent=intent,
         mode=mode,
-        metadata={"session_id": session_id},
+        metadata={
+            "session_id": session_id,
+            "is_follow_up": bool(conversation_context.get("is_follow_up")),
+            "last_student_question": conversation_context.get("last_student_question"),
+        },
     )
     _persist_interaction(
         db=db,
@@ -1315,6 +1511,8 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "progress": progress,
             "weak_topics": topic_snapshot["weak_topics"][:3],
             "answer_format": answer_format,
+            "is_follow_up": bool(conversation_context.get("is_follow_up")),
+            "assistance_blocks": assistance_blocks,
         },
         quality_score=0.9,
     )
