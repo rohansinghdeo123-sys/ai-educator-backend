@@ -731,6 +731,12 @@ def coach_chat(
             self.mode = "coach"
             self.intent = payload.intent
             self.difficulty = "medium"
+            self.subject = payload.subject
+            self.topic = payload.topic
+            self.mentor_directive = payload.mentor_directive
+            self.student_state = payload.student_state
+            self.adaptive_strategy = payload.adaptive_strategy
+            self.learning_context = payload.learning_context
 
     result = coach_agent(CoachRequest(), db=db)
     return result
@@ -759,6 +765,12 @@ async def coach_chat_stream(
             self.mode = "coach"
             self.intent = payload.intent
             self.difficulty = "medium"
+            self.subject = payload.subject
+            self.topic = payload.topic
+            self.mentor_directive = payload.mentor_directive
+            self.student_state = payload.student_state
+            self.adaptive_strategy = payload.adaptive_strategy
+            self.learning_context = payload.learning_context
 
     def event_stream():
         for token in coach_agent_stream(CoachRequest(), db=db):

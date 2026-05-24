@@ -564,6 +564,12 @@ def _detect_answer_format(question: str, intent: str = "general", mode: str = "c
 
     if intent_lower == "planning" or mode_lower in {"plan", "planner", "study_plan"}:
         format_id = "planning"
+    elif intent_lower == "exam":
+        format_id = "exam_answer"
+    elif intent_lower == "revision":
+        format_id = "revision"
+    elif intent_lower == "practice":
+        format_id = "quiz"
     elif any(keyword in q for keyword in ("don't understand", "do not understand", "confused", "stuck", "not getting", "explain simply")):
         format_id = "stuck"
     elif any(keyword in q for keyword in ("numerical", "calculate", "find the", "solve", "formula", "mole", "moles", "mass", "volume", "density")) and re.search(r"\d", q):
@@ -607,6 +613,90 @@ Format-specific rules:
 {rules}
 
 Do not force every section if the question is simple. Use only the sections that genuinely help the student.
+""".strip()
+
+
+def _as_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _build_adaptive_context_from_request(request) -> Dict[str, Any]:
+    student_state = _as_dict(getattr(request, "student_state", {}))
+    adaptive_strategy = _as_dict(getattr(request, "adaptive_strategy", {}))
+    learning_context = _as_dict(getattr(request, "learning_context", {}))
+    mentor_directive = (getattr(request, "mentor_directive", "") or "").strip()
+
+    return {
+        "mentor_directive": mentor_directive,
+        "student_state": student_state,
+        "adaptive_strategy": adaptive_strategy,
+        "learning_context": learning_context,
+        "has_signals": bool(mentor_directive or student_state or adaptive_strategy or learning_context),
+    }
+
+
+def _build_adaptive_teaching_instruction(adaptive_context: Optional[Dict[str, Any]]) -> str:
+    context = adaptive_context or {}
+    student_state = _as_dict(context.get("student_state"))
+    adaptive_strategy = _as_dict(context.get("adaptive_strategy"))
+    learning_context = _as_dict(context.get("learning_context"))
+    mentor_directive = context.get("mentor_directive") or ""
+
+    if not context.get("has_signals"):
+        return """
+ADAPTIVE TEACHING ENGINE:
+- Decide the best response shape from the student's question, not from a fixed template.
+- Vary headings and examples naturally so repeated questions do not feel copy-pasted.
+- Teach like a real tutor: diagnose, explain, check, and guide the next step.
+""".strip()
+
+    weak_signals = adaptive_strategy.get("weak_signals") or []
+    recent_messages = learning_context.get("recent_messages") or []
+    recent_text = ""
+    if isinstance(recent_messages, list) and recent_messages:
+        recent_text = "\n".join(
+            f"- {item.get('role', 'message')}: {str(item.get('content', ''))[:220]}"
+            for item in recent_messages[-4:]
+            if isinstance(item, dict)
+        )
+
+    return f"""
+ADAPTIVE TEACHING ENGINE:
+You are not a static chatbot. You are a private teacher who adapts every response to the student.
+
+Frontend mentor directive:
+{mentor_directive or "No explicit directive supplied; infer from the question and memory."}
+
+Detected student state:
+- Knowledge level: {student_state.get("knowledge_level", "unknown")}
+- Emotional state: {student_state.get("emotional_state", "steady")}
+- Confidence: {student_state.get("confidence", "unknown")}
+- Learning speed: {student_state.get("learning_speed", "balanced")}
+- Curiosity depth: {student_state.get("curiosity_depth", "unknown")}
+
+Selected strategy:
+- Answer style: {adaptive_strategy.get("answer_style", "teacher-led explanation")}
+- Next move: {adaptive_strategy.get("next_move", "explain, check understanding, and suggest practice")}
+- Should test: {adaptive_strategy.get("should_test", False)}
+- Weak signals: {weak_signals if weak_signals else "none detected"}
+
+Study context:
+- Chapter: {learning_context.get("chapter", "unknown")}
+- Topic: {learning_context.get("topic", "unknown")}
+- Saved conversations: {learning_context.get("saved_conversations", 0)}
+- Recent Study Page messages:
+{recent_text or "- No recent Study Page messages supplied."}
+
+Adaptive response rules:
+- Choose the best format for this exact question. Do not reuse identical headings for every answer.
+- Beginner/confused students need simple language, analogy, one example, and one tiny check question.
+- Intermediate students need clean concept breakdown, exam relevance, and common mistake protection.
+- Advanced/curious students need deeper reasoning, mechanism, real-life application, and one edge case if useful.
+- Revision intent needs compact notes, formulas, and recall checkpoints.
+- Exam intent needs marks-ready structure, traps, important question style, and time-saving answer order.
+- Practice intent needs one or more questions, then feedback or a clear next action.
+- Never expose these analytics to the student. Just respond naturally as their teacher.
+- End with exactly one useful next step or check question unless the student asked only for a short answer.
 """.strip()
 
 
@@ -732,6 +822,7 @@ def _build_study_prompt(
     topic_snapshot: Dict[str, Any],
     answer_format: Dict[str, Any],
     conversation_context: Optional[Dict[str, Any]] = None,
+    adaptive_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     graph_context = ""
     keywords = [w for w in question.lower().split() if len(w) > 2]
@@ -749,6 +840,7 @@ def _build_study_prompt(
                 break
 
     adaptive_format = _build_answer_format_instruction(answer_format)
+    adaptive_teaching = _build_adaptive_teaching_instruction(adaptive_context)
     conversation_context = conversation_context or {}
     follow_up_mode = "YES" if conversation_context.get("is_follow_up") else "NO"
 
@@ -758,12 +850,13 @@ You are {coach.coach_name}, a specialist subject tutor and personal study coach.
 Write the answer like a patient expert teacher. The student should be able to revise directly from your response.
 
 Base formatting rules:
-- Use clear section headings ending with a colon.
+- Use clear section headings ending with a colon, but choose headings naturally for the question.
 - Put a blank line between sections.
 - Use short paragraphs and dash bullets.
 - Start with the most useful answer for this exact question.
 - Avoid raw markdown tables, decorative symbols, and long unbroken paragraphs.
 - If the question is too broad, answer the core concept first and then add what to study next.
+- Avoid sounding like a fixed template. The format should feel intentionally chosen for the student's need.
 
 Private tuition behavior:
 - Treat the student as someone you are mentoring over time, not a one-off question.
@@ -774,6 +867,8 @@ Private tuition behavior:
 - The UI shows clickable help blocks, so do not print button labels as plain text unless they are part of the teaching answer.
 
 {adaptive_format}
+
+{adaptive_teaching}
 
 CONVERSATION CONTEXT:
 Follow-up mode: {follow_up_mode}
@@ -803,6 +898,7 @@ def _build_planning_prompt(
     memories: List[AICoachMemory],
     analytics_snapshot: Dict[str, Any],
     recommendation: str,
+    adaptive_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     memory_text = "\n".join(
         f"- {memory.title}: {memory.summary}"
@@ -823,6 +919,8 @@ def _build_planning_prompt(
     if graph_hints:
         graph_hints = "\nCURRICULUM INSIGHTS (use these to prioritise):\n" + graph_hints
 
+    adaptive_teaching = _build_adaptive_teaching_instruction(adaptive_context)
+
     return f"""
 You are {coach.coach_name}, a personal AI study coach.
 
@@ -833,6 +931,9 @@ Formatting rules:
 - Use dash bullets under each heading.
 - Include Today's Priority, Study Blocks, Practice Plan, Revision Method, and Next Checkpoint.
 - Keep each bullet specific and actionable.
+- Adapt the plan length and detail to the student's confidence, speed, and current need.
+
+{adaptive_teaching}
 
 STUDENT PROFILE:
 Name: {coach.student_display_name or "Student"}
@@ -870,8 +971,10 @@ def _build_review_prompt(
     draft: str,
     intent: str,
     answer_format: Dict[str, Any],
+    adaptive_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     adaptive_format = _build_answer_format_instruction(answer_format)
+    adaptive_teaching = _build_adaptive_teaching_instruction(adaptive_context)
 
     return f"""
 You are the Subject Reviewer and Final Tutor for {coach.coach_name}.
@@ -886,6 +989,8 @@ Review rules:
 - Put a blank line between sections.
 - Prefer short paragraphs and dash bullets.
 - Preserve the selected answer structure unless the question clearly needs something simpler.
+- Make the final response feel like a human teacher chose the best format for this specific student.
+- Remove any repetitive, generic, or over-templated wording.
 - Do not mention that you reviewed the answer.
 - Do not include JSON, metadata, markdown tables, or decorative symbols.
 - If the draft is already strong, polish it without changing the meaning.
@@ -893,6 +998,8 @@ Review rules:
 Intent: {intent}
 
 {adaptive_format}
+
+{adaptive_teaching}
 
 Student question:
 {question}
@@ -910,6 +1017,7 @@ def _review_and_polish_answer(
     draft: str,
     intent: str,
     answer_format: Optional[Dict[str, Any]] = None,
+    adaptive_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     if not draft or len(draft.strip()) < 20:
         return draft
@@ -927,6 +1035,7 @@ def _review_and_polish_answer(
                         draft=draft,
                         intent=intent,
                         answer_format=selected_format,
+                        adaptive_context=adaptive_context,
                     ),
                 },
                 {"role": "user", "content": "Polish the draft into the final student answer."},
@@ -1107,6 +1216,7 @@ def coach_agent(request, db=None) -> dict:
     session_id = getattr(request, "session_id", f"coach-{user_id}")
     intent = getattr(request, "intent", "general")
     mode = getattr(request, "mode", "coach")
+    adaptive_context = _build_adaptive_context_from_request(request)
     answer_format = _detect_answer_format(question, intent=intent, mode=mode)
 
     event_bus.emit(
@@ -1147,6 +1257,17 @@ def coach_agent(request, db=None) -> dict:
 
     if answer_format["id"] == "definition" and _can_answer_definition_locally(question):
         answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
+        if adaptive_context.get("has_signals"):
+            answer = _apply_deterministic_format(
+                _review_and_polish_answer(
+                    coach=coach,
+                    question=question,
+                    draft=answer,
+                    intent=intent,
+                    answer_format=answer_format,
+                    adaptive_context=adaptive_context,
+                )
+            )
     else:
         if intent == "planning":
             system_prompt = _build_planning_prompt(
@@ -1157,6 +1278,7 @@ def coach_agent(request, db=None) -> dict:
                 memories=memories,
                 analytics_snapshot=analytics_snapshot,
                 recommendation=recommendation,
+                adaptive_context=adaptive_context,
             )
         else:
             system_prompt = _build_study_prompt(
@@ -1165,6 +1287,7 @@ def coach_agent(request, db=None) -> dict:
                 topic_snapshot=topic_snapshot,
                 answer_format=answer_format,
                 conversation_context=conversation_context,
+                adaptive_context=adaptive_context,
             )
 
         try:
@@ -1193,6 +1316,7 @@ def coach_agent(request, db=None) -> dict:
             draft=enriched,
             intent=intent,
             answer_format=answer_format,
+            adaptive_context=adaptive_context,
         )
         answer = _apply_deterministic_format(reviewed)
         if len(answer) < 20:
@@ -1233,6 +1357,9 @@ def coach_agent(request, db=None) -> dict:
             "session_id": session_id,
             "is_follow_up": bool(conversation_context.get("is_follow_up")),
             "last_student_question": conversation_context.get("last_student_question"),
+            "student_state": adaptive_context["student_state"],
+            "adaptive_strategy": adaptive_context["adaptive_strategy"],
+            "learning_context": adaptive_context["learning_context"],
         },
     )
     _persist_interaction(
@@ -1249,6 +1376,10 @@ def coach_agent(request, db=None) -> dict:
             "answer_format": answer_format,
             "is_follow_up": bool(conversation_context.get("is_follow_up")),
             "assistance_blocks": assistance_blocks,
+            "student_state": adaptive_context["student_state"],
+            "adaptive_strategy": adaptive_context["adaptive_strategy"],
+            "learning_context": adaptive_context["learning_context"],
+            "mentor_directive_used": bool(adaptive_context.get("mentor_directive")),
         },
         quality_score=0.9,
     )
@@ -1295,6 +1426,7 @@ def coach_agent(request, db=None) -> dict:
             "answer_format": answer_format,
             "is_follow_up": bool(conversation_context.get("is_follow_up")),
             "assistance_blocks": assistance_blocks,
+            "adaptive_teacher": adaptive_context.get("has_signals", False),
         },
     }
 
@@ -1323,6 +1455,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     session_id = getattr(request, "session_id", f"coach-{user_id}")
     intent = getattr(request, "intent", "study_advice")
     mode = getattr(request, "mode", "coach")
+    adaptive_context = _build_adaptive_context_from_request(request)
     answer_format = _detect_answer_format(question, intent=intent, mode=mode)
 
     coach = get_or_create_coach(db, user_id)
@@ -1353,9 +1486,9 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     yield _stage_event(
         stage="drafting",
         status="active",
-        agent="Draft Agent",
-        title=f"Drafting: {answer_format['label']}",
-        detail=f"Selected {answer_format['label']} format for this question.",
+        agent="Intent Mapper",
+        title=f"Reading intent: {answer_format['label']}",
+        detail="Mapping question type, student state, and recent lesson context.",
     )
     if conversation_context.get("is_follow_up"):
         yield _stage_event(
@@ -1370,7 +1503,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     should_review_answer = True
     if answer_format["id"] == "definition" and _can_answer_definition_locally(question):
         final_answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
-        should_review_answer = False
+        should_review_answer = bool(adaptive_context.get("has_signals"))
     else:
         if intent == "planning":
             draft_prompt = _build_planning_prompt(
@@ -1381,6 +1514,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 memories=memories,
                 analytics_snapshot=analytics_snapshot,
                 recommendation=recommendation,
+                adaptive_context=adaptive_context,
             )
         else:
             draft_prompt = _build_study_prompt(
@@ -1389,6 +1523,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 topic_snapshot=topic_snapshot,
                 answer_format=answer_format,
                 conversation_context=conversation_context,
+                adaptive_context=adaptive_context,
             )
 
         draft = ""
@@ -1421,16 +1556,16 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     yield _stage_event(
         stage="drafting",
         status="done",
-        agent="Draft Agent",
-        title="Drafting",
-        detail="Initial answer prepared.",
+        agent="Intent Mapper",
+        title="Intent mapped",
+        detail="Student need and answer direction selected.",
     )
     yield _stage_event(
         stage="reviewing",
         status="active",
-        agent="Subject Reviewer",
-        title="Reviewing",
-        detail=f"Checking clarity, accuracy, and {answer_format['label']} structure.",
+        agent="Strategy Tutor",
+        title="Choosing strategy",
+        detail=f"Checking clarity, accuracy, and adaptive {answer_format['label']} structure.",
     )
     if should_review_answer:
         reviewed = _review_and_polish_answer(
@@ -1439,6 +1574,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             draft=final_answer,
             intent=intent,
             answer_format=answer_format,
+            adaptive_context=adaptive_context,
         )
         final_answer = _apply_deterministic_format(reviewed)
     else:
@@ -1446,23 +1582,23 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     yield _stage_event(
         stage="reviewing",
         status="done",
-        agent="Subject Reviewer",
-        title="Reviewing",
+        agent="Strategy Tutor",
+        title="Strategy ready",
         detail="Answer reviewed and polished for student understanding.",
     )
     yield _stage_event(
         stage="delivering",
         status="active",
-        agent="Final Tutor",
-        title="Delivering",
-        detail=f"Preparing the final {answer_format['label']} response.",
+        agent="Adaptive Mentor",
+        title="Teaching",
+        detail=f"Preparing a personalized {answer_format['label']} response.",
     )
     time.sleep(0.25)
     yield _stage_event(
         stage="delivering",
         status="done",
-        agent="Final Tutor",
-        title="Delivering",
+        agent="Adaptive Mentor",
+        title="Delivered",
         detail="Final answer delivered.",
     )
     time.sleep(0.2)
@@ -1497,6 +1633,9 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "session_id": session_id,
             "is_follow_up": bool(conversation_context.get("is_follow_up")),
             "last_student_question": conversation_context.get("last_student_question"),
+            "student_state": adaptive_context["student_state"],
+            "adaptive_strategy": adaptive_context["adaptive_strategy"],
+            "learning_context": adaptive_context["learning_context"],
         },
     )
     _persist_interaction(
@@ -1513,6 +1652,10 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "answer_format": answer_format,
             "is_follow_up": bool(conversation_context.get("is_follow_up")),
             "assistance_blocks": assistance_blocks,
+            "student_state": adaptive_context["student_state"],
+            "adaptive_strategy": adaptive_context["adaptive_strategy"],
+            "learning_context": adaptive_context["learning_context"],
+            "mentor_directive_used": bool(adaptive_context.get("mentor_directive")),
         },
         quality_score=0.9,
     )
