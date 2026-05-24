@@ -241,6 +241,12 @@ class AutonomousStudyRequest(BaseModel):
     current_topic: Optional[str] = None
     current_chapter: Optional[str] = None
     subject: str = "Chemistry"
+    current_knowledge: str = "some_idea"
+    learning_goal: str = "understanding"
+    available_minutes: Optional[int] = None
+    exam_target: str = "school_exam"
+    preferred_style: str = "examples_first"
+    prerequisite_confidence: str = "medium"
 
 
 class AutonomousStudyResponse(BaseModel):
@@ -254,6 +260,13 @@ class AutonomousStudyResponse(BaseModel):
     priority: str = "medium"
     mastery_band: str = "unknown"
     estimated_minutes: int = 15
+    mission_goal: str = ""
+    prerequisite_check: Dict[str, Any] = Field(default_factory=dict)
+    high_priority_concepts: List[str] = Field(default_factory=list)
+    fast_revision_strategy: List[str] = Field(default_factory=list)
+    weakness_detection_points: List[str] = Field(default_factory=list)
+    final_confidence_check: List[str] = Field(default_factory=list)
+    fast_track_strategy: List[str] = Field(default_factory=list)
     primary_agent: str
     mode: str
     difficulty: str
