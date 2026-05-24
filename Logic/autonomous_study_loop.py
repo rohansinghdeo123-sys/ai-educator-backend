@@ -26,10 +26,34 @@ def _safe_topic(value: Optional[str]) -> str:
     return topic or "matter_definition"
 
 
+def _topic_accuracy_from_analytics(analytics: Dict[str, Any], topic: str) -> float:
+    topic_key = topic.replace("_", " ").lower()
+    for collection_name in ("weak_areas", "topic_heatmap"):
+        for item in analytics.get(collection_name) or []:
+            candidate = str(item.get("topic") or "").replace("_", " ").lower()
+            if candidate == topic_key:
+                return float(item.get("accuracy") or item.get("value") or 0)
+    return 0.0
+
+
 def _select_target_topic(
     analytics: Dict[str, Any],
     current_topic: Optional[str],
 ) -> Dict[str, Any]:
+    if current_topic:
+        topic = _safe_topic(current_topic)
+        accuracy = _topic_accuracy_from_analytics(analytics, topic)
+        return {
+            "topic": topic,
+            "accuracy": accuracy,
+            "source": "selected_topic",
+            "reason": (
+                f"The student selected {topic.replace('_', ' ')}."
+                if accuracy == 0
+                else f"The student selected this topic and current mastery is about {accuracy}%."
+            ),
+        }
+
     weak_areas = analytics.get("weak_areas") or []
     if weak_areas:
         weakest = weak_areas[0]
@@ -59,39 +83,83 @@ def _select_target_topic(
     }
 
 
-def _build_mission_plan(target: Dict[str, Any], analytics: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_mission_profile(
+    current_knowledge: str = "some_idea",
+    learning_goal: str = "understanding",
+    available_minutes: Optional[int] = None,
+    exam_target: str = "school_exam",
+    preferred_style: str = "examples_first",
+    prerequisite_confidence: str = "medium",
+) -> Dict[str, Any]:
+    minutes = None
+    if available_minutes is not None:
+        try:
+            minutes = max(10, min(240, int(available_minutes)))
+        except (TypeError, ValueError):
+            minutes = None
+
+    return {
+        "current_knowledge": (current_knowledge or "some_idea").strip().lower(),
+        "learning_goal": (learning_goal or "understanding").strip().lower(),
+        "available_minutes": minutes,
+        "exam_target": (exam_target or "school_exam").strip().lower(),
+        "preferred_style": (preferred_style or "examples_first").strip().lower(),
+        "prerequisite_confidence": (prerequisite_confidence or "medium").strip().lower(),
+    }
+
+
+def _topic_label(topic: str) -> str:
+    return topic.replace("_", " ").title()
+
+
+def _needs_prerequisite_block(profile: Dict[str, Any], mastery_band: str) -> bool:
+    return (
+        profile["current_knowledge"] in {"new", "weak_basics", "zero", "beginner"}
+        or profile["prerequisite_confidence"] in {"low", "weak", "not_confident"}
+        or mastery_band in {"baseline", "critical"}
+    )
+
+
+def _is_fast_track(profile: Dict[str, Any]) -> bool:
+    goal = profile["learning_goal"]
+    minutes = profile.get("available_minutes")
+    return goal in {"quick_revision", "exam", "fast_track"} or bool(minutes and minutes <= 45)
+
+
+def _build_mission_plan(target: Dict[str, Any], analytics: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
     topic = target["topic"]
     accuracy = float(target.get("accuracy") or 0)
     summary = analytics.get("summary") or {}
     total_topics = int(summary.get("total_topics") or 0)
     mastery_band = _mastery_band(accuracy, total_topics)
     topic_label = topic.replace("_", " ")
+    fast_track = _is_fast_track(profile)
 
     if mastery_band == "baseline":
         why = "The coach needs one first signal before personalizing the roadmap."
     elif mastery_band in {"critical", "weak"}:
-        why = f"{target['reason']} Start with clarity first, then one diagnostic check."
+        why = f"{target['reason']} Start with the bottleneck first, then use a quick diagnostic check."
     elif mastery_band == "building":
-        why = f"{target['reason']} One smart question will show what to revise next."
+        why = f"{target['reason']} Skip what is already known and move into application quickly."
     else:
-        why = "The topic looks stronger, so the mission checks whether the student is ready for exam-level practice."
+        why = "The topic looks stronger, so the mission should focus on exam speed, traps, and confidence."
 
     return {
-        "primary_agent": "coach",
-        "mode": "adaptive_mission",
-        "difficulty": "medium" if mastery_band != "strong" else "hard",
-        "objective": f"Build a simple adaptive roadmap for {topic_label}.",
-        "question": f"Run one intelligent diagnostic question on {topic_label}.",
+        "primary_agent": "mission_planner",
+        "mode": "fast_track_mission" if fast_track else "adaptive_mission",
+        "difficulty": "easy" if _needs_prerequisite_block(profile, mastery_band) else "medium" if mastery_band != "strong" else "hard",
+        "objective": f"Complete {topic_label} through the fastest useful learning path.",
+        "question": f"Run one checkpoint question on {topic_label} after the optimized roadmap.",
         "why": why,
         "steps": [
-            f"Understand the core idea of {topic_label}.",
-            "Answer one diagnostic MCQ honestly without notes.",
-            "Let the coach adjust the next study block from the result.",
+            "Answer the profile questions so the mission can remove unnecessary steps.",
+            f"Follow the shortest high-value route for {topic_label}.",
+            "Use the final checkpoint to decide whether to revise, practice, or move on.",
         ],
         "next_actions": [
-            "Answer the one-question diagnostic.",
-            "Read the instant feedback carefully.",
-            "Follow the personalized next block until the topic crosses 80%.",
+            "Start the first timed block immediately.",
+            "Pause only at checkpoint questions.",
+            "Finish with the confidence check before leaving the topic.",
         ],
     }
 
@@ -105,37 +173,185 @@ def _find_topic_concept(topic: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _build_simple_study_plan(topic: str, mastery_band: str) -> List[Dict[str, str]]:
+def _build_high_priority_concepts(topic: str, profile: Dict[str, Any]) -> List[str]:
     topic_label = topic.replace("_", " ")
-    if mastery_band in {"baseline", "critical", "weak"}:
-        focus = "foundation"
-        practice = "one easy diagnostic first"
-    elif mastery_band == "building":
-        focus = "mistake repair"
-        practice = "one targeted diagnostic"
-    else:
-        focus = "exam sharpening"
-        practice = "one challenge diagnostic"
+    normalized = topic_label.lower()
+    concept_map = {
+        "alkanes": ["saturated hydrocarbons", "single covalent bonds", "general formula", "combustion pattern", "common naming traps"],
+        "alkenes": ["carbon-carbon double bond", "unsaturation", "addition reactions", "general formula", "test with bromine water"],
+        "alkynes": ["carbon-carbon triple bond", "unsaturation", "addition reactions", "acidic hydrogen basics", "naming rules"],
+        "aromatics": ["benzene ring stability", "delocalized electrons", "substitution reactions", "resonance idea", "common examples"],
+        "matter definition": ["mass", "space/volume", "particle nature", "examples vs non-examples", "definition wording"],
+        "states of matter": ["particle arrangement", "inter-particle force", "movement", "change of state", "heating/cooling effect"],
+        "properties of matter": ["mass", "volume", "density", "compressibility", "diffusion"],
+        "mole concept": ["mole-mass conversion", "Avogadro number", "molar mass", "unit conversions", "standard numericals"],
+    }
+    for key, values in concept_map.items():
+        if key in normalized:
+            return values[:4] if _is_fast_track(profile) else values
+
+    concept = _find_topic_concept(topic)
+    if concept:
+        key_points = [str(point) for point in concept.get("key_points") or [] if point]
+        if key_points:
+            return key_points[:4] if _is_fast_track(profile) else key_points[:6]
 
     return [
-        {
-            "title": "Understand",
-            "duration": "5 min",
-            "detail": f"Read the core idea of {topic_label} and connect it with one real-life example.",
-            "focus": focus,
-        },
-        {
-            "title": "Diagnose",
-            "duration": "2 min",
-            "detail": f"Attempt {practice} without checking notes.",
-            "focus": "honest signal",
-        },
-        {
-            "title": "Adapt",
-            "duration": "8 min",
-            "detail": "If correct, move to exam application. If wrong, rebuild the weak sub-concept with the coach.",
-            "focus": "personalized next step",
-        },
+        f"core definition of {topic_label}",
+        "most common exam wording",
+        "one standard example",
+        "one common mistake",
+    ]
+
+
+def _estimate_mission_budget(profile: Dict[str, Any], mastery_band: str) -> int:
+    if profile.get("available_minutes"):
+        return int(profile["available_minutes"])
+
+    if _is_fast_track(profile):
+        base = 35
+    elif profile["learning_goal"] in {"deep_understanding", "conceptual"}:
+        base = 75
+    else:
+        base = 55
+
+    if _needs_prerequisite_block(profile, mastery_band):
+        base += 20
+    if mastery_band == "strong" or profile["current_knowledge"] in {"know_basics", "good", "strong"}:
+        base -= 15
+
+    return max(20, min(120, base))
+
+
+def _format_duration(minutes: int) -> str:
+    return f"{max(1, int(minutes))} min"
+
+
+def _build_optimized_study_plan(
+    topic: str,
+    mastery_band: str,
+    profile: Dict[str, Any],
+) -> Dict[str, Any]:
+    topic_label = topic.replace("_", " ")
+    budget = _estimate_mission_budget(profile, mastery_band)
+    fast_track = _is_fast_track(profile)
+    needs_prereq = _needs_prerequisite_block(profile, mastery_band)
+    high_priority = _build_high_priority_concepts(topic, profile)
+
+    steps: List[Dict[str, str]] = []
+    remaining = budget
+
+    if needs_prereq:
+        duration = max(6, round(budget * 0.18))
+        remaining -= duration
+        steps.append({
+            "title": "Prerequisite repair",
+            "duration": _format_duration(duration),
+            "detail": f"Check the minimum basics needed for {topic_label}. Skip this only if the checkpoint feels easy.",
+            "focus": "remove bottleneck",
+        })
+
+    core_duration = max(8, round(remaining * (0.28 if fast_track else 0.24)))
+    remaining -= core_duration
+    steps.append({
+        "title": "Core idea",
+        "duration": _format_duration(core_duration),
+        "detail": f"Understand only the central idea of {topic_label}; avoid side theory until the main rule is clear.",
+        "focus": "fast understanding",
+    })
+
+    priority_duration = max(8, round(remaining * (0.34 if fast_track else 0.30)))
+    remaining -= priority_duration
+    steps.append({
+        "title": "High-yield concepts",
+        "duration": _format_duration(priority_duration),
+        "detail": "Cover the highest scoring points first: " + ", ".join(high_priority[:4]) + ".",
+        "focus": "marks per minute",
+    })
+
+    application_duration = max(8, round(remaining * (0.48 if fast_track else 0.42)))
+    remaining -= application_duration
+    steps.append({
+        "title": "Application sprint",
+        "duration": _format_duration(application_duration),
+        "detail": "Solve or mentally answer the most standard question types. Stop and repair only repeated mistakes.",
+        "focus": "exam readiness",
+    })
+
+    checkpoint_duration = max(5, remaining)
+    steps.append({
+        "title": "Rapid checkpoint",
+        "duration": _format_duration(checkpoint_duration),
+        "detail": "Do one diagnostic question, one recall check, and one confidence rating before moving on.",
+        "focus": "completion signal",
+    })
+
+    return {
+        "estimated_minutes": sum(int(step["duration"].split()[0]) for step in steps),
+        "study_plan": steps,
+        "high_priority_concepts": high_priority,
+    }
+
+
+def _build_prerequisite_check(topic: str, profile: Dict[str, Any], mastery_band: str) -> Dict[str, Any]:
+    topic_label = topic.replace("_", " ")
+    needs_prereq = _needs_prerequisite_block(profile, mastery_band)
+    return {
+        "status": "repair_first" if needs_prereq else "skip_if_confident",
+        "question": f"Before starting {topic_label}, can you explain the basic definition and one example without notes?",
+        "action": (
+            "Spend the first block repairing prerequisites before deeper learning."
+            if needs_prereq
+            else "Skip basic theory if you can answer this quickly; move to application."
+        ),
+    }
+
+
+def _build_fast_revision_strategy(topic: str, profile: Dict[str, Any]) -> List[str]:
+    topic_label = topic.replace("_", " ")
+    if _is_fast_track(profile):
+        return [
+            f"Read only formulas/definitions and high-yield traps for {topic_label}.",
+            "Do 3 standard questions before any deep theory.",
+            "Convert every mistake into one short recall line.",
+        ]
+    return [
+        f"After learning, compress {topic_label} into 5 bullet points.",
+        "Revisit the weakest bullet after the diagnostic.",
+        "Do one recall pass after a short break.",
+    ]
+
+
+def _build_weakness_detection_points(topic: str, profile: Dict[str, Any]) -> List[str]:
+    topic_label = topic.replace("_", " ")
+    return [
+        f"Student cannot define {topic_label} in one clean sentence.",
+        "Student gets the example right but misses the reason.",
+        "Student chooses the correct option slowly or with low confidence.",
+        "Student repeats a unit, formula, or keyword mistake twice.",
+    ]
+
+
+def _build_final_confidence_check(topic: str) -> List[str]:
+    topic_label = topic.replace("_", " ")
+    return [
+        f"Can I explain {topic_label} in under 60 seconds?",
+        "Can I solve one standard question without notes?",
+        "Can I name one common trap and avoid it?",
+    ]
+
+
+def _build_fast_track_strategy(topic: str, profile: Dict[str, Any]) -> List[str]:
+    if not _is_fast_track(profile):
+        return [
+            "Use full roadmap pacing unless the student reports time pressure.",
+            "Move faster only after the prerequisite and core idea checkpoints pass.",
+        ]
+    topic_label = topic.replace("_", " ")
+    return [
+        f"Skip broad theory and start with the exam definition of {topic_label}.",
+        "Prioritize high-yield concepts, common mistakes, and standard questions.",
+        "Use quick recall, not long notes.",
     ]
 
 
@@ -347,9 +563,9 @@ def _estimate_minutes(mode: str, mastery_band: str) -> int:
 
 
 def _build_agent_sequence(plan: Dict[str, Any]) -> List[Dict[str, str]]:
-    if plan["primary_agent"] == "coach":
+    if plan["primary_agent"] in {"coach", "mission_planner"}:
         specialist = "Adaptive Tutor"
-        specialist_action = "Creates a simple plan and one diagnostic question"
+        specialist_action = "Creates the fastest personalized roadmap and checkpoint sequence"
     else:
         specialist = "Revision Specialist" if plan["primary_agent"] == "revision" else "Exam Generator"
         specialist_action = "Rebuilds the concept" if plan["primary_agent"] == "revision" else "Creates targeted practice"
@@ -383,11 +599,11 @@ def _build_agent_sequence(plan: Dict[str, Any]) -> List[Dict[str, str]]:
 
 
 def _build_success_criteria(plan: Dict[str, Any], mastery_band: str) -> List[str]:
-    if plan["mode"] == "adaptive_mission":
+    if plan["mode"] in {"adaptive_mission", "fast_track_mission"}:
         return [
-            "Complete the one-question diagnostic without notes.",
-            "Read the feedback and identify whether the issue is concept clarity, memory, or application.",
-            "Follow the personalized next block until the topic reaches 80%+ confidence.",
+            "Complete every timed roadmap block without opening unrelated material.",
+            "Pass the diagnostic and identify whether any miss came from concept clarity, memory, or application.",
+            "Leave the topic only after the final confidence check reaches 80%+.",
         ]
     if mastery_band == "baseline":
         return [
@@ -443,7 +659,13 @@ def _build_checkpoints(plan: Dict[str, Any], success_criteria: List[str]) -> Lis
     ]
 
 
-def _build_mission_contract(plan: Dict[str, Any], target: Dict[str, Any], analytics: Dict[str, Any]) -> Dict[str, Any]:
+def _build_mission_contract(
+    plan: Dict[str, Any],
+    target: Dict[str, Any],
+    analytics: Dict[str, Any],
+    profile: Dict[str, Any],
+    estimated_minutes: int,
+) -> Dict[str, Any]:
     summary = analytics.get("summary") or {}
     total_topics = int(summary.get("total_topics") or 0)
     accuracy = float(target.get("accuracy") or 0)
@@ -457,13 +679,19 @@ def _build_mission_contract(plan: Dict[str, Any], target: Dict[str, Any], analyt
         "mission_type": mission_type,
         "priority": _mission_priority(mastery_band),
         "mastery_band": mastery_band,
-        "estimated_minutes": _estimate_minutes(plan["mode"], mastery_band),
+        "estimated_minutes": estimated_minutes,
         "student_state": {
             "accuracy": accuracy,
             "source": target.get("source", "current_context"),
             "total_topics": total_topics,
             "average_accuracy": float(summary.get("avg_accuracy") or 0),
             "streak": int(summary.get("streak") or 0),
+            "current_knowledge": profile["current_knowledge"],
+            "learning_goal": profile["learning_goal"],
+            "available_minutes": profile.get("available_minutes"),
+            "exam_target": profile["exam_target"],
+            "preferred_style": profile["preferred_style"],
+            "prerequisite_confidence": profile["prerequisite_confidence"],
         },
         "agent_sequence": _build_agent_sequence(plan),
         "success_criteria": success_criteria,
@@ -489,6 +717,12 @@ def run_autonomous_study_loop(
     current_topic: Optional[str] = None,
     current_chapter: Optional[str] = None,
     subject: str = "Chemistry",
+    current_knowledge: str = "some_idea",
+    learning_goal: str = "understanding",
+    available_minutes: Optional[int] = None,
+    exam_target: str = "school_exam",
+    preferred_style: str = "examples_first",
+    prerequisite_confidence: str = "medium",
 ) -> Dict[str, Any]:
     started_at = time.time()
     mission_id = f"mission_{uuid.uuid4().hex[:12]}"
@@ -507,9 +741,33 @@ def run_autonomous_study_loop(
     )
 
     analytics = get_user_analytics(db, user_id)
+    profile = _normalize_mission_profile(
+        current_knowledge=current_knowledge,
+        learning_goal=learning_goal,
+        available_minutes=available_minutes,
+        exam_target=exam_target,
+        preferred_style=preferred_style,
+        prerequisite_confidence=prerequisite_confidence,
+    )
     target = _select_target_topic(analytics, current_topic)
-    plan = _build_mission_plan(target, analytics)
-    contract = _build_mission_contract(plan, target, analytics)
+    plan = _build_mission_plan(target, analytics, profile)
+    summary = analytics.get("summary") or {}
+    target_mastery_band = _mastery_band(
+        float(target.get("accuracy") or 0),
+        int(summary.get("total_topics") or 0),
+    )
+    optimized_plan = _build_optimized_study_plan(
+        target["topic"],
+        target_mastery_band,
+        profile,
+    )
+    contract = _build_mission_contract(
+        plan=plan,
+        target=target,
+        analytics=analytics,
+        profile=profile,
+        estimated_minutes=optimized_plan["estimated_minutes"],
+    )
 
     event_bus.emit(
         "orchestrator",
@@ -524,12 +782,24 @@ def run_autonomous_study_loop(
         session_id=session_id,
     )
 
-    study_plan = _build_simple_study_plan(target["topic"], contract["mastery_band"])
+    study_plan = optimized_plan["study_plan"]
     diagnostic_question = _build_single_diagnostic_question(target["topic"])
     adaptive_roadmap = _build_adaptive_roadmap(target["topic"], contract["mastery_band"])
+    prerequisite_check = _build_prerequisite_check(target["topic"], profile, contract["mastery_band"])
+    high_priority_concepts = optimized_plan["high_priority_concepts"]
+    fast_revision_strategy = _build_fast_revision_strategy(target["topic"], profile)
+    weakness_detection_points = _build_weakness_detection_points(target["topic"], profile)
+    final_confidence_check = _build_final_confidence_check(target["topic"])
+    fast_track_strategy = _build_fast_track_strategy(target["topic"], profile)
     plan_lines = [
-        "Simple Adaptive Study Plan:",
+        f"Mission Goal: Complete {target['topic'].replace('_', ' ')} in the shortest useful path.",
+        f"Estimated Time: {contract['estimated_minutes']} minutes",
+        "",
+        "Optimized Study Roadmap:",
         *[f"- {item['title']} ({item['duration']}): {item['detail']}" for item in study_plan],
+        "",
+        "High Priority Concepts:",
+        *[f"- {item}" for item in high_priority_concepts],
         "",
         "One-Question Diagnostic:",
         diagnostic_question["question"],
@@ -547,11 +817,18 @@ def run_autonomous_study_loop(
             "questions": [diagnostic_question],
             "study_plan": study_plan,
             "adaptive_roadmap": adaptive_roadmap,
+            "prerequisite_check": prerequisite_check,
+            "high_priority_concepts": high_priority_concepts,
+            "fast_revision_strategy": fast_revision_strategy,
+            "weakness_detection_points": weakness_detection_points,
+            "final_confidence_check": final_confidence_check,
+            "fast_track_strategy": fast_track_strategy,
         },
         "metadata": {
             "agent": "adaptive_tutor",
-            "mission_model": "single_question_diagnostic",
+            "mission_model": "profiled_time_optimized_roadmap",
             "personalization": "roadmap_updates_after_student_answer",
+            "profile": profile,
         },
     }
     latency_ms = round((time.time() - started_at) * 1000)
@@ -595,6 +872,13 @@ def run_autonomous_study_loop(
         "priority": contract["priority"],
         "mastery_band": contract["mastery_band"],
         "estimated_minutes": contract["estimated_minutes"],
+        "mission_goal": f"Complete {_topic_label(target['topic'])} with the fastest useful route for {profile['exam_target'].replace('_', ' ')}.",
+        "prerequisite_check": prerequisite_check,
+        "high_priority_concepts": high_priority_concepts,
+        "fast_revision_strategy": fast_revision_strategy,
+        "weakness_detection_points": weakness_detection_points,
+        "final_confidence_check": final_confidence_check,
+        "fast_track_strategy": fast_track_strategy,
         "primary_agent": plan["primary_agent"],
         "mode": plan["mode"],
         "difficulty": plan["difficulty"],
