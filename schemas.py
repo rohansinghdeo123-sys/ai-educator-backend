@@ -196,6 +196,10 @@ class CoachChatRequest(BaseModel):
     subject: Optional[str] = None
     topic: Optional[str] = None
     session_id: Optional[str] = None
+    mentor_directive: Optional[str] = None
+    student_state: Dict[str, Any] = Field(default_factory=dict)
+    adaptive_strategy: Dict[str, Any] = Field(default_factory=dict)
+    learning_context: Dict[str, Any] = Field(default_factory=dict)
 
 
 class CoachChatResponse(BaseModel):
