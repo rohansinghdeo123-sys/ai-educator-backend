@@ -412,6 +412,95 @@ def _is_definition_question(question: str) -> bool:
     return any(kw in q for kw in definition_keywords)
 
 
+def _normalized_short_message(question: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s']", " ", (question or "").lower())).strip()
+
+
+def _build_lightweight_conversation_reply(
+    question: str,
+    conversation_context: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    q = _normalized_short_message(question)
+    if not q or len(q) > 80:
+        return None
+
+    thanks = {
+        "thanks",
+        "thank you",
+        "thankyou",
+        "thx",
+        "ty",
+        "thanks a lot",
+        "thank you so much",
+        "thanks sir",
+        "thanks mam",
+        "thanks ma'am",
+    }
+    acknowledgements = {
+        "ok",
+        "okay",
+        "okk",
+        "got it",
+        "understood",
+        "clear",
+        "done",
+        "nice",
+        "great",
+        "cool",
+        "perfect",
+    }
+    greetings = {
+        "hi",
+        "hello",
+        "hey",
+        "good morning",
+        "good afternoon",
+        "good evening",
+    }
+    tokens = set(q.split())
+
+    if q in thanks or (
+        len(tokens) <= 5 and ("thanks" in tokens or q.startswith("thank you"))
+    ):
+        return "You're welcome. Ask me the next doubt whenever you're ready."
+
+    if q in acknowledgements or (
+        tokens
+        and len(tokens) <= 4
+        and tokens.issubset(
+            {
+                "ok",
+                "okay",
+                "okk",
+                "got",
+                "it",
+                "understood",
+                "clear",
+                "done",
+                "nice",
+                "great",
+                "cool",
+                "perfect",
+            }
+        )
+    ):
+        return "Good. Send the next question when you're ready, or ask me to test you on the last concept."
+
+    if q in greetings:
+        return "Hi, I am ready. Ask me any subject, topic, doubt, or pasted question."
+
+    if q in {"yes", "yeah", "yep"}:
+        recent_thread = str((conversation_context or {}).get("recent_thread", "")).lower()
+        if any(keyword in recent_thread for keyword in ("practice question", "quick check", "test you", "try one")):
+            return "Yes, let's do it. Send your answer to the last check question, or say 'ask me one' and I will give you a fresh practice question."
+        return "Okay. Tell me what you want to do next."
+
+    if q in {"no", "nope", "not now"}:
+        return "No problem. Ask the next doubt whenever you want to continue."
+
+    return None
+
+
 ANSWER_FORMATS: Dict[str, Dict[str, Any]] = {
     "definition": {
         "label": "Definition Tutor",
@@ -783,7 +872,8 @@ Recent thread:
 _QUESTION_STOPWORDS = {
     "define", "definition", "what", "what's", "explain", "meaning", "describe",
     "tell", "about", "the", "is", "are", "of", "for", "with", "give", "me",
-    "please", "concept", "short", "brief", "detailed",
+    "please", "concept", "short", "brief", "detailed", "thank", "thanks", "you",
+    "ok", "okay", "got", "understood", "clear",
 }
 
 
@@ -824,29 +914,43 @@ def _can_answer_definition_locally(question: str) -> bool:
 
 
 def _build_complete_answer_from_kg(question: str) -> str:
+    terms = _extract_search_terms(question)
     concept = _find_relevant_concept(question)
 
-    title = "Matter"
-    definition = "Matter is anything that has mass and occupies space."
-    key_points = [
+    if not concept and "matter" not in terms:
+        return ""
+
+    title = concept.get("title", "Matter") if concept else "Matter"
+    definition = (
+        concept.get("definition", "Matter is anything that has mass and occupies space.")
+        if concept
+        else "Matter is anything that has mass and occupies space."
+    )
+    key_points = concept.get("key_points", [
+        "Matter has mass, so it can be measured.",
+        "Matter occupies space, so it has volume.",
+        "Matter is commonly found as solid, liquid, or gas.",
+    ]) if concept else [
         "Matter has mass, so it can be measured.",
         "Matter occupies space, so it has volume.",
         "Matter is commonly found as solid, liquid, or gas.",
     ]
-    examples = ["A book", "Water in a glass", "Air inside a balloon", "The human body"]
-    common_mistakes = [
+    examples = (
+        concept.get("examples", ["A book", "Water in a glass", "Air inside a balloon", "The human body"])
+        if concept
+        else ["A book", "Water in a glass", "Air inside a balloon", "The human body"]
+    )
+    common_mistakes = concept.get("common_mistakes", [
+        {
+            "mistake": "Thinking light, heat, or sound are matter.",
+            "correction": "They are forms of energy; they do not occupy space like matter.",
+        }
+    ]) if concept else [
         {
             "mistake": "Thinking light, heat, or sound are matter.",
             "correction": "They are forms of energy; they do not occupy space like matter.",
         }
     ]
-
-    if concept:
-        title = concept.get("title", title)
-        definition = concept.get("definition", definition)
-        key_points = concept.get("key_points", key_points)
-        examples = concept.get("examples", examples)
-        common_mistakes = concept.get("common_mistakes", common_mistakes)
 
     mistake_lines = []
     for item in common_mistakes[:3]:
@@ -1346,12 +1450,17 @@ def coach_agent(request, db=None) -> dict:
         memories=memories,
     )
     assistance_blocks = _build_assistance_blocks(question, answer_format)
-    learning_blueprint = _run_learning_intelligence_agent(
-        question=question,
-        intent=intent,
-        answer_format=answer_format,
-        adaptive_context=adaptive_context,
-        conversation_context=conversation_context,
+    lightweight_reply = _build_lightweight_conversation_reply(question, conversation_context)
+    learning_blueprint = (
+        "- Conversational input detected. Reply naturally and do not continue the previous lesson unless the student asks."
+        if lightweight_reply
+        else _run_learning_intelligence_agent(
+            question=question,
+            intent=intent,
+            answer_format=answer_format,
+            adaptive_context=adaptive_context,
+            conversation_context=conversation_context,
+        )
     )
 
     try:
@@ -1365,7 +1474,9 @@ def coach_agent(request, db=None) -> dict:
         recent_sessions=recent_sessions,
     )
 
-    if answer_format["id"] == "definition" and _can_answer_definition_locally(question):
+    if lightweight_reply:
+        answer = lightweight_reply
+    elif answer_format["id"] == "definition" and _can_answer_definition_locally(question):
         answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
         if adaptive_context.get("has_signals"):
             answer = _apply_deterministic_format(
@@ -1619,7 +1730,8 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         memories=memories,
     )
     assistance_blocks = _build_assistance_blocks(question, answer_format)
-    if conversation_context.get("is_follow_up"):
+    lightweight_reply = _build_lightweight_conversation_reply(question, conversation_context)
+    if conversation_context.get("is_follow_up") and not lightweight_reply:
         yield _stage_event(
             stage="understanding",
             status="active",
@@ -1628,12 +1740,16 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             detail="Using the recent lesson thread so the answer continues naturally.",
         )
 
-    learning_blueprint = _run_learning_intelligence_agent(
-        question=question,
-        intent=intent,
-        answer_format=answer_format,
-        adaptive_context=adaptive_context,
-        conversation_context=conversation_context,
+    learning_blueprint = (
+        "- Conversational input detected. Reply naturally and do not continue the previous lesson unless the student asks."
+        if lightweight_reply
+        else _run_learning_intelligence_agent(
+            question=question,
+            intent=intent,
+            answer_format=answer_format,
+            adaptive_context=adaptive_context,
+            conversation_context=conversation_context,
+        )
     )
 
     try:
@@ -1651,20 +1767,31 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         stage="understanding",
         status="done",
         agent="Learning Profiler",
-        title="Learning blueprint ready",
-        detail="Student need, answer format, and weak-signal route selected.",
+        title="Intent understood",
+        detail=(
+            "Conversational reply selected."
+            if lightweight_reply
+            else "Student need, answer format, and weak-signal route selected."
+        ),
     )
     yield _stage_event(
         stage="drafting",
         status="active",
-        agent="Adaptive Mentor",
-        title="Drafting answer",
-        detail=f"Building the first tutor response with {TUTOR_MODEL}.",
+        agent="Conversation Router" if lightweight_reply else "Adaptive Mentor",
+        title="Preparing quick reply" if lightweight_reply else "Drafting answer",
+        detail=(
+            "This is a short conversation turn, so I am not reopening the previous lesson."
+            if lightweight_reply
+            else f"Building the first tutor response with {TUTOR_MODEL}."
+        ),
     )
 
     # ── Answer source ──────────────────────────────────────────────────
     should_review_answer = True
-    if answer_format["id"] == "definition" and _can_answer_definition_locally(question):
+    if lightweight_reply:
+        final_answer = lightweight_reply
+        should_review_answer = False
+    elif answer_format["id"] == "definition" and _can_answer_definition_locally(question):
         final_answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
         should_review_answer = bool(adaptive_context.get("has_signals"))
     else:
@@ -1721,25 +1848,30 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     yield _stage_event(
         stage="drafting",
         status="done",
-        agent="Adaptive Mentor",
-        title="Draft complete",
-        detail="Core explanation is ready for strategy review.",
+        agent="Conversation Router" if lightweight_reply else "Adaptive Mentor",
+        title="Reply ready" if lightweight_reply else "Draft complete",
+        detail=(
+            "Conversational response is ready."
+            if lightweight_reply
+            else "Core explanation is ready for strategy review."
+        ),
     )
-    yield _stage_event(
-        stage="reviewing",
-        status="active",
-        agent="Strategy Tutor",
-        title="Refining explanation",
-        detail=f"Checking clarity, accuracy, and adaptive {answer_format['label']} structure with {REVIEW_MODEL}.",
-    )
-    time.sleep(0.12)
-    yield _stage_event(
-        stage="reviewing",
-        status="done",
-        agent="Strategy Tutor",
-        title="Refinement complete",
-        detail="Review strategy selected for accuracy, depth, and student understanding.",
-    )
+    if not lightweight_reply:
+        yield _stage_event(
+            stage="reviewing",
+            status="active",
+            agent="Strategy Tutor",
+            title="Refining explanation",
+            detail=f"Checking clarity, accuracy, and adaptive {answer_format['label']} structure with {REVIEW_MODEL}.",
+        )
+        time.sleep(0.12)
+        yield _stage_event(
+            stage="reviewing",
+            status="done",
+            agent="Strategy Tutor",
+            title="Refinement complete",
+            detail="Review strategy selected for accuracy, depth, and student understanding.",
+        )
     yield _stage_event(
         stage="formatting",
         status="active",
