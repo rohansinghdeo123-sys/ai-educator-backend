@@ -7,6 +7,11 @@ groq_client = Groq(
     api_key=os.getenv("GROQ_API_KEY")
 )
 
+MCQ_FEEDBACK_MODEL = os.getenv(
+    "GROQ_FEEDBACK_MODEL",
+    os.getenv("GROQ_FAST_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
+)
+
 def explain_mcq(
     question: str,
     options: dict,
@@ -53,7 +58,7 @@ FINAL FEEDBACK:
 """
 
     response = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model=MCQ_FEEDBACK_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
         max_tokens=300

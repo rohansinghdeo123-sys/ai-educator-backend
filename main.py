@@ -65,7 +65,7 @@ from Logic.knowledge_graph import knowledge_graph
 # ── Groq client for casual CEO chats ──
 import groq
 
-# ── Generic LLM chat (Groq LLaMA 3.1 8B) ─────────
+# ── Generic LLM chat (Groq low-latency fallback) ─────────
 def generic_llm_chat(system_prompt: str, user_message: str, agent_id: str = "unknown") -> str:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -75,7 +75,10 @@ def generic_llm_chat(system_prompt: str, user_message: str, agent_id: str = "unk
     try:
         client = groq.Client(api_key=api_key)
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=os.getenv(
+                "GROQ_CASUAL_MODEL",
+                os.getenv("GROQ_FAST_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
+            ),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},

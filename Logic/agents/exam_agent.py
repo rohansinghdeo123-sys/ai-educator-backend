@@ -28,7 +28,7 @@ from prompts.agent_prompts import EXAM_MCQ_PROMPT, EXAM_PROBABLE_PROMPT
 logger = logging.getLogger("ai_educator.agents.exam")
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL_NAME = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+MODEL_NAME = os.getenv("GROQ_EXAM_MODEL", os.getenv("GROQ_TUTOR_MODEL", "openai/gpt-oss-120b"))
 
 
 def extract_json_object(text: str) -> Optional[Dict[str, Any]]:
