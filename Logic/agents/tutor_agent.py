@@ -27,7 +27,7 @@ from Logic.knowledge_graph import knowledge_graph   # <-- NEW import
 logger = logging.getLogger("ai_educator.agents.tutor")
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL_NAME = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+MODEL_NAME = os.getenv("GROQ_TUTOR_MODEL", "openai/gpt-oss-120b")
 
 # In-memory session store
 _sessions: dict[str, list] = {}

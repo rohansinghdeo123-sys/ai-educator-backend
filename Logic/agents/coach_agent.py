@@ -35,7 +35,10 @@ from models import (
 logger = logging.getLogger("ai_educator.agents.coach")
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL_NAME = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+FAST_MODEL = os.getenv("GROQ_FAST_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+TUTOR_MODEL = os.getenv("GROQ_TUTOR_MODEL", "openai/gpt-oss-120b")
+REVIEW_MODEL = os.getenv("GROQ_REVIEW_MODEL", "llama-3.3-70b-versatile")
+MODEL_NAME = TUTOR_MODEL
 
 
 COACH_NAMES = [
@@ -700,6 +703,78 @@ Adaptive response rules:
 """.strip()
 
 
+def _model_metadata() -> Dict[str, str]:
+    return {
+        "profiler": FAST_MODEL,
+        "tutor": TUTOR_MODEL,
+        "reviewer": REVIEW_MODEL,
+    }
+
+
+def _run_learning_intelligence_agent(
+    question: str,
+    intent: str,
+    answer_format: Dict[str, Any],
+    adaptive_context: Optional[Dict[str, Any]],
+    conversation_context: Optional[Dict[str, Any]],
+) -> str:
+    adaptive_context = adaptive_context or {}
+    conversation_context = conversation_context or {}
+    student_state = _as_dict(adaptive_context.get("student_state"))
+    adaptive_strategy = _as_dict(adaptive_context.get("adaptive_strategy"))
+
+    fallback = "\n".join([
+        f"- Intent: {intent}",
+        f"- Format: {answer_format.get('label', 'Concept Builder')}",
+        f"- Student level: {student_state.get('knowledge_level', 'unknown')}",
+        f"- Emotional state: {student_state.get('emotional_state', 'steady')}",
+        f"- Strategy: {adaptive_strategy.get('answer_style', 'adaptive teacher-led explanation')}",
+        "- Teach the core idea, check understanding, and store the weak signal if confusion appears.",
+    ])
+
+    try:
+        prompt = f"""
+You are the Learning Intelligence Profiler for a school AI tutor.
+
+Create a compact private teaching blueprint. Do not answer the student.
+
+Return 5-7 short bullets covering:
+- true intent
+- likely knowledge level
+- prerequisite risk
+- best teaching sequence
+- whether to test
+- memory/weak-signal to store
+- ideal final response shape
+
+Question:
+{question}
+
+Detected intent: {intent}
+Selected answer format: {answer_format.get("label", "Concept Builder")}
+Student state: {student_state}
+Adaptive strategy: {adaptive_strategy}
+Follow-up mode: {conversation_context.get("is_follow_up", False)}
+Recent thread:
+{conversation_context.get("recent_thread", "No previous lesson thread.")}
+""".strip()
+
+        response = groq_client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[
+                {"role": "system", "content": "You create concise private tutoring plans for another AI agent."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.12,
+            max_tokens=280,
+        )
+        blueprint = response.choices[0].message.content.strip()
+        return blueprint or fallback
+    except Exception as exc:
+        logger.error("[LEARNING INTELLIGENCE] Groq API error: %s", exc)
+        return fallback
+
+
 # ─── KNOWLEDGE-GRAPH ANSWER BUILDER (no LLM) ────────────────────────────────
 
 _QUESTION_STOPWORDS = {
@@ -823,6 +898,7 @@ def _build_study_prompt(
     answer_format: Dict[str, Any],
     conversation_context: Optional[Dict[str, Any]] = None,
     adaptive_context: Optional[Dict[str, Any]] = None,
+    learning_blueprint: str = "",
 ) -> str:
     graph_context = ""
     keywords = [w for w in question.lower().split() if len(w) > 2]
@@ -870,6 +946,9 @@ Private tuition behavior:
 
 {adaptive_teaching}
 
+LEARNING INTELLIGENCE BLUEPRINT:
+{learning_blueprint or "No separate blueprint was generated. Infer the best teaching route from the question and memory."}
+
 CONVERSATION CONTEXT:
 Follow-up mode: {follow_up_mode}
 Last student question: {conversation_context.get("last_student_question", "None")}
@@ -899,6 +978,7 @@ def _build_planning_prompt(
     analytics_snapshot: Dict[str, Any],
     recommendation: str,
     adaptive_context: Optional[Dict[str, Any]] = None,
+    learning_blueprint: str = "",
 ) -> str:
     memory_text = "\n".join(
         f"- {memory.title}: {memory.summary}"
@@ -934,6 +1014,9 @@ Formatting rules:
 - Adapt the plan length and detail to the student's confidence, speed, and current need.
 
 {adaptive_teaching}
+
+LEARNING INTELLIGENCE BLUEPRINT:
+{learning_blueprint or "No separate blueprint was generated. Build the most efficient plan from analytics and student state."}
 
 STUDENT PROFILE:
 Name: {coach.student_display_name or "Student"}
@@ -972,6 +1055,7 @@ def _build_review_prompt(
     intent: str,
     answer_format: Dict[str, Any],
     adaptive_context: Optional[Dict[str, Any]] = None,
+    learning_blueprint: str = "",
 ) -> str:
     adaptive_format = _build_answer_format_instruction(answer_format)
     adaptive_teaching = _build_adaptive_teaching_instruction(adaptive_context)
@@ -1001,6 +1085,9 @@ Intent: {intent}
 
 {adaptive_teaching}
 
+LEARNING INTELLIGENCE BLUEPRINT:
+{learning_blueprint or "No separate blueprint was generated. Review against the student's likely need and selected format."}
+
 Student question:
 {question}
 
@@ -1018,6 +1105,7 @@ def _review_and_polish_answer(
     intent: str,
     answer_format: Optional[Dict[str, Any]] = None,
     adaptive_context: Optional[Dict[str, Any]] = None,
+    learning_blueprint: str = "",
 ) -> str:
     if not draft or len(draft.strip()) < 20:
         return draft
@@ -1025,7 +1113,7 @@ def _review_and_polish_answer(
     try:
         selected_format = answer_format or _detect_answer_format(question, intent=intent)
         response = groq_client.chat.completions.create(
-            model=MODEL_NAME,
+            model=REVIEW_MODEL,
             messages=[
                 {
                     "role": "system",
@@ -1036,6 +1124,7 @@ def _review_and_polish_answer(
                         intent=intent,
                         answer_format=selected_format,
                         adaptive_context=adaptive_context,
+                        learning_blueprint=learning_blueprint,
                     ),
                 },
                 {"role": "user", "content": "Polish the draft into the final student answer."},
@@ -1243,6 +1332,13 @@ def coach_agent(request, db=None) -> dict:
         memories=memories,
     )
     assistance_blocks = _build_assistance_blocks(question, answer_format)
+    learning_blueprint = _run_learning_intelligence_agent(
+        question=question,
+        intent=intent,
+        answer_format=answer_format,
+        adaptive_context=adaptive_context,
+        conversation_context=conversation_context,
+    )
 
     try:
         analytics_snapshot = get_user_analytics(db, user_id)
@@ -1266,6 +1362,7 @@ def coach_agent(request, db=None) -> dict:
                     intent=intent,
                     answer_format=answer_format,
                     adaptive_context=adaptive_context,
+                    learning_blueprint=learning_blueprint,
                 )
             )
     else:
@@ -1279,6 +1376,7 @@ def coach_agent(request, db=None) -> dict:
                 analytics_snapshot=analytics_snapshot,
                 recommendation=recommendation,
                 adaptive_context=adaptive_context,
+                learning_blueprint=learning_blueprint,
             )
         else:
             system_prompt = _build_study_prompt(
@@ -1288,11 +1386,12 @@ def coach_agent(request, db=None) -> dict:
                 answer_format=answer_format,
                 conversation_context=conversation_context,
                 adaptive_context=adaptive_context,
+                learning_blueprint=learning_blueprint,
             )
 
         try:
             response = groq_client.chat.completions.create(
-                model=MODEL_NAME,
+                model=TUTOR_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": question},
@@ -1317,6 +1416,7 @@ def coach_agent(request, db=None) -> dict:
             intent=intent,
             answer_format=answer_format,
             adaptive_context=adaptive_context,
+            learning_blueprint=learning_blueprint,
         )
         answer = _apply_deterministic_format(reviewed)
         if len(answer) < 20:
@@ -1360,6 +1460,7 @@ def coach_agent(request, db=None) -> dict:
             "student_state": adaptive_context["student_state"],
             "adaptive_strategy": adaptive_context["adaptive_strategy"],
             "learning_context": adaptive_context["learning_context"],
+            "learning_blueprint": learning_blueprint,
         },
     )
     _persist_interaction(
@@ -1380,6 +1481,7 @@ def coach_agent(request, db=None) -> dict:
             "adaptive_strategy": adaptive_context["adaptive_strategy"],
             "learning_context": adaptive_context["learning_context"],
             "mentor_directive_used": bool(adaptive_context.get("mentor_directive")),
+            "learning_blueprint": learning_blueprint,
         },
         quality_score=0.9,
     )
@@ -1422,11 +1524,12 @@ def coach_agent(request, db=None) -> dict:
         "metadata": {
             "agent": "coach",
             "latency_ms": latency_ms,
-            "model": MODEL_NAME,
+            "models": _model_metadata(),
             "answer_format": answer_format,
             "is_follow_up": bool(conversation_context.get("is_follow_up")),
             "assistance_blocks": assistance_blocks,
             "adaptive_teacher": adaptive_context.get("has_signals", False),
+            "learning_blueprint": learning_blueprint,
         },
     }
 
@@ -1471,6 +1574,13 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         memories=memories,
     )
     assistance_blocks = _build_assistance_blocks(question, answer_format)
+    learning_blueprint = _run_learning_intelligence_agent(
+        question=question,
+        intent=intent,
+        answer_format=answer_format,
+        adaptive_context=adaptive_context,
+        conversation_context=conversation_context,
+    )
 
     try:
         analytics_snapshot = get_user_analytics(db, user_id)
@@ -1486,9 +1596,9 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     yield _stage_event(
         stage="drafting",
         status="active",
-        agent="Intent Mapper",
+        agent="Learning Profiler",
         title=f"Reading intent: {answer_format['label']}",
-        detail="Mapping question type, student state, and recent lesson context.",
+        detail=f"Using {FAST_MODEL} to map intent, student state, and lesson context.",
     )
     if conversation_context.get("is_follow_up"):
         yield _stage_event(
@@ -1515,6 +1625,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 analytics_snapshot=analytics_snapshot,
                 recommendation=recommendation,
                 adaptive_context=adaptive_context,
+                learning_blueprint=learning_blueprint,
             )
         else:
             draft_prompt = _build_study_prompt(
@@ -1524,12 +1635,13 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 answer_format=answer_format,
                 conversation_context=conversation_context,
                 adaptive_context=adaptive_context,
+                learning_blueprint=learning_blueprint,
             )
 
         draft = ""
         try:
             draft_resp = groq_client.chat.completions.create(
-                model=MODEL_NAME,
+                model=TUTOR_MODEL,
                 messages=[
                     {"role": "system", "content": draft_prompt},
                     {"role": "user", "content": question},
@@ -1556,16 +1668,16 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     yield _stage_event(
         stage="drafting",
         status="done",
-        agent="Intent Mapper",
-        title="Intent mapped",
-        detail="Student need and answer direction selected.",
+        agent="Learning Profiler",
+        title="Learning blueprint ready",
+        detail="Student need, weak signal, and answer direction selected.",
     )
     yield _stage_event(
         stage="reviewing",
         status="active",
         agent="Strategy Tutor",
         title="Choosing strategy",
-        detail=f"Checking clarity, accuracy, and adaptive {answer_format['label']} structure.",
+        detail=f"Checking clarity, accuracy, and adaptive {answer_format['label']} structure with {REVIEW_MODEL}.",
     )
     if should_review_answer:
         reviewed = _review_and_polish_answer(
@@ -1575,6 +1687,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             intent=intent,
             answer_format=answer_format,
             adaptive_context=adaptive_context,
+            learning_blueprint=learning_blueprint,
         )
         final_answer = _apply_deterministic_format(reviewed)
     else:
@@ -1591,7 +1704,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         status="active",
         agent="Adaptive Mentor",
         title="Teaching",
-        detail=f"Preparing a personalized {answer_format['label']} response.",
+        detail=f"Preparing a personalized {answer_format['label']} response with {TUTOR_MODEL}.",
     )
     time.sleep(0.25)
     yield _stage_event(
@@ -1636,6 +1749,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "student_state": adaptive_context["student_state"],
             "adaptive_strategy": adaptive_context["adaptive_strategy"],
             "learning_context": adaptive_context["learning_context"],
+            "learning_blueprint": learning_blueprint,
         },
     )
     _persist_interaction(
@@ -1656,6 +1770,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "adaptive_strategy": adaptive_context["adaptive_strategy"],
             "learning_context": adaptive_context["learning_context"],
             "mentor_directive_used": bool(adaptive_context.get("mentor_directive")),
+            "learning_blueprint": learning_blueprint,
         },
         quality_score=0.9,
     )

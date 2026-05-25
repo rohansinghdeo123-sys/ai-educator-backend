@@ -31,7 +31,10 @@ from Logic.knowledge_graph import knowledge_graph   # <-- NEW
 logger = logging.getLogger("ai_educator.agents.revision")
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL_NAME = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+MODEL_NAME = os.getenv(
+    "GROQ_REVISION_MODEL",
+    os.getenv("GROQ_FAST_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
+)
 
 # Mode-to-prompt mapping
 REVISION_PROMPTS = {

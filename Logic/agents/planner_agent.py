@@ -9,6 +9,10 @@ from Logic.knowledge_graph import knowledge_graph   # <-- NEW
 from Logic.agent_event_bus import event_bus
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+PLANNER_MODEL = os.getenv(
+    "GROQ_PLANNER_MODEL",
+    os.getenv("GROQ_FAST_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
+)
 
 
 def planner_agent(request, db):
@@ -68,7 +72,7 @@ Return ONLY valid JSON. No markdown, no explanations.
 
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=PLANNER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=300
