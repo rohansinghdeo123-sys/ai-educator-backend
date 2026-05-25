@@ -616,6 +616,9 @@ Format-specific rules:
 {rules}
 
 Do not force every section if the question is simple. Use only the sections that genuinely help the student.
+For Study Page responses, prefer clean learning-block headings when they fit:
+Direct Answer, Concept, Simple Explanation, Example, Common Mistake, Formula, Exam Tip, Quick Check, Next Step.
+Use headings ending with a colon so the UI can render the answer as readable tutor blocks.
 """.strip()
 
 
@@ -1139,6 +1142,17 @@ def _review_and_polish_answer(
         return draft
 
 
+def _iter_text_chunks(text: str, chunk_size: int = 90) -> Generator[str, None, None]:
+    buffer = ""
+    for token in re.findall(r"\S+\s*", text or ""):
+        buffer += token
+        if len(buffer) >= chunk_size:
+            yield buffer
+            buffer = ""
+    if buffer:
+        yield buffer
+
+
 def _apply_deterministic_format(text: str) -> str:
     text = text.replace("*", "").replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
@@ -1548,6 +1562,14 @@ def _stage_event(stage: str, status: str, agent: str, title: str, detail: str) -
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _answer_delta_event(delta: str) -> str:
+    payload = {
+        "type": "answer_delta",
+        "delta": delta,
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if db is None:
         yield "data: Coach needs database access to personalize advice.\n\n"
@@ -1710,34 +1732,63 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         title="Refining explanation",
         detail=f"Checking clarity, accuracy, and adaptive {answer_format['label']} structure with {REVIEW_MODEL}.",
     )
-    if should_review_answer:
-        reviewed = _review_and_polish_answer(
-            coach=coach,
-            question=question,
-            draft=final_answer,
-            intent=intent,
-            answer_format=answer_format,
-            adaptive_context=adaptive_context,
-            learning_blueprint=learning_blueprint,
-        )
-        final_answer = _apply_deterministic_format(reviewed)
-    else:
-        time.sleep(0.2)
+    time.sleep(0.12)
     yield _stage_event(
         stage="reviewing",
         status="done",
         agent="Strategy Tutor",
         title="Refinement complete",
-        detail="Answer reviewed for accuracy, depth, and student understanding.",
+        detail="Review strategy selected for accuracy, depth, and student understanding.",
     )
     yield _stage_event(
         stage="formatting",
         status="active",
         agent="Response Designer",
         title="Formatting response",
-        detail="Reframing the answer into a clean, readable study format.",
+        detail="Streaming the final tutor answer into clean learning blocks.",
     )
-    time.sleep(0.14)
+
+    streamed_answer = ""
+    if should_review_answer:
+        try:
+            review_stream = groq_client.chat.completions.create(
+                model=REVIEW_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": _build_review_prompt(
+                            coach=coach,
+                            question=question,
+                            draft=final_answer,
+                            intent=intent,
+                            answer_format=answer_format,
+                            adaptive_context=adaptive_context,
+                            learning_blueprint=learning_blueprint,
+                        ),
+                    },
+                    {"role": "user", "content": "Polish the draft into the final student answer."},
+                ],
+                temperature=0.18,
+                max_tokens=850,
+                stream=True,
+            )
+            for chunk in review_stream:
+                delta = getattr(chunk.choices[0].delta, "content", None) or ""
+                if not delta:
+                    continue
+                streamed_answer += delta
+                yield _answer_delta_event(delta)
+        except Exception as exc:
+            logger.error("[COACH STREAM REVIEW] Groq API error: %s", exc)
+
+    if streamed_answer.strip():
+        final_answer = _apply_deterministic_format(streamed_answer)
+    else:
+        final_answer = _apply_deterministic_format(final_answer)
+        for delta in _iter_text_chunks(final_answer):
+            streamed_answer += delta
+            yield _answer_delta_event(delta)
+
     yield _stage_event(
         stage="formatting",
         status="done",
@@ -1750,7 +1801,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         status="active",
         agent="Tutor Voice",
         title="Delivering answer",
-        detail="Sending the final tutor response to your study chat.",
+        detail="Finalizing the response in your study chat.",
     )
     time.sleep(0.25)
     yield _stage_event(
