@@ -1561,6 +1561,29 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     adaptive_context = _build_adaptive_context_from_request(request)
     answer_format = _detect_answer_format(question, intent=intent, mode=mode)
 
+    yield _stage_event(
+        stage="received",
+        status="active",
+        agent="Study Desk",
+        title="Question received",
+        detail="Your doubt is in the tutor workspace. I am preparing the right learning route.",
+    )
+    time.sleep(0.12)
+    yield _stage_event(
+        stage="received",
+        status="done",
+        agent="Study Desk",
+        title="Question received",
+        detail="Question accepted and passed to the learning profiler.",
+    )
+    yield _stage_event(
+        stage="understanding",
+        status="active",
+        agent="Learning Profiler",
+        title=f"Understanding need: {answer_format['label']}",
+        detail=f"Mapping intent, confidence, follow-up context, and likely weak points with {FAST_MODEL}.",
+    )
+
     coach = get_or_create_coach(db, user_id)
     progress = _build_progress_snapshot(db, user_id)
     topic_snapshot = _get_topic_snapshot(db, user_id)
@@ -1574,6 +1597,15 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         memories=memories,
     )
     assistance_blocks = _build_assistance_blocks(question, answer_format)
+    if conversation_context.get("is_follow_up"):
+        yield _stage_event(
+            stage="understanding",
+            status="active",
+            agent="Memory Tutor",
+            title="Connecting follow-up",
+            detail="Using the recent lesson thread so the answer continues naturally.",
+        )
+
     learning_blueprint = _run_learning_intelligence_agent(
         question=question,
         intent=intent,
@@ -1594,20 +1626,19 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     )
 
     yield _stage_event(
+        stage="understanding",
+        status="done",
+        agent="Learning Profiler",
+        title="Learning blueprint ready",
+        detail="Student need, answer format, and weak-signal route selected.",
+    )
+    yield _stage_event(
         stage="drafting",
         status="active",
-        agent="Learning Profiler",
-        title=f"Reading intent: {answer_format['label']}",
-        detail=f"Using {FAST_MODEL} to map intent, student state, and lesson context.",
+        agent="Adaptive Mentor",
+        title="Drafting answer",
+        detail=f"Building the first tutor response with {TUTOR_MODEL}.",
     )
-    if conversation_context.get("is_follow_up"):
-        yield _stage_event(
-            stage="drafting",
-            status="active",
-            agent="Memory Tutor",
-            title="Connecting context",
-            detail="Using the recent lesson thread to understand this follow-up.",
-        )
 
     # ── Answer source ──────────────────────────────────────────────────
     should_review_answer = True
@@ -1668,15 +1699,15 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     yield _stage_event(
         stage="drafting",
         status="done",
-        agent="Learning Profiler",
-        title="Learning blueprint ready",
-        detail="Student need, weak signal, and answer direction selected.",
+        agent="Adaptive Mentor",
+        title="Draft complete",
+        detail="Core explanation is ready for strategy review.",
     )
     yield _stage_event(
         stage="reviewing",
         status="active",
         agent="Strategy Tutor",
-        title="Choosing strategy",
+        title="Refining explanation",
         detail=f"Checking clarity, accuracy, and adaptive {answer_format['label']} structure with {REVIEW_MODEL}.",
     )
     if should_review_answer:
@@ -1696,21 +1727,36 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         stage="reviewing",
         status="done",
         agent="Strategy Tutor",
-        title="Strategy ready",
-        detail="Answer reviewed and polished for student understanding.",
+        title="Refinement complete",
+        detail="Answer reviewed for accuracy, depth, and student understanding.",
+    )
+    yield _stage_event(
+        stage="formatting",
+        status="active",
+        agent="Response Designer",
+        title="Formatting response",
+        detail="Reframing the answer into a clean, readable study format.",
+    )
+    time.sleep(0.14)
+    yield _stage_event(
+        stage="formatting",
+        status="done",
+        agent="Response Designer",
+        title="Format ready",
+        detail="The response is structured for easy reading and quick revision.",
     )
     yield _stage_event(
         stage="delivering",
         status="active",
-        agent="Adaptive Mentor",
-        title="Teaching",
-        detail=f"Preparing a personalized {answer_format['label']} response with {TUTOR_MODEL}.",
+        agent="Tutor Voice",
+        title="Delivering answer",
+        detail="Sending the final tutor response to your study chat.",
     )
     time.sleep(0.25)
     yield _stage_event(
         stage="delivering",
         status="done",
-        agent="Adaptive Mentor",
+        agent="Tutor Voice",
         title="Delivered",
         detail="Final answer delivered.",
     )
