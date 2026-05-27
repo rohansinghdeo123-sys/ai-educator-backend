@@ -125,6 +125,13 @@ def normalize_structured_mcqs(payload: Optional[Dict[str, Any]], count: int = 5)
                     or item.get("correct_answer")
                 ),
                 "explanation": str(item.get("explanation") or "").strip(),
+                "source": str(
+                    item.get("source")
+                    or item.get("reference")
+                    or payload.get("source")
+                    or payload.get("section_id")
+                    or ""
+                ).strip(),
             }
         )
 
@@ -192,6 +199,7 @@ def parse_text_mcqs(text: str, count: int = 5) -> List[Dict[str, Any]]:
                     "options": options,
                     "correct": correct,
                     "explanation": explanation,
+                    "source": "",
                 }
             )
 
@@ -239,7 +247,8 @@ JSON shape:
         {{ "key": "D", "text": "Option text" }}
       ],
       "answer": "A",
-      "explanation": "Short feedback explaining the correct answer in a friendly tone"
+      "explanation": "Short feedback explaining the correct answer in a friendly tone",
+      "source": "Short topic or line reference from SECTION CONTENT"
     }}
   ]
 }}
@@ -250,6 +259,8 @@ Rules:
 - One and only one correct answer per question.
 - Where possible, include a common misconception as one of the wrong options.
 - Explanations must be helpful and encouraging.
+- Every question must be traceable to SECTION CONTENT.
+- Add a short source/topic reference for every question.
 - Use Unicode chemical subscripts and superscripts.
 
 SECTION CONTENT:
@@ -268,11 +279,11 @@ Do not include text before or after JSON.
 JSON shape:
 {{
   "questions": [
-    {{ "id": "Q1", "marks": 3, "question": "Question text" }},
-    {{ "id": "Q2", "marks": 3, "question": "Question text" }},
-    {{ "id": "Q3", "marks": 3, "question": "Question text" }},
-    {{ "id": "Q4", "marks": 5, "question": "Question text" }},
-    {{ "id": "Q5", "marks": 5, "question": "Question text" }}
+    {{ "id": "Q1", "marks": 3, "question": "Question text", "source": "Short topic or line reference" }},
+    {{ "id": "Q2", "marks": 3, "question": "Question text", "source": "Short topic or line reference" }},
+    {{ "id": "Q3", "marks": 3, "question": "Question text", "source": "Short topic or line reference" }},
+    {{ "id": "Q4", "marks": 5, "question": "Question text", "source": "Short topic or line reference" }},
+    {{ "id": "Q5", "marks": 5, "question": "Question text", "source": "Short topic or line reference" }}
   ]
 }}
 
@@ -282,6 +293,8 @@ Rules:
 - Questions should test deep understanding.
 - Do not provide answers or explanations.
 - Use friendly, clear language.
+- Every question must be traceable to SECTION CONTENT.
+- Add a short source/topic reference for every question.
 
 SECTION CONTENT:
 {context}
@@ -318,6 +331,13 @@ def normalize_probable_questions(payload: Optional[Dict[str, Any]]) -> List[Dict
                 "id": str(item.get("id") or f"Q{index + 1}"),
                 "marks": marks,
                 "question": question,
+                "source": str(
+                    item.get("source")
+                    or item.get("reference")
+                    or payload.get("source")
+                    or payload.get("section_id")
+                    or ""
+                ).strip(),
             }
         )
 

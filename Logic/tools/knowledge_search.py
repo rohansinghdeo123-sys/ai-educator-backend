@@ -42,6 +42,15 @@ CHEMISTRY_SYNONYMS = {
     "melting point": ["melting points", "m.p.", "mp"],
 }
 
+SECTION_ALIASES = {
+    "basic_concepts_of_chemistry": "matter_definition",
+    "basic_concept_of_chemistry": "matter_definition",
+    "matter": "matter_definition",
+    "hydrocarbon": "alkanes",
+    "hydrocarbons": "alkanes",
+    "aromatic_hydrocarbons": "aromatics",
+}
+
 
 def _normalize(text: str) -> str:
     """Normalize Unicode subscripts/superscripts for matching."""
@@ -150,7 +159,8 @@ def search_knowledge_base(
         - "keywords_used": list — What keywords were searched
         - "basics_context": str — Supplementary basics text
     """
-    section_id = section_id.strip().lower()
+    section_id = re.sub(r"[^a-z0-9]+", "_", (section_id or "").strip().lower()).strip("_")
+    section_id = SECTION_ALIASES.get(section_id, section_id)
 
     # ── Step 1: Try markdown file map ──────────────────────────────────
     if section_id in SECTION_FILE_MAP:

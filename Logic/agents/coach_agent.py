@@ -22,6 +22,7 @@ from groq import Groq
 from Logic.agent_event_bus import event_bus
 from Logic.analytics_engine import get_user_analytics
 from Logic.knowledge_graph import knowledge_graph
+from Logic.tools.knowledge_search import search_knowledge_base
 from models import (
     AICoachDailySignal,
     AICoachInteraction,
@@ -40,6 +41,8 @@ TUTOR_MODEL = os.getenv("GROQ_TUTOR_MODEL", "openai/gpt-oss-120b")
 REVIEW_MODEL = os.getenv("GROQ_REVIEW_MODEL", "llama-3.3-70b-versatile")
 MODEL_NAME = TUTOR_MODEL
 
+MATERIAL_NOT_FOUND_MESSAGE = "I could not find this in your study material. Please upload or select the correct chapter/data."
+
 
 COACH_NAMES = [
     "Astra", "Nova", "Kiran", "Orion", "Mira", "Veda", "Aria", "Nexus",
@@ -48,6 +51,175 @@ COACH_NAMES = [
 
 def _safe_json(value: Any, fallback: Any):
     return value if value is not None else fallback
+
+
+def _material_not_found(adaptive_context: Optional[Dict[str, Any]] = None) -> str:
+    learning_context = _as_dict((adaptive_context or {}).get("learning_context"))
+    policy_text = str(learning_context.get("required_not_found_response") or "").strip()
+    return policy_text or MATERIAL_NOT_FOUND_MESSAGE
+
+
+def _strict_grounding_enabled(request, adaptive_context: Optional[Dict[str, Any]] = None) -> bool:
+    if bool(getattr(request, "strict_grounding", False) or getattr(request, "retrieval_required", False)):
+        return True
+    if getattr(request, "fallback_to_general_knowledge", True) is False:
+        return True
+    learning_context = _as_dict((adaptive_context or {}).get("learning_context"))
+    if learning_context.get("scope") == "selected_study_material_only":
+        return True
+    answer_policy = str(learning_context.get("answer_policy") or "").lower()
+    return "study material only" in answer_policy or "retrieved study material only" in answer_policy
+
+
+def _selected_material_scope(request, adaptive_context: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    learning_context = _as_dict((adaptive_context or {}).get("learning_context"))
+    return {
+        "subject": str(
+            getattr(request, "subject", "")
+            or learning_context.get("selected_subject")
+            or learning_context.get("subject")
+            or ""
+        ).strip(),
+        "chapter": str(
+            getattr(request, "chapter", "")
+            or learning_context.get("selected_chapter")
+            or learning_context.get("chapter")
+            or ""
+        ).strip(),
+        "topic": str(
+            getattr(request, "topic", "")
+            or learning_context.get("selected_topic")
+            or learning_context.get("topic")
+            or ""
+        ).strip(),
+        "section_id": str(
+            getattr(request, "section_id", "")
+            or learning_context.get("section_id")
+            or learning_context.get("topic")
+            or ""
+        ).strip(),
+    }
+
+
+def _grounding_terms(value: str) -> List[str]:
+    stopwords = {
+        "define", "explain", "simple", "words", "please", "can", "you", "this", "that",
+        "what", "why", "how", "again", "more", "example", "examples", "give", "tell",
+        "about", "concept", "topic", "previous", "answer", "student", "question", "selected",
+        "chapter", "from", "with", "only", "study", "material", "the", "and", "for", "are",
+        "into", "like", "first", "time",
+    }
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]+", (value or "").lower())
+    terms = []
+    for word in words:
+        if len(word) < 4 or word in stopwords:
+            continue
+        if word not in terms:
+            terms.append(word)
+    return terms[:10]
+
+
+def _merge_frontend_context(
+    conversation_context: Dict[str, Any],
+    adaptive_context: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    merged = dict(conversation_context or {})
+    learning_context = _as_dict((adaptive_context or {}).get("learning_context"))
+
+    previous_question = str(
+        learning_context.get("previous_user_question")
+        or learning_context.get("last_student_question")
+        or ""
+    ).strip()
+    previous_answer = str(
+        learning_context.get("previous_ai_answer")
+        or learning_context.get("previous_assistant_answer")
+        or ""
+    ).strip()
+
+    if learning_context.get("is_follow_up"):
+        merged["is_follow_up"] = True
+    if previous_question:
+        merged["last_student_question"] = previous_question
+
+    extra_lines = []
+    if previous_question:
+        extra_lines.append(f"Student: {previous_question[:300]}")
+    if previous_answer:
+        extra_lines.append(f"Tutor: {previous_answer[:420]}")
+    existing_thread = str(merged.get("recent_thread") or "").strip()
+    if extra_lines:
+        merged["recent_thread"] = "\n".join(extra_lines + ([existing_thread] if existing_thread else []))
+
+    return merged
+
+
+def _resolve_retrieval_question(question: str, adaptive_context: Dict[str, Any], conversation_context: Dict[str, Any]) -> str:
+    learning_context = _as_dict(adaptive_context.get("learning_context"))
+    is_follow_up = bool(learning_context.get("is_follow_up") or conversation_context.get("is_follow_up"))
+    previous_question = str(learning_context.get("previous_user_question") or conversation_context.get("last_student_question") or "").strip()
+    previous_answer = str(learning_context.get("previous_ai_answer") or "").strip()
+    grounding_prompt = str(learning_context.get("grounding_context_prompt") or "").strip()
+
+    if is_follow_up and (previous_question or previous_answer):
+        return "\n".join(
+            part
+            for part in [
+                previous_question,
+                previous_answer[:1200],
+                question,
+                grounding_prompt,
+            ]
+            if part
+        )
+    return "\n".join(part for part in [question, grounding_prompt] if part)
+
+
+def _retrieve_selected_material(request, adaptive_context: Dict[str, Any], conversation_context: Dict[str, Any]) -> Dict[str, Any]:
+    scope = _selected_material_scope(request, adaptive_context)
+    section_id = scope.get("section_id") or scope.get("topic") or scope.get("chapter") or "general"
+    retrieval_question = _resolve_retrieval_question(
+        question=getattr(request, "question", "") or "",
+        adaptive_context=adaptive_context,
+        conversation_context=conversation_context,
+    )
+
+    result = search_knowledge_base(
+        section_id=section_id,
+        question=retrieval_question or section_id,
+        max_paragraphs=8,
+        max_chars=5000,
+    )
+    result["scope"] = scope
+    result["retrieval_question"] = retrieval_question
+    return result
+
+
+def _material_supports_question(search_result: Dict[str, Any], adaptive_context: Dict[str, Any], conversation_context: Dict[str, Any]) -> bool:
+    context = str(search_result.get("context") or "")
+    if search_result.get("error") or not context.strip():
+        return False
+
+    learning_context = _as_dict(adaptive_context.get("learning_context"))
+    is_follow_up = bool(learning_context.get("is_follow_up") or conversation_context.get("is_follow_up"))
+    anchor_source = (
+        str(learning_context.get("previous_user_question") or "")
+        if is_follow_up
+        else str(search_result.get("retrieval_question") or "")
+    )
+    terms = _grounding_terms(anchor_source)
+    if not terms:
+        return True
+
+    searchable = " ".join(
+        [
+            context,
+            str(search_result.get("section_id") or ""),
+            str(search_result.get("scope", {}).get("topic") or ""),
+            str(search_result.get("scope", {}).get("chapter") or ""),
+        ]
+    ).lower()
+    return any(term in searchable for term in terms)
 
 
 def _coach_name_for_user(user_id: str) -> str:
@@ -720,9 +892,20 @@ def _build_adaptive_context_from_request(request) -> Dict[str, Any]:
     adaptive_strategy = _as_dict(getattr(request, "adaptive_strategy", {}))
     learning_context = _as_dict(getattr(request, "learning_context", {}))
     mentor_directive = (getattr(request, "mentor_directive", "") or "").strip()
+    grounding_context_prompt = (getattr(request, "grounding_context_prompt", "") or "").strip()
+
+    if grounding_context_prompt:
+        learning_context["grounding_context_prompt"] = grounding_context_prompt
+    if getattr(request, "required_not_found_response", None):
+        learning_context["required_not_found_response"] = getattr(request, "required_not_found_response")
+    if getattr(request, "strict_grounding", False):
+        learning_context["strict_grounding"] = True
+    if getattr(request, "retrieval_required", False):
+        learning_context["retrieval_required"] = True
 
     return {
         "mentor_directive": mentor_directive,
+        "system_guardrail": (getattr(request, "system_guardrail", "") or "").strip(),
         "student_state": student_state,
         "adaptive_strategy": adaptive_strategy,
         "learning_context": learning_context,
@@ -736,6 +919,7 @@ def _build_adaptive_teaching_instruction(adaptive_context: Optional[Dict[str, An
     adaptive_strategy = _as_dict(context.get("adaptive_strategy"))
     learning_context = _as_dict(context.get("learning_context"))
     mentor_directive = context.get("mentor_directive") or ""
+    system_guardrail = context.get("system_guardrail") or ""
 
     if not context.get("has_signals"):
         return """
@@ -762,6 +946,9 @@ You are not a static chatbot. You are a private teacher who adapts every respons
 Frontend mentor directive:
 {mentor_directive or "No explicit directive supplied; infer from the question and memory."}
 
+System grounding guardrail:
+{system_guardrail or "Use the selected study material when it is supplied."}
+
 Detected student state:
 - Knowledge level: {student_state.get("knowledge_level", "unknown")}
 - Emotional state: {student_state.get("emotional_state", "steady")}
@@ -776,8 +963,12 @@ Selected strategy:
 - Weak signals: {weak_signals if weak_signals else "none detected"}
 
 Study context:
-- Chapter: {learning_context.get("chapter", "unknown")}
-- Topic: {learning_context.get("topic", "unknown")}
+- Subject: {learning_context.get("selected_subject") or learning_context.get("subject", "unknown")}
+- Chapter: {learning_context.get("selected_chapter") or learning_context.get("chapter", "unknown")}
+- Topic: {learning_context.get("selected_topic") or learning_context.get("topic", "unknown")}
+- Section id: {learning_context.get("section_id", "unknown")}
+- Follow-up: {learning_context.get("is_follow_up", False)}
+- Previous user question: {learning_context.get("previous_user_question", "none")}
 - Saved conversations: {learning_context.get("saved_conversations", 0)}
 - Recent Study Page messages:
 {recent_text or "- No recent Study Page messages supplied."}
@@ -790,6 +981,7 @@ Adaptive response rules:
 - Revision intent needs compact notes, formulas, and recall checkpoints.
 - Exam intent needs marks-ready structure, traps, important question style, and time-saving answer order.
 - Practice intent needs one or more questions, then feedback or a clear next action.
+- If strict grounding is active, never switch topics and never use outside knowledge.
 - Never expose these analytics to the student. Just respond naturally as their teacher.
 - End with exactly one useful next step or check question unless the student asked only for a short answer.
 """.strip()
@@ -1006,26 +1198,42 @@ def _build_study_prompt(
     conversation_context: Optional[Dict[str, Any]] = None,
     adaptive_context: Optional[Dict[str, Any]] = None,
     learning_blueprint: str = "",
+    retrieved_material: Optional[Dict[str, Any]] = None,
+    strict_grounding: bool = False,
 ) -> str:
     graph_context = ""
-    keywords = [w for w in question.lower().split() if len(w) > 2]
-    for kw in keywords[:3]:
-        concepts = knowledge_graph.search_by_keyword(kw, limit=2)
-        if concepts:
-            for c in concepts:
-                graph_context += f"Definition: {c.get('definition', '')}\n"
-                graph_context += f"Key Points:\n  " + "\n  ".join(c.get("key_points", [])) + "\n"
-                graph_context += f"Examples:\n  " + "\n  ".join(c.get("examples", [])) + "\n"
-                if c.get("common_mistakes"):
-                    graph_context += "Common Mistakes:\n  " + "\n  ".join(
-                        [f"{m['mistake']} -> {m['correction']}" for m in c["common_mistakes"]]
-                    ) + "\n"
-                break
+    if retrieved_material and str(retrieved_material.get("context") or "").strip():
+        graph_context = str(retrieved_material.get("context") or "").strip()
+    elif not strict_grounding:
+        keywords = [w for w in question.lower().split() if len(w) > 2]
+        for kw in keywords[:3]:
+            concepts = knowledge_graph.search_by_keyword(kw, limit=2)
+            if concepts:
+                for c in concepts:
+                    graph_context += f"Definition: {c.get('definition', '')}\n"
+                    graph_context += f"Key Points:\n  " + "\n  ".join(c.get("key_points", [])) + "\n"
+                    graph_context += f"Examples:\n  " + "\n  ".join(c.get("examples", [])) + "\n"
+                    if c.get("common_mistakes"):
+                        graph_context += "Common Mistakes:\n  " + "\n  ".join(
+                            [f"{m['mistake']} -> {m['correction']}" for m in c["common_mistakes"]]
+                        ) + "\n"
+                    break
 
     adaptive_format = _build_answer_format_instruction(answer_format)
     adaptive_teaching = _build_adaptive_teaching_instruction(adaptive_context)
     conversation_context = conversation_context or {}
     follow_up_mode = "YES" if conversation_context.get("is_follow_up") else "NO"
+    material_scope = (retrieved_material or {}).get("scope", {}) if isinstance(retrieved_material, dict) else {}
+    not_found_message = _material_not_found(adaptive_context)
+    material_policy = (
+        "STRICT STUDY-MATERIAL POLICY:\n"
+        "- Answer only from OFFICIAL RETRIEVED STUDY MATERIAL below.\n"
+        "- Do not use general knowledge, memory, or outside chemistry facts.\n"
+        f"- If the material does not contain the answer, reply exactly: {not_found_message}\n"
+        "- If the student asks a follow-up, keep the previous topic from the recent lesson thread unless they clearly ask for a new topic."
+        if strict_grounding
+        else "Use retrieved curriculum data when available. If it is missing, answer cautiously."
+    )
 
     return f"""
 You are {coach.coach_name}, a specialist subject tutor and personal study coach.
@@ -1053,6 +1261,8 @@ Private tuition behavior:
 
 {adaptive_teaching}
 
+{material_policy}
+
 LEARNING INTELLIGENCE BLUEPRINT:
 {learning_blueprint or "No separate blueprint was generated. Infer the best teaching route from the question and memory."}
 
@@ -1067,6 +1277,15 @@ LONG-TERM STUDENT GUIDANCE:
 
 COACH MEMORY:
 {conversation_context.get("durable_memory", "No durable memory yet.")}
+
+SELECTED STUDY SCOPE:
+Subject: {material_scope.get("subject") or "unknown"}
+Chapter: {material_scope.get("chapter") or "unknown"}
+Topic: {material_scope.get("topic") or "unknown"}
+Section id: {material_scope.get("section_id") or "unknown"}
+
+OFFICIAL RETRIEVED STUDY MATERIAL:
+{graph_context if graph_context else not_found_message}
 
 KNOWLEDGE BASE (use this data if it helps):
 {graph_context if graph_context else "No specific curriculum data found – explain from your general knowledge."}
@@ -1449,6 +1668,18 @@ def coach_agent(request, db=None) -> dict:
         interactions=recent_interactions,
         memories=memories,
     )
+    conversation_context = _merge_frontend_context(conversation_context, adaptive_context)
+    strict_grounding = _strict_grounding_enabled(request, adaptive_context)
+    retrieved_material = (
+        _retrieve_selected_material(request, adaptive_context, conversation_context)
+        if strict_grounding
+        else None
+    )
+    material_is_supported = (
+        _material_supports_question(retrieved_material, adaptive_context, conversation_context)
+        if strict_grounding and retrieved_material is not None
+        else True
+    )
     assistance_blocks = _build_assistance_blocks(question, answer_format)
     lightweight_reply = _build_lightweight_conversation_reply(question, conversation_context)
     learning_blueprint = (
@@ -1476,7 +1707,9 @@ def coach_agent(request, db=None) -> dict:
 
     if lightweight_reply:
         answer = lightweight_reply
-    elif answer_format["id"] == "definition" and _can_answer_definition_locally(question):
+    elif strict_grounding and not material_is_supported:
+        answer = _material_not_found(adaptive_context)
+    elif not strict_grounding and answer_format["id"] == "definition" and _can_answer_definition_locally(question):
         answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
         if adaptive_context.get("has_signals"):
             answer = _apply_deterministic_format(
@@ -1512,6 +1745,8 @@ def coach_agent(request, db=None) -> dict:
                 conversation_context=conversation_context,
                 adaptive_context=adaptive_context,
                 learning_blueprint=learning_blueprint,
+                retrieved_material=retrieved_material,
+                strict_grounding=strict_grounding,
             )
 
         try:
@@ -1527,11 +1762,11 @@ def coach_agent(request, db=None) -> dict:
             draft = response.choices[0].message.content.strip()
         except Exception as exc:
             logger.error("[COACH] Groq API error: %s", exc)
-            draft = recommendation
+            draft = _material_not_found(adaptive_context) if strict_grounding else recommendation
 
         enriched = (
             _build_complete_answer_from_kg(question)
-            if len(draft.strip()) < 50 and _can_answer_definition_locally(question)
+            if not strict_grounding and len(draft.strip()) < 50 and _can_answer_definition_locally(question)
             else draft
         )
         reviewed = _review_and_polish_answer(
@@ -1729,6 +1964,18 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         interactions=recent_interactions,
         memories=memories,
     )
+    conversation_context = _merge_frontend_context(conversation_context, adaptive_context)
+    strict_grounding = _strict_grounding_enabled(request, adaptive_context)
+    retrieved_material = (
+        _retrieve_selected_material(request, adaptive_context, conversation_context)
+        if strict_grounding
+        else None
+    )
+    material_is_supported = (
+        _material_supports_question(retrieved_material, adaptive_context, conversation_context)
+        if strict_grounding and retrieved_material is not None
+        else True
+    )
     assistance_blocks = _build_assistance_blocks(question, answer_format)
     lightweight_reply = _build_lightweight_conversation_reply(question, conversation_context)
     if conversation_context.get("is_follow_up") and not lightweight_reply:
@@ -1791,7 +2038,10 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if lightweight_reply:
         final_answer = lightweight_reply
         should_review_answer = False
-    elif answer_format["id"] == "definition" and _can_answer_definition_locally(question):
+    elif strict_grounding and not material_is_supported:
+        final_answer = _material_not_found(adaptive_context)
+        should_review_answer = False
+    elif not strict_grounding and answer_format["id"] == "definition" and _can_answer_definition_locally(question):
         final_answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
         should_review_answer = bool(adaptive_context.get("has_signals"))
     else:
@@ -1816,6 +2066,8 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 conversation_context=conversation_context,
                 adaptive_context=adaptive_context,
                 learning_blueprint=learning_blueprint,
+                retrieved_material=retrieved_material,
+                strict_grounding=strict_grounding,
             )
 
         draft = ""
@@ -1833,12 +2085,14 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             draft = draft_resp.choices[0].message.content.strip()
         except Exception as exc:
             logger.error("[COACH DRAFT] Groq error: %s", exc)
-            fallback = recommendation if intent == "planning" else "I'm having trouble explaining that right now."
+            fallback = _material_not_found(adaptive_context) if strict_grounding else (
+                recommendation if intent == "planning" else "I'm having trouble explaining that right now."
+            )
             draft = fallback
 
         enriched = (
             _build_complete_answer_from_kg(question)
-            if len(draft.strip()) < 50 and _can_answer_definition_locally(question)
+            if not strict_grounding and len(draft.strip()) < 50 and _can_answer_definition_locally(question)
             else draft
         )
         final_answer = _apply_deterministic_format(enriched)

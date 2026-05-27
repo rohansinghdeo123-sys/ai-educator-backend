@@ -191,6 +191,76 @@
     "parent_concept_id": null
   },
   {
+    "concept_id": "properties_of_matter",
+    "title": "Properties of Matter",
+    "definition": "Properties of matter are the observable or measurable features that help us describe, compare and identify matter.",
+    "core_explanation": "All matter has mass and occupies space. Different substances can also be described by properties such as volume, density, rigidity, compressibility, fluidity, diffusion, melting point and boiling point. These properties help us understand why solids keep their shape, liquids flow, gases spread, and why different materials behave differently in daily life and experiments.",
+    "key_points": [
+      "Mass is the amount of matter present in a substance.",
+      "Volume is the space occupied by matter.",
+      "Density compares mass with volume.",
+      "Solids are generally rigid and have fixed shape and volume.",
+      "Liquids flow and have fixed volume but no fixed shape.",
+      "Gases are highly compressible and diffuse quickly.",
+      "Physical properties can be observed without changing the substance into a new substance."
+    ],
+    "examples": [
+      "A stone has mass and occupies space.",
+      "Water flows and takes the shape of its container.",
+      "Air spreads inside a room because gases diffuse.",
+      "Iron is more rigid than rubber."
+    ],
+    "formulas": ["Density = mass / volume"],
+    "properties": [
+      "Mass",
+      "Volume",
+      "Density",
+      "Rigidity",
+      "Compressibility",
+      "Fluidity",
+      "Diffusion"
+    ],
+    "applications": [
+      "Identifying and comparing substances.",
+      "Choosing materials for daily use and construction.",
+      "Understanding behaviour of solids, liquids and gases."
+    ],
+    "common_mistakes": [
+      {
+        "mistake": "Thinking only solids are matter.",
+        "correction": "Liquids and gases are also matter because they have mass and occupy space.",
+        "frequency": "high"
+      },
+      {
+        "mistake": "Confusing mass with volume.",
+        "correction": "Mass tells how much matter is present, while volume tells how much space it occupies.",
+        "frequency": "high"
+      },
+      {
+        "mistake": "Thinking physical properties always create a new substance.",
+        "correction": "Physical properties can usually be observed without changing the chemical identity of the substance.",
+        "frequency": "medium"
+      }
+    ],
+    "prerequisites": ["matter_definition"],
+    "related_concepts": [
+      {"concept_id": "matter_definition", "relationship": "describes"},
+      {"concept_id": "states_of_matter", "relationship": "varies_by_state"},
+      {"concept_id": "classification_of_matter", "relationship": "helps_classify"}
+    ],
+    "difficulty_level": 1,
+    "blooms_taxonomy": "Understand",
+    "typical_exam_weightage": "medium",
+    "learning_objectives": [
+      "List important properties of matter.",
+      "Differentiate mass, volume and density.",
+      "Connect properties of matter with solids, liquids and gases."
+    ],
+    "importance_level": "core",
+    "source_pages": [4, 5],
+    "parent_concept_id": "matter_definition"
+  },
+  {
     "concept_id": "states_of_matter",
     "title": "States of Matter",
     "definition": "Matter can exist in three physical states — solid, liquid and gas — which differ in the arrangement and freedom of particles.",

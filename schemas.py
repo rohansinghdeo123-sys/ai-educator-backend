@@ -191,12 +191,21 @@ class CoachMemoryResponse(BaseModel):
 class CoachChatRequest(BaseModel):
     user_id: str
     message: str = Field(min_length=1, max_length=2500)
+    original_message: Optional[str] = None
+    grounding_context_prompt: Optional[str] = None
     mode: str = "coach"
     intent: str = "general"
     subject: Optional[str] = None
+    chapter: Optional[str] = None
     topic: Optional[str] = None
+    section_id: Optional[str] = None
     session_id: Optional[str] = None
     mentor_directive: Optional[str] = None
+    system_guardrail: Optional[str] = None
+    strict_grounding: bool = False
+    retrieval_required: bool = False
+    fallback_to_general_knowledge: bool = True
+    required_not_found_response: Optional[str] = None
     student_state: Dict[str, Any] = Field(default_factory=dict)
     adaptive_strategy: Dict[str, Any] = Field(default_factory=dict)
     learning_context: Dict[str, Any] = Field(default_factory=dict)
