@@ -14,23 +14,48 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from Logic.agent_router import route_to_agent
 from Logic.agents.tutor_agent import reset_tutor_session
+from Logic.tools.knowledge_search import search_knowledge_base
 
 logger = logging.getLogger("ai_educator.section_doubt")
+
+MATERIAL_NOT_FOUND_MESSAGE = "I could not find this in your study material. Please upload or select the correct chapter/data."
 
 
 class _LegacyRequest:
     """Adapter to convert function args into a request-like object."""
 
-    def __init__(self, question, section_id, session_id, mode, difficulty):
+    def __init__(
+        self,
+        question,
+        section_id,
+        session_id,
+        mode,
+        difficulty,
+        strict_grounding: bool = False,
+        required_not_found_response: Optional[str] = None,
+    ):
         self.question = question
         self.section_id = section_id
         self.session_id = session_id
         self.mode = mode
         self.difficulty = difficulty
+        self.strict_grounding = strict_grounding
+        self.retrieval_required = strict_grounding
+        self.fallback_to_general_knowledge = not strict_grounding
+        self.required_not_found_response = required_not_found_response or MATERIAL_NOT_FOUND_MESSAGE
 
 
 def normalize_section_id(section_id: str) -> str:
-    return (section_id or "").strip().lower()
+    cleaned = re.sub(r"[^a-z0-9]+", "_", (section_id or "").strip().lower()).strip("_")
+    aliases = {
+        "basic_concepts_of_chemistry": "matter_definition",
+        "basic_concept_of_chemistry": "matter_definition",
+        "matter": "matter_definition",
+        "hydrocarbon": "alkanes",
+        "hydrocarbons": "alkanes",
+        "aromatic_hydrocarbons": "aromatics",
+    }
+    return aliases.get(cleaned, cleaned)
 
 
 def section_doubt(
@@ -39,6 +64,8 @@ def section_doubt(
     session_id: str,
     mode: str = "revision",
     difficulty: str = "medium",
+    strict_grounding: bool = False,
+    required_not_found_response: Optional[str] = None,
 ) -> str:
     """
     Main entry point for the section-based AI tutor.
@@ -49,6 +76,17 @@ def section_doubt(
         return "Invalid section selected."
 
     section_id = normalize_section_id(section_id)
+    not_found = required_not_found_response or MATERIAL_NOT_FOUND_MESSAGE
+
+    if strict_grounding:
+        search_result = search_knowledge_base(
+            section_id=section_id,
+            question=question or section_id,
+            max_paragraphs=8,
+            max_chars=4000,
+        )
+        if search_result.get("error") or not str(search_result.get("context") or "").strip():
+            return not_found
 
     request = _LegacyRequest(
         question=question,
@@ -56,6 +94,8 @@ def section_doubt(
         session_id=session_id,
         mode=mode,
         difficulty=difficulty,
+        strict_grounding=strict_grounding,
+        required_not_found_response=not_found,
     )
 
     logger.info(
@@ -140,6 +180,8 @@ def run_structured_agent(
     session_id: str,
     mode: str,
     difficulty: str,
+    strict_grounding: bool = False,
+    required_not_found_response: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Any]:
     request = _LegacyRequest(
         question=question,
@@ -147,6 +189,8 @@ def run_structured_agent(
         session_id=session_id,
         mode=mode,
         difficulty=difficulty,
+        strict_grounding=strict_grounding,
+        required_not_found_response=required_not_found_response,
     )
 
     result = route_to_agent(request)
@@ -229,13 +273,28 @@ def normalize_mcq_questions(payload: Optional[Dict[str, Any]], count: int) -> Li
         if not question_text:
             continue
 
+        options = normalize_mcq_options(item.get("options"))
+        explanation = str(item.get("explanation") or "").strip()
+
+        if len(options) != 4 or any("Option unavailable" in option for option in options):
+            continue
+        if not explanation:
+            continue
+
         normalized.append(
             {
                 "id": str(item.get("id") or f"Q{index + 1}"),
                 "question": question_text,
-                "options": normalize_mcq_options(item.get("options")),
+                "options": options,
                 "correct": normalize_mcq_answer(item),
-                "explanation": str(item.get("explanation") or "").strip(),
+                "explanation": explanation,
+                "source": str(
+                    item.get("source")
+                    or item.get("reference")
+                    or payload.get("source")
+                    or payload.get("section_id")
+                    or ""
+                ).strip(),
             }
         )
 
@@ -308,6 +367,7 @@ def parse_text_mcqs(text: str, count: int = 5) -> List[Dict[str, Any]]:
                     "options": options,
                     "correct": correct,
                     "explanation": explanation,
+                    "source": "",
                 }
             )
 
@@ -338,7 +398,8 @@ JSON shape:
         {{ "key": "D", "text": "Option text" }}
       ],
       "answer": "A",
-      "explanation": "Short feedback explaining the correct answer"
+      "explanation": "Short feedback explaining the correct answer",
+      "source": "Topic or line reference from the selected study material"
     }}
   ]
 }}
@@ -349,6 +410,8 @@ Rules:
 - One and only one correct answer per question.
 - Options must be plausible.
 - Explanations must be useful feedback after user selection.
+- Every question must be directly supported by the selected study material.
+- Add a short source/topic reference for every question.
 - Use Unicode chemical subscripts and superscripts where needed.
 - Use only the current section content available to the agent.
 """.strip()
@@ -360,11 +423,33 @@ def generate_structured_mcqs(
     session_id: str = "exam-session",
     difficulty: str = "medium",
     count: int = 5,
+    strict_grounding: bool = False,
+    required_not_found_response: Optional[str] = None,
+    include_source: bool = False,
 ) -> Dict[str, Any]:
     safe_count = max(1, min(int(count or 5), 10))
     safe_topic = (topic or section_id or "unknown").strip()
     safe_section_id = normalize_section_id(section_id or safe_topic)
     safe_difficulty = (difficulty or "medium").strip().lower()
+    not_found = required_not_found_response or MATERIAL_NOT_FOUND_MESSAGE
+
+    search_result = search_knowledge_base(
+        section_id=safe_section_id,
+        question=safe_topic,
+        max_paragraphs=8,
+        max_chars=4000,
+    )
+    source_label = f"{safe_section_id}"
+
+    if search_result.get("error") or not str(search_result.get("context") or "").strip():
+        return {
+            "topic": safe_topic,
+            "section_id": safe_section_id,
+            "difficulty": safe_difficulty,
+            "questions": [],
+            "error": not_found,
+            "raw_answer": "",
+        }
 
     payload, raw = run_structured_agent(
         question=build_mcq_instruction(safe_topic, safe_difficulty, safe_count),
@@ -372,6 +457,8 @@ def generate_structured_mcqs(
         session_id=session_id,
         mode="exam",
         difficulty=safe_difficulty,
+        strict_grounding=strict_grounding,
+        required_not_found_response=not_found,
     )
 
     questions = normalize_mcq_questions(payload, safe_count)
@@ -384,6 +471,20 @@ def generate_structured_mcqs(
         fallback_questions = parse_text_mcqs(fallback_text, safe_count)
         if len(fallback_questions) > len(questions):
             questions = fallback_questions
+
+    for item in questions:
+        if include_source or not item.get("source"):
+            item["source"] = item.get("source") or source_label
+
+    if strict_grounding and len(questions) < safe_count:
+        return {
+            "topic": safe_topic,
+            "section_id": safe_section_id,
+            "difficulty": safe_difficulty,
+            "questions": [],
+            "error": "I could not generate enough grounded MCQs from your selected study material. Please upload or select the correct chapter/data.",
+            "raw_answer": "",
+        }
 
     return {
         "topic": safe_topic,
@@ -424,6 +525,13 @@ def normalize_probable_questions(payload: Optional[Dict[str, Any]]) -> List[Dict
                 "id": str(item.get("id") or f"Q{index + 1}"),
                 "marks": marks,
                 "question": question_text,
+                "source": str(
+                    item.get("source")
+                    or item.get("reference")
+                    or payload.get("source")
+                    or payload.get("section_id")
+                    or ""
+                ).strip(),
             }
         )
 
@@ -441,11 +549,11 @@ Do not include any text before or after JSON.
 JSON shape:
 {{
   "questions": [
-    {{ "id": "Q1", "marks": 3, "question": "Question text" }},
-    {{ "id": "Q2", "marks": 3, "question": "Question text" }},
-    {{ "id": "Q3", "marks": 3, "question": "Question text" }},
-    {{ "id": "Q4", "marks": 5, "question": "Question text" }},
-    {{ "id": "Q5", "marks": 5, "question": "Question text" }}
+    {{ "id": "Q1", "marks": 3, "question": "Question text", "source": "Topic or line reference" }},
+    {{ "id": "Q2", "marks": 3, "question": "Question text", "source": "Topic or line reference" }},
+    {{ "id": "Q3", "marks": 3, "question": "Question text", "source": "Topic or line reference" }},
+    {{ "id": "Q4", "marks": 5, "question": "Question text", "source": "Topic or line reference" }},
+    {{ "id": "Q5", "marks": 5, "question": "Question text", "source": "Topic or line reference" }}
   ]
 }}
 
@@ -456,6 +564,8 @@ Rules:
 - Do not provide answers.
 - Do not provide hints.
 - Do not provide explanations.
+- Every question must be directly supported by the selected study material.
+- Add a short source/topic reference for every question.
 - Use only the current section content available to the agent.
 """.strip()
 
@@ -472,10 +582,32 @@ def generate_structured_probable_questions(
     section_id: str,
     session_id: str = "probable-session",
     difficulty: str = "medium",
+    strict_grounding: bool = False,
+    required_not_found_response: Optional[str] = None,
+    include_source: bool = False,
 ) -> Dict[str, Any]:
     safe_topic = (topic or section_id or "unknown").strip()
     safe_section_id = normalize_section_id(section_id or safe_topic)
     safe_difficulty = (difficulty or "medium").strip().lower()
+    not_found = required_not_found_response or MATERIAL_NOT_FOUND_MESSAGE
+
+    search_result = search_knowledge_base(
+        section_id=safe_section_id,
+        question=safe_topic,
+        max_paragraphs=8,
+        max_chars=4000,
+    )
+
+    if search_result.get("error") or not str(search_result.get("context") or "").strip():
+        return {
+            "topic": safe_topic,
+            "section_id": safe_section_id,
+            "difficulty": safe_difficulty,
+            "questions": [],
+            "text": not_found,
+            "error": not_found,
+            "raw_answer": "",
+        }
 
     payload, raw = run_structured_agent(
         question=build_probable_instruction(safe_topic, safe_difficulty),
@@ -483,9 +615,26 @@ def generate_structured_probable_questions(
         session_id=session_id,
         mode="probable",
         difficulty=safe_difficulty,
+        strict_grounding=strict_grounding,
+        required_not_found_response=not_found,
     )
 
     questions = normalize_probable_questions(payload)
+
+    for item in questions:
+        if include_source or not item.get("source"):
+            item["source"] = item.get("source") or safe_section_id
+
+    if strict_grounding and not questions:
+        return {
+            "topic": safe_topic,
+            "section_id": safe_section_id,
+            "difficulty": safe_difficulty,
+            "questions": [],
+            "text": not_found,
+            "error": not_found,
+            "raw_answer": "",
+        }
 
     return {
         "topic": safe_topic,

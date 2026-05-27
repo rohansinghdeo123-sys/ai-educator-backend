@@ -10,6 +10,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # ================= IMPORTS =================
 import json
 import logging
+import re
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Generator
 
@@ -61,6 +62,7 @@ from Logic.section_doubt import (
     section_doubt,
 )
 from Logic.knowledge_graph import knowledge_graph
+from Logic.tools.artifact_generator import generate_study_artifacts
 
 # ── Groq client for casual CEO chats ──
 import groq
@@ -326,6 +328,14 @@ class SectionAIRequest(BaseModel):
     session_id: str
     mode: str = "revision"
     difficulty: str = "medium"
+    subject: Optional[str] = None
+    chapter: Optional[str] = None
+    topic: Optional[str] = None
+    system_guardrail: Optional[str] = None
+    strict_grounding: bool = False
+    retrieval_required: bool = False
+    fallback_to_general_knowledge: bool = True
+    required_not_found_response: Optional[str] = None
 
 
 class ResetRequest(BaseModel):
@@ -353,6 +363,16 @@ class GenerateMCQRequest(BaseModel):
     session_id: str = "exam-session"
     difficulty: str = "medium"
     count: int = Field(default=5, ge=1, le=10)
+    subject: Optional[str] = None
+    chapter: Optional[str] = None
+    system_guardrail: Optional[str] = None
+    strict_grounding: bool = False
+    retrieval_required: bool = False
+    fallback_to_general_knowledge: bool = True
+    required_not_found_response: Optional[str] = None
+    include_source: bool = False
+    require_four_options: bool = True
+    require_explanation: bool = True
 
 
 class GenerateProbableRequest(BaseModel):
@@ -360,6 +380,27 @@ class GenerateProbableRequest(BaseModel):
     section_id: Optional[str] = None
     session_id: str = "probable-session"
     difficulty: str = "medium"
+    subject: Optional[str] = None
+    chapter: Optional[str] = None
+    system_guardrail: Optional[str] = None
+    strict_grounding: bool = False
+    retrieval_required: bool = False
+    fallback_to_general_knowledge: bool = True
+    required_not_found_response: Optional[str] = None
+    include_source: bool = False
+
+
+class ArtifactGenerateRequest(BaseModel):
+    section_id: str
+    topic: Optional[str] = None
+    artifact_type: str = "auto"
+    subject: Optional[str] = None
+    chapter: Optional[str] = None
+    system_guardrail: Optional[str] = None
+    strict_grounding: bool = False
+    retrieval_required: bool = False
+    fallback_to_general_knowledge: bool = True
+    required_not_found_response: Optional[str] = None
 
 
 class SubmitSessionRequest(BaseModel):
@@ -377,7 +418,17 @@ class SubmitSessionRequest(BaseModel):
 
 # ================= HELPERS =================
 def normalize_topic(topic: str) -> str:
-    return (topic or "unknown").strip().lower()
+    cleaned = (topic or "unknown").strip().lower()
+    cleaned = re.sub(r"[^a-z0-9]+", "_", cleaned).strip("_")
+    aliases = {
+        "basic_concepts_of_chemistry": "matter_definition",
+        "basic_concept_of_chemistry": "matter_definition",
+        "matter": "matter_definition",
+        "hydrocarbon": "alkanes",
+        "hydrocarbons": "alkanes",
+        "aromatic_hydrocarbons": "aromatics",
+    }
+    return aliases.get(cleaned, cleaned)
 
 
 def get_or_create_progress(db: Session, user_id: str) -> UserProgress:
@@ -596,12 +647,15 @@ def section_ai(
     request: SectionAIRequest,
     _current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
+    section_id = normalize_topic(request.section_id)
     answer = section_doubt(
         question=request.question,
-        section_id=request.section_id,
+        section_id=section_id,
         session_id=request.session_id,
         mode=request.mode,
         difficulty=request.difficulty,
+        strict_grounding=request.strict_grounding or request.retrieval_required,
+        required_not_found_response=request.required_not_found_response,
     )
     return {"answer": answer}
 
@@ -622,6 +676,9 @@ def generate_mcqs(
         session_id=request.session_id,
         difficulty=request.difficulty,
         count=request.count,
+        strict_grounding=request.strict_grounding or request.retrieval_required,
+        required_not_found_response=request.required_not_found_response,
+        include_source=request.include_source,
     )
 
 
@@ -637,7 +694,27 @@ def generate_probable_questions(
         section_id=section_id,
         session_id=request.session_id,
         difficulty=request.difficulty,
+        strict_grounding=request.strict_grounding or request.retrieval_required,
+        required_not_found_response=request.required_not_found_response,
+        include_source=request.include_source,
     )
+
+
+@app.post("/artifacts/generate")
+def generate_artifacts(
+    request: ArtifactGenerateRequest,
+    _current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    section_id = normalize_topic(request.section_id or request.topic or "")
+    try:
+        return generate_study_artifacts(
+            section_id=section_id,
+            topic=request.topic,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 # =====================================================
@@ -728,15 +805,24 @@ def coach_chat(
     class CoachRequest:
         def __init__(self):
             self.user_id = payload.user_id
-            self.question = payload.message
-            self.section_id = payload.topic or payload.subject or "general"
+            self.question = (payload.original_message or payload.message).strip()
+            self.raw_message = payload.message
+            self.original_message = payload.original_message
+            self.grounding_context_prompt = payload.grounding_context_prompt
+            self.section_id = payload.section_id or payload.topic or payload.subject or "general"
             self.session_id = payload.session_id or f"coach-{payload.user_id}"
             self.mode = "coach"
             self.intent = payload.intent
             self.difficulty = "medium"
             self.subject = payload.subject
+            self.chapter = payload.chapter
             self.topic = payload.topic
             self.mentor_directive = payload.mentor_directive
+            self.system_guardrail = payload.system_guardrail
+            self.strict_grounding = payload.strict_grounding
+            self.retrieval_required = payload.retrieval_required
+            self.fallback_to_general_knowledge = payload.fallback_to_general_knowledge
+            self.required_not_found_response = payload.required_not_found_response
             self.student_state = payload.student_state
             self.adaptive_strategy = payload.adaptive_strategy
             self.learning_context = payload.learning_context
@@ -762,15 +848,24 @@ async def coach_chat_stream(
     class CoachRequest:
         def __init__(self):
             self.user_id = payload.user_id
-            self.question = payload.message
-            self.section_id = payload.topic or payload.subject or "general"
+            self.question = (payload.original_message or payload.message).strip()
+            self.raw_message = payload.message
+            self.original_message = payload.original_message
+            self.grounding_context_prompt = payload.grounding_context_prompt
+            self.section_id = payload.section_id or payload.topic or payload.subject or "general"
             self.session_id = payload.session_id or f"coach-{payload.user_id}"
             self.mode = "coach"
             self.intent = payload.intent
             self.difficulty = "medium"
             self.subject = payload.subject
+            self.chapter = payload.chapter
             self.topic = payload.topic
             self.mentor_directive = payload.mentor_directive
+            self.system_guardrail = payload.system_guardrail
+            self.strict_grounding = payload.strict_grounding
+            self.retrieval_required = payload.retrieval_required
+            self.fallback_to_general_knowledge = payload.fallback_to_general_knowledge
+            self.required_not_found_response = payload.required_not_found_response
             self.student_state = payload.student_state
             self.adaptive_strategy = payload.adaptive_strategy
             self.learning_context = payload.learning_context
