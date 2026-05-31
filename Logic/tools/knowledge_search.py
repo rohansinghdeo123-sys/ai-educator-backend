@@ -19,6 +19,8 @@ SECTION_FILE_MAP = {
 }
 
 BASICS_PATH = os.path.join(BASE_DIR, "data", "datachemistry_basics.txt")
+DEFAULT_GRAPH_PATH = os.path.join(BASE_DIR, "data", "Chapters", "basic_concepts_of_chemistry.json")
+DEFAULT_GRAPH_CHAPTER = "basic-concepts-of-chemistry"
 
 STOPWORDS = {
     "what", "is", "the", "of", "define", "explain", "write", "give",
@@ -50,6 +52,18 @@ SECTION_ALIASES = {
     "hydrocarbons": "alkanes",
     "aromatic_hydrocarbons": "aromatics",
 }
+
+
+def ensure_default_knowledge_graph_loaded() -> None:
+    """Load bundled graph content for entry points that do not import main.py."""
+    if knowledge_graph.concepts or not os.path.exists(DEFAULT_GRAPH_PATH):
+        return
+
+    try:
+        knowledge_graph.load_chapter(DEFAULT_GRAPH_PATH, DEFAULT_GRAPH_CHAPTER)
+        logger.info("Loaded bundled knowledge graph: %s", DEFAULT_GRAPH_CHAPTER)
+    except Exception as exc:
+        logger.warning("Could not load bundled knowledge graph: %s", exc)
 
 
 def _normalize(text: str) -> str:
@@ -253,6 +267,7 @@ def search_knowledge_base(
             }
 
     # ── Step 2: Knowledge Graph fallback ──────────────────────────────
+    ensure_default_knowledge_graph_loaded()
     if knowledge_graph.concepts:
         concept = _find_exact_graph_concept(section_id)
 

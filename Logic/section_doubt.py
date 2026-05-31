@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from Logic.agent_router import route_to_agent
 from Logic.agents.tutor_agent import reset_tutor_session
+from Logic.knowledge_graph import knowledge_graph
 from Logic.tools.knowledge_search import search_knowledge_base
 
 logger = logging.getLogger("ai_educator.section_doubt")
@@ -377,6 +378,194 @@ def parse_text_mcqs(text: str, count: int = 5) -> List[Dict[str, Any]]:
     return parsed
 
 
+def _clean_grounded_fact(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = re.sub(r"^[#>\-\d\.\)\s]+", "", text).strip()
+    text = re.sub(r"^\*\*([^*]+):?\*\*\s*:?\s*", r"\1: ", text)
+    text = re.sub(r"^(definition|explanation):\s*", "", text, flags=re.IGNORECASE)
+    return text.strip(" -")
+
+
+def _append_unique_fact(facts: List[str], value: Any, limit: int = 18) -> None:
+    text = _clean_grounded_fact(value)
+    words = re.findall(r"[A-Za-z0-9]+", text)
+    lowered = text.lower()
+    if len(text) < 18 or len(text) > 260 or len(words) < 5:
+        return
+    if text.endswith(("?", ":")) or re.match(r"""^['"]""", text):
+        return
+    if re.match(r"^[A-Z]\.\s+", text):
+        return
+    if lowered.startswith(("why ", "how ", "what ", "which ", "when ", "where ", "who ", "meaning ")):
+        return
+    if " meaning " in f" {lowered} " and len(words) < 8:
+        return
+
+    if lowered.startswith(("source:", "section content:", "common mistakes:", "key points:", "examples:", "formulas:")):
+        return
+    if lowered in {item.lower() for item in facts}:
+        return
+    if len(facts) < limit:
+        facts.append(text)
+
+
+def collect_grounded_facts(search_result: Dict[str, Any], section_id: str) -> List[str]:
+    """Extract compact, traceable facts for deterministic exam recovery."""
+    facts: List[str] = []
+    concept = knowledge_graph.get_concept(section_id)
+
+    if concept:
+        _append_unique_fact(facts, concept.get("definition"))
+        _append_unique_fact(facts, concept.get("core_explanation"))
+        for field in ("key_points", "properties", "formulas", "examples", "applications"):
+            for item in concept.get(field, []) or []:
+                _append_unique_fact(facts, item)
+
+    context = str(search_result.get("context") or "")
+    for line in re.split(r"[\r\n]+", context):
+        _append_unique_fact(facts, line)
+
+    if len(facts) < 8:
+        for sentence in re.split(r"(?<=[.!?])\s+", context):
+            _append_unique_fact(facts, sentence)
+
+    return facts
+
+
+_DISTRACTOR_SWAPS = (
+    ("single", "double"),
+    ("double", "triple"),
+    ("triple", "single"),
+    ("saturated", "unsaturated"),
+    ("unsaturated", "saturated"),
+    ("increase", "decrease"),
+    ("decrease", "increase"),
+    ("higher", "lower"),
+    ("lower", "higher"),
+    ("solids", "gases"),
+    ("liquids", "solids"),
+    ("gases", "liquids"),
+    ("solid", "gas"),
+    ("liquid", "solid"),
+    ("gas", "liquid"),
+    ("carbon and hydrogen", "oxygen and nitrogen"),
+    ("mass", "temperature"),
+    ("volume", "colour"),
+)
+
+
+def _mutate_fact(fact: str, variant: int, topic: str) -> str:
+    lowered = fact.lower()
+    for index, (source, replacement) in enumerate(_DISTRACTOR_SWAPS):
+        pattern = rf"\b{re.escape(source)}\b"
+        if re.search(pattern, lowered) and index % 3 == variant % 3:
+            return re.sub(
+                pattern,
+                lambda match: replacement.capitalize() if match.group(0)[0].isupper() else replacement,
+                fact,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+
+    for source, replacement in (
+        (" are ", " are not "),
+        (" is ", " is not "),
+        (" have ", " do not have "),
+        (" has ", " does not have "),
+        (" can ", " cannot "),
+    ):
+        if source in lowered:
+            return re.sub(re.escape(source), replacement, fact, count=1, flags=re.IGNORECASE)
+
+    fallbacks = (
+        f"No defining property, example, or application for {topic} is given in the selected material.",
+        f"The selected material treats {topic} as unrelated to the chapter concept.",
+        f"No descriptive feature for {topic} is associated with this chapter.",
+    )
+    return fallbacks[variant % len(fallbacks)]
+
+
+def build_grounded_fallback_mcqs(
+    search_result: Dict[str, Any],
+    topic: str,
+    section_id: str,
+    count: int,
+) -> List[Dict[str, Any]]:
+    facts = collect_grounded_facts(search_result, section_id)
+    if not facts:
+        return []
+
+    question_stems = (
+        "Which statement correctly describes {topic}?",
+        "Which property of {topic} is stated in the selected material?",
+        "Choose the correct statement about {topic}.",
+        "Which option matches the chapter explanation of {topic}?",
+        "Which fact about {topic} should you remember for an exam?",
+    )
+    questions: List[Dict[str, Any]] = []
+    for index in range(count):
+        fact = facts[index % len(facts)]
+        correct_position = index % 4
+        options: List[str] = []
+        for variant in range(index + 1, index + 16):
+            candidate = _mutate_fact(fact, variant, topic)
+            if candidate.lower() != fact.lower() and candidate.lower() not in {item.lower() for item in options}:
+                options.append(candidate)
+            if len(options) == 3:
+                break
+        if len(options) < 3:
+            for candidate in (
+                f"No defining property, example, or application for {topic} is given in the selected material.",
+                f"The selected material treats {topic} as unrelated to the chapter concept.",
+                f"No descriptive feature for {topic} is associated with this chapter.",
+            ):
+                if candidate.lower() != fact.lower() and candidate.lower() not in {item.lower() for item in options}:
+                    options.append(candidate)
+                if len(options) == 3:
+                    break
+        options = options[:3]
+        options.insert(correct_position, fact)
+        questions.append(
+            {
+                "id": f"Q{index + 1}",
+                "question": question_stems[index % len(question_stems)].format(topic=topic),
+                "options": [f"{chr(65 + option_index)}. {text}" for option_index, text in enumerate(options)],
+                "correct": chr(65 + correct_position),
+                "explanation": f"The selected study material states: {fact}",
+                "source": section_id,
+            }
+        )
+
+    return questions
+
+
+def build_grounded_fallback_probable_questions(
+    search_result: Dict[str, Any],
+    topic: str,
+    section_id: str,
+) -> List[Dict[str, Any]]:
+    facts = collect_grounded_facts(search_result, section_id)
+    if not facts:
+        return []
+
+    prompts = [
+        f"Define {topic} and state its central idea.",
+        f"State three important points about {topic}.",
+        f"Explain this statement from the selected material: {facts[min(1, len(facts) - 1)]}",
+        f"Write a detailed note on {topic} using the important properties, examples, or applications in the selected material.",
+        f"Explain {topic} in detail and connect the major points given in the selected study material.",
+    ]
+    return [
+        {
+            "id": f"Q{index + 1}",
+            "marks": 3 if index < 3 else 5,
+            "question": prompt,
+            "source": section_id,
+        }
+        for index, prompt in enumerate(prompts)
+    ]
+
+
 def build_mcq_instruction(topic: str, difficulty: str, count: int) -> str:
     return f"""
 Generate exactly {count} high-quality Class 11 Chemistry MCQs for topic: {topic}.
@@ -462,7 +651,6 @@ def generate_structured_mcqs(
     )
 
     questions = normalize_mcq_questions(payload, safe_count)
-
     if len(questions) < safe_count:
         if isinstance(raw, dict):
             fallback_text = raw.get("answer") or json.dumps(raw)
@@ -471,6 +659,24 @@ def generate_structured_mcqs(
         fallback_questions = parse_text_mcqs(fallback_text, safe_count)
         if len(fallback_questions) > len(questions):
             questions = fallback_questions
+
+    generated_count = len(questions)
+    fallback_used = len(questions) < safe_count
+    if fallback_used:
+        grounded_fallback = build_grounded_fallback_mcqs(
+            search_result=search_result,
+            topic=safe_topic,
+            section_id=safe_section_id,
+            count=safe_count,
+        )
+        existing_ids = {item.get("id") for item in questions}
+        for item in grounded_fallback:
+            if len(questions) >= safe_count:
+                break
+            if item.get("id") in existing_ids:
+                item = {**item, "id": f"Q{len(questions) + 1}"}
+            questions.append(item)
+            existing_ids.add(item.get("id"))
 
     for item in questions:
         if include_source or not item.get("source"):
@@ -482,7 +688,7 @@ def generate_structured_mcqs(
             "section_id": safe_section_id,
             "difficulty": safe_difficulty,
             "questions": [],
-            "error": "I could not generate enough grounded MCQs from your selected study material. Please upload or select the correct chapter/data.",
+            "error": "The selected study material does not contain enough usable facts to create an exam pack.",
             "raw_answer": "",
         }
 
@@ -492,6 +698,8 @@ def generate_structured_mcqs(
         "difficulty": safe_difficulty,
         "questions": questions[:safe_count],
         "raw_answer": "" if questions else str(raw or ""),
+        "fallback_used": fallback_used,
+        "model_questions": generated_count,
     }
 
 
@@ -620,12 +828,28 @@ def generate_structured_probable_questions(
     )
 
     questions = normalize_probable_questions(payload)
+    generated_count = len(questions)
+    fallback_used = len(questions) < 5
+    if fallback_used:
+        grounded_fallback = build_grounded_fallback_probable_questions(
+            search_result=search_result,
+            topic=safe_topic,
+            section_id=safe_section_id,
+        )
+        existing_ids = {item.get("id") for item in questions}
+        for item in grounded_fallback:
+            if len(questions) >= 5:
+                break
+            if item.get("id") in existing_ids:
+                item = {**item, "id": f"Q{len(questions) + 1}"}
+            questions.append(item)
+            existing_ids.add(item.get("id"))
 
     for item in questions:
         if include_source or not item.get("source"):
             item["source"] = item.get("source") or safe_section_id
 
-    if strict_grounding and not questions:
+    if strict_grounding and len(questions) < 5:
         return {
             "topic": safe_topic,
             "section_id": safe_section_id,
@@ -643,4 +867,6 @@ def generate_structured_probable_questions(
         "questions": questions,
         "text": format_probable_text(questions),
         "raw_answer": "" if questions else str(raw or ""),
+        "fallback_used": fallback_used,
+        "model_questions": generated_count,
     }
