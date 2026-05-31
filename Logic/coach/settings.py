@@ -14,7 +14,7 @@ class CoachSettings:
     max_retrieval_paragraphs: int = int(os.getenv("COACH_MAX_RETRIEVAL_PARAGRAPHS", "8"))
     memory_limit: int = int(os.getenv("COACH_MEMORY_LIMIT", "6"))
     interaction_limit: int = int(os.getenv("COACH_INTERACTION_LIMIT", "8"))
-    strict_grounding_default: bool = os.getenv("COACH_STRICT_GROUNDING", "true").lower() != "false"
+    strict_grounding_default: bool = os.getenv("COACH_STRICT_GROUNDING", "false").lower() == "true"
     not_found_message: str = os.getenv(
         "COACH_NOT_FOUND_MESSAGE",
         "I could not find this in your study material. Please upload or select the correct chapter/data.",

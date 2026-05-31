@@ -43,9 +43,14 @@ API routes, but its internal services are split into focused modules under
   student friendliness, formatting, and hallucination risk.
 - `observability.py` records structured coach metrics through the event bus.
 
-### Database-only answer policy
+### Reasoning-first answer policy
 
-The coach must answer curriculum questions only from ingested platform data.
-If open Coach mode cannot route a question to a stored source, or selected mode
-cannot find the requested section, it returns the configured not-found message.
-It never falls back to general model knowledge.
+Open Coach mode resolves intent, follow-up context, memory, and teaching
+strategy before answering. It uses reliable model reasoning by default and
+invokes RAG only when source-grounded study material is useful or explicitly
+requested. Retrieval is tracked as `none`, `optional`, or `required`.
+
+Revision, Exam, and Artifact workspaces remain strict material-grounded flows.
+When a student explicitly asks Open Coach to answer from notes, textbook data,
+or uploaded material, Open Coach also switches to strict grounding and returns
+the configured not-found message if the requested source is unavailable.
