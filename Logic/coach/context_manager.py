@@ -16,6 +16,7 @@ def build_compact_context(
     recent_messages: Iterable[Dict[str, Any]] = (),
     memory_summary: str = "",
     student_state: Dict[str, Any] | None = None,
+    lesson_memory: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     if isinstance(retrieval, dict):
         retrieval = RetrievalResult(
@@ -50,5 +51,6 @@ def build_compact_context(
         },
         "recent_messages": messages,
         "memory_summary": _trim(memory_summary, 900),
+        "lesson_memory": lesson_memory or {},
         "student_state": student_state or {},
     }

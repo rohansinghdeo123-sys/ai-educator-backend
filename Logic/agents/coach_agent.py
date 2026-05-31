@@ -20,15 +20,24 @@ from Logic.agent_event_bus import event_bus
 from Logic.analytics_engine import get_user_analytics
 from Logic.coach import (
     build_coach_plan,
+    build_adaptive_answer_blocks,
     build_compact_context,
     coach_observability,
     coach_settings,
     coach_tool_registry,
     llm_router,
+    parse_semantic_event,
+    resolve_hybrid_query,
     score_coach_answer,
+    semantic_event,
     understand_query,
 )
-from Logic.coach.memory_store import build_memory_summary, interaction_messages
+from Logic.coach.memory_store import (
+    build_layered_lesson_memory,
+    build_memory_summary,
+    format_layered_lesson_memory,
+    interaction_messages,
+)
 from Logic.knowledge_graph import knowledge_graph
 from models import (
     AICoachDailySignal,
@@ -1305,6 +1314,9 @@ LONG-TERM STUDENT GUIDANCE:
 COACH MEMORY:
 {conversation_context.get("durable_memory", "No durable memory yet.")}
 
+LAYERED LESSON MEMORY:
+{conversation_context.get("lesson_memory_prompt", "No layered lesson memory yet.")}
+
 SELECTED STUDY SCOPE:
 Retrieval policy: {retrieval_policy}
 Subject: {material_scope.get("subject") or "unknown"}
@@ -1664,345 +1676,45 @@ def run_daily_learning_cycle(db, user_id: str) -> AICoachDailySignal:
     return signal
 
 
-def coach_agent(request, db=None) -> dict:
-    start_time = time.time()
 
-    if db is None:
+def coach_agent(request, db=None) -> dict:
+    """Run the same canonical turn engine used by SSE clients and return its final snapshot."""
+    completed: Dict[str, Any] = {}
+    fallback_answer = ""
+    for frame in coach_agent_stream(request, db=db):
+        event = parse_semantic_event(frame)
+        if event.get("event") == "answer.completed":
+            completed = event
+            fallback_answer = str(event.get("answer") or "")
+        elif not completed and str(frame or "").startswith("data: ") and not event:
+            fallback_answer = str(frame or "")[6:].strip()
+
+    if completed:
+        snapshot = completed.get("snapshot") or {}
         return {
             "type": "coach",
-            "answer": "Coach needs database access to personalize advice.",
-            "metadata": {"agent": "coach", "status": "db_required"},
+            "answer": fallback_answer,
+            "answer_blocks": completed.get("blocks") or [],
+            **snapshot,
+            "metadata": {
+                "agent": "coach",
+                "turn_id": completed.get("turn_id"),
+                **(completed.get("metadata") or {}),
+            },
         }
-
-    user_id = getattr(request, "user_id", None) or getattr(request, "session_id", "anonymous")
-    question = getattr(request, "question", "")
-    session_id = getattr(request, "session_id", f"coach-{user_id}")
-    intent = getattr(request, "intent", "general")
-    mode = getattr(request, "mode", "coach")
-    adaptive_context = _build_adaptive_context_from_request(request)
-    query_understanding = understand_query(question, declared_intent=intent)
-    intent = query_understanding.intent
-    answer_format = _detect_answer_format(question, intent=intent, mode=mode)
-
-    event_bus.emit(
-        "coach",
-        "task_start",
-        {
-            "task": f"Coach advice: {question[:60]}...",
-            "message": f"Loading personal coach for user {user_id}",
-            "user_id": user_id,
-        },
-        session_id=session_id,
-    )
-
-    coach = get_or_create_coach(db, user_id)
-    progress = _build_progress_snapshot(db, user_id)
-    topic_snapshot = _get_topic_snapshot(db, user_id)
-    recent_sessions = _build_recent_session_snapshot(_get_recent_sessions(db, user_id))
-    memories = _get_recent_memories(db, coach.coach_id)
-    recent_interactions = _get_recent_interactions(db, coach.coach_id, session_id=session_id)
-    query_understanding = understand_query(
-        question,
-        declared_intent=intent,
-        has_history=bool(recent_interactions),
-    )
-    intent = query_understanding.intent
-    answer_format = _detect_answer_format(question, intent=intent, mode=mode)
-    coach_plan = build_coach_plan(query_understanding)
-    conversation_context = _build_conversation_context(
-        question=question,
-        coach=coach,
-        interactions=recent_interactions,
-        memories=memories,
-    )
-    conversation_context = _merge_frontend_context(conversation_context, adaptive_context)
-    retrieval_policy = _retrieval_policy(
-        request,
-        query_understanding,
-        adaptive_context,
-        previous_policy=_previous_retrieval_policy(recent_interactions),
-    )
-    query_understanding = _apply_effective_retrieval_policy(query_understanding, retrieval_policy)
-    coach_plan = build_coach_plan(query_understanding)
-    strict_grounding = retrieval_policy == "required"
-    retrieved_material = (
-        _retrieve_selected_material(request, adaptive_context, conversation_context)
-        if retrieval_policy != "none"
-        else None
-    )
-    material_is_supported = (
-        _material_supports_question(retrieved_material, adaptive_context, conversation_context)
-        if retrieved_material is not None
-        else True
-    )
-    assistance_blocks = _build_assistance_blocks(question, answer_format)
-    lightweight_reply = _build_lightweight_conversation_reply(question, conversation_context)
-    compact_context = build_compact_context(
-        query=query_understanding,
-        retrieval=retrieved_material or {},
-        recent_messages=interaction_messages(recent_interactions),
-        memory_summary=build_memory_summary(memories, recent_interactions),
-        student_state=adaptive_context["student_state"],
-    )
-    learning_blueprint = (
-        "- Conversational input detected. Reply naturally and do not continue the previous lesson unless the student asks."
-        if lightweight_reply
-        else "- No matching ingested study source was found. Return the required material-not-found response without adding outside facts."
-        if strict_grounding and not material_is_supported
-        else _run_learning_intelligence_agent(
-            question=question,
-            intent=intent,
-            answer_format=answer_format,
-            adaptive_context=adaptive_context,
-            conversation_context=conversation_context,
-            retrieval_policy=retrieval_policy,
-        )
-    )
-
-    try:
-        analytics_snapshot = get_user_analytics(db, user_id)
-    except Exception:
-        analytics_snapshot = {}
-
-    recommendation = _make_rule_based_recommendation(
-        progress=progress,
-        weak_topics=topic_snapshot["weak_topics"],
-        recent_sessions=recent_sessions,
-    )
-
-    if lightweight_reply:
-        answer = lightweight_reply
-    elif strict_grounding and not material_is_supported:
-        answer = _material_not_found(adaptive_context)
-    else:
-        if intent == "planning":
-            system_prompt = _build_planning_prompt(
-                coach=coach,
-                progress=progress,
-                topic_snapshot=topic_snapshot,
-                recent_sessions=recent_sessions,
-                memories=memories,
-                analytics_snapshot=analytics_snapshot,
-                recommendation=recommendation,
-                adaptive_context=adaptive_context,
-                learning_blueprint=learning_blueprint,
-            )
-        else:
-            system_prompt = _build_study_prompt(
-                coach=coach,
-                question=question,
-                topic_snapshot=topic_snapshot,
-                answer_format=answer_format,
-                conversation_context=conversation_context,
-                adaptive_context=adaptive_context,
-                learning_blueprint=learning_blueprint,
-                retrieved_material=retrieved_material,
-                strict_grounding=strict_grounding,
-                retrieval_policy=retrieval_policy,
-            )
-
-        try:
-            draft = llm_router.complete(
-                role="tutor",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": question},
-                ],
-                temperature=0.35,
-                max_tokens=700,
-            )
-        except Exception as exc:
-            logger.error("[COACH] Groq API error: %s", exc)
-            draft = _material_not_found(adaptive_context) if strict_grounding else recommendation
-
-        enriched = (
-            _build_complete_answer_from_kg(question)
-            if not strict_grounding and len(draft.strip()) < 50 and _can_answer_definition_locally(question)
-            else draft
-        )
-        reviewed = _review_and_polish_answer(
-            coach=coach,
-            question=question,
-            draft=enriched,
-            intent=intent,
-            answer_format=answer_format,
-            adaptive_context=adaptive_context,
-            learning_blueprint=learning_blueprint,
-            strict_grounding=strict_grounding,
-        )
-        answer = _apply_deterministic_format(reviewed)
-        if len(answer) < 20:
-            answer = draft
-
-    quality_report = score_coach_answer(
-        question=question,
-        answer=answer,
-        retrieved_context=str((retrieved_material or {}).get("context") or ""),
-        strict_grounding=strict_grounding,
-    )
-    if (
-        strict_grounding
-        and quality_report.hallucination_risk >= 0.65
-    ):
-        answer = _material_not_found(adaptive_context)
-        quality_report = score_coach_answer(
-            question=question,
-            answer=answer,
-            retrieved_context=str((retrieved_material or {}).get("context") or ""),
-            strict_grounding=True,
-        )
-    observability = coach_observability.snapshot(
-        query=query_understanding.to_dict(),
-        retrieval={
-            "policy": retrieval_policy,
-            "section_id": str((retrieved_material or {}).get("section_id") or ""),
-            "source": str((retrieved_material or {}).get("source") or ""),
-            "paragraphs_found": int((retrieved_material or {}).get("paragraphs_found") or 0),
-            "supported": material_is_supported,
-        },
-        plan=coach_plan.to_dict(),
-        quality=quality_report.to_dict(),
-    )
-
-    event_bus.emit(
-        "coach",
-        "step",
-        {
-            "step": "memory",
-            "step_num": 3,
-            "total_steps": 4,
-            "message": "Saving coach interaction and updating next best action",
-        },
-        session_id=session_id,
-    )
-
-    coach.daily_strategy = recommendation
-    coach.next_best_action = recommendation
-    coach.last_interaction_at = datetime.utcnow()
-    coach.updated_at = datetime.utcnow()
-    _update_learning_journey_summary(
-        coach=coach,
-        question=question,
-        answer_format=answer_format,
-        topic_snapshot=topic_snapshot,
-        is_follow_up=bool(conversation_context.get("is_follow_up")),
-    )
-
-    _persist_interaction(
-        db=db,
-        coach=coach,
-        role="user",
-        message=question,
-        intent=intent,
-        mode=mode,
-        metadata={
-            "session_id": session_id,
-            "is_follow_up": bool(conversation_context.get("is_follow_up")),
-            "last_student_question": conversation_context.get("last_student_question"),
-            "student_state": adaptive_context["student_state"],
-            "adaptive_strategy": adaptive_context["adaptive_strategy"],
-            "learning_context": adaptive_context["learning_context"],
-            "learning_blueprint": learning_blueprint,
-            "coach_plan": coach_plan.to_dict(),
-            "retrieval_policy": retrieval_policy,
-        },
-    )
-    _persist_interaction(
-        db=db,
-        coach=coach,
-        role="assistant",
-        message=answer,
-        intent=intent,
-        mode=mode,
-        metadata={
-            "session_id": session_id,
-            "progress": progress,
-            "weak_topics": topic_snapshot["weak_topics"][:3],
-            "answer_format": answer_format,
-            "is_follow_up": bool(conversation_context.get("is_follow_up")),
-            "assistance_blocks": assistance_blocks,
-            "student_state": adaptive_context["student_state"],
-            "adaptive_strategy": adaptive_context["adaptive_strategy"],
-            "learning_context": adaptive_context["learning_context"],
-            "mentor_directive_used": bool(adaptive_context.get("mentor_directive")),
-            "learning_blueprint": learning_blueprint,
-            "coach_plan": coach_plan.to_dict(),
-            "retrieval_policy": retrieval_policy,
-            "compact_context": compact_context,
-            "quality": quality_report.to_dict(),
-        },
-        quality_score=quality_report.score,
-    )
-
-    latency_ms = round((time.time() - start_time) * 1000)
-
-    coach_observability.emit(
-        session_id,
-        "metric",
-        message="Coach answer scored and persisted.",
-        query_intent=intent,
-        tools=coach_plan.tools,
-        retrieved_chunks=int((retrieved_material or {}).get("paragraphs_found") or 0),
-        quality_score=quality_report.score,
-        quality_passed=quality_report.passed,
-        latency_ms=latency_ms,
-    )
-
-    event_bus.emit(
-        "coach",
-        "task_complete",
-        {
-            "status": "success",
-            "message": f"Coach response delivered by {coach.coach_name}",
-            "latency_ms": latency_ms,
-            "quality_score": quality_report.score,
-            "quality_passed": quality_report.passed,
-        },
-        session_id=session_id,
-    )
-
     return {
         "type": "coach",
-        "answer": answer,
-        "coach_id": coach.coach_id,
-        "coach_name": coach.coach_name,
-        "next_best_action": coach.next_best_action,
-        "daily_strategy": coach.daily_strategy,
-        "memory_used": [
-            {
-                "title": memory.title,
-                "summary": memory.summary,
-                "importance": memory.importance,
-            }
-            for memory in memories
-        ],
-        "analytics_snapshot": {
-            "progress": progress,
-            "weak_topics": topic_snapshot["weak_topics"],
-            "strong_topics": topic_snapshot["strong_topics"],
-        },
-        "metadata": {
-            "agent": "coach",
-            "latency_ms": latency_ms,
-            "models": _model_metadata(),
-            "answer_format": answer_format,
-            "is_follow_up": bool(conversation_context.get("is_follow_up")),
-            "assistance_blocks": assistance_blocks,
-            "adaptive_teacher": adaptive_context.get("has_signals", False),
-            "learning_blueprint": learning_blueprint,
-            "coach_plan": coach_plan.to_dict(),
-            "retrieval_policy": retrieval_policy,
-            "quality": quality_report.to_dict(),
-            "observability": observability,
-        },
+        "answer": fallback_answer or "The tutor could not complete that response right now. Please try again.",
+        "metadata": {"agent": "coach", "status": "incomplete_turn"},
     }
-
 
 # ─── STREAMING GENERATOR (Base64‑Encoded Answer) ──────────────────────────
 
-def _stage_event(stage: str, status: str, agent: str, title: str, detail: str) -> str:
+def _stage_event(stage: str, status: str, agent: str, title: str, detail: str, turn_id: str = "") -> str:
     payload = {
         "type": "agent_stage",
+        "event": "turn.stage",
+        "turn_id": turn_id,
         "stage": stage,
         "status": status,
         "agent": agent,
@@ -2012,9 +1724,11 @@ def _stage_event(stage: str, status: str, agent: str, title: str, detail: str) -
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def _answer_delta_event(delta: str) -> str:
+def _answer_delta_event(delta: str, turn_id: str = "") -> str:
     payload = {
         "type": "answer_delta",
+        "event": "answer.delta",
+        "turn_id": turn_id,
         "delta": delta,
     }
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -2028,6 +1742,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     user_id = getattr(request, "user_id", None) or getattr(request, "session_id", "anonymous")
     question = getattr(request, "question", "")
     session_id = getattr(request, "session_id", f"coach-{user_id}")
+    turn_id = f"turn_{uuid.uuid4().hex[:12]}"
     intent = getattr(request, "intent", "study_advice")
     mode = getattr(request, "mode", "coach")
     adaptive_context = _build_adaptive_context_from_request(request)
@@ -2035,12 +1750,14 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     intent = query_understanding.intent
     answer_format = _detect_answer_format(question, intent=intent, mode=mode)
 
+    yield semantic_event("turn.started", turn_id=turn_id, session_id=session_id)
     yield _stage_event(
         stage="received",
         status="active",
         agent="Study Desk",
         title="Question received",
         detail="Your doubt is in the tutor workspace. I am preparing the right learning route.",
+        turn_id=turn_id,
     )
     time.sleep(0.12)
     yield _stage_event(
@@ -2049,6 +1766,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         agent="Study Desk",
         title="Question received",
         detail="Question accepted and passed to the learning profiler.",
+        turn_id=turn_id,
     )
     yield _stage_event(
         stage="understanding",
@@ -2056,6 +1774,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         agent="Learning Profiler",
         title=f"Understanding need: {answer_format['label']}",
         detail="Mapping intent, confidence, follow-up context, and likely weak points.",
+        turn_id=turn_id,
     )
 
     coach = get_or_create_coach(db, user_id)
@@ -2064,10 +1783,16 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     recent_sessions = _build_recent_session_snapshot(_get_recent_sessions(db, user_id))
     memories = _get_recent_memories(db, coach.coach_id)
     recent_interactions = _get_recent_interactions(db, coach.coach_id, session_id=session_id)
-    query_understanding = understand_query(
+    query_understanding = resolve_hybrid_query(
         question,
         declared_intent=intent,
         has_history=bool(recent_interactions),
+        classifier=lambda messages: llm_router.complete(
+            role="profiler",
+            messages=messages,
+            temperature=0.05,
+            max_tokens=240,
+        ),
     )
     intent = query_understanding.intent
     answer_format = _detect_answer_format(question, intent=intent, mode=mode)
@@ -2079,6 +1804,14 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         memories=memories,
     )
     conversation_context = _merge_frontend_context(conversation_context, adaptive_context)
+    lesson_memory = build_layered_lesson_memory(
+        coach=coach,
+        memories=memories,
+        interactions=recent_interactions,
+        current_question=question,
+    )
+    conversation_context["lesson_memory"] = lesson_memory
+    conversation_context["lesson_memory_prompt"] = format_layered_lesson_memory(lesson_memory)
     retrieval_policy = _retrieval_policy(
         request,
         query_understanding,
@@ -2106,6 +1839,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         recent_messages=interaction_messages(recent_interactions),
         memory_summary=build_memory_summary(memories, recent_interactions),
         student_state=adaptive_context["student_state"],
+        lesson_memory=lesson_memory,
     )
     if conversation_context.get("is_follow_up") and not lightweight_reply:
         yield _stage_event(
@@ -2114,6 +1848,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             agent="Memory Tutor",
             title="Connecting follow-up",
             detail="Using the recent lesson thread so the answer continues naturally.",
+            turn_id=turn_id,
         )
 
     learning_blueprint = (
@@ -2152,6 +1887,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             if lightweight_reply
             else f"Student need, answer format, and {retrieval_policy} retrieval route selected."
         ),
+        turn_id=turn_id,
     )
     yield _stage_event(
         stage="drafting",
@@ -2167,6 +1903,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 else "Reasoning through the clearest tutor response using lesson context and the selected strategy."
             )
         ),
+        turn_id=turn_id,
     )
 
     # ── Answer source ──────────────────────────────────────────────────
@@ -2241,6 +1978,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             if lightweight_reply
             else "Core explanation is ready for strategy review."
         ),
+        turn_id=turn_id,
     )
     if not lightweight_reply:
         yield _stage_event(
@@ -2249,6 +1987,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             agent="Strategy Tutor",
             title="Refining explanation",
             detail=f"Checking clarity, accuracy, and adaptive {answer_format['label']} structure.",
+            turn_id=turn_id,
         )
         time.sleep(0.12)
         yield _stage_event(
@@ -2257,6 +1996,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             agent="Strategy Tutor",
             title="Refinement complete",
             detail="Review strategy selected for accuracy, depth, and student understanding.",
+            turn_id=turn_id,
         )
     yield _stage_event(
         stage="formatting",
@@ -2264,6 +2004,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         agent="Response Designer",
         title="Formatting response",
         detail="Streaming the final tutor answer into clean learning blocks.",
+        turn_id=turn_id,
     )
 
     streamed_answer = ""
@@ -2295,7 +2036,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 if not delta:
                     continue
                 streamed_answer += delta
-                yield _answer_delta_event(delta)
+                yield _answer_delta_event(delta, turn_id=turn_id)
         except Exception as exc:
             logger.error("[COACH STREAM REVIEW] Groq API error: %s", exc)
 
@@ -2305,7 +2046,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         final_answer = _apply_deterministic_format(final_answer)
         for delta in _iter_text_chunks(final_answer):
             streamed_answer += delta
-            yield _answer_delta_event(delta)
+            yield _answer_delta_event(delta, turn_id=turn_id)
 
     quality_report = score_coach_answer(
         question=question,
@@ -2336,6 +2077,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         plan=coach_plan.to_dict(),
         quality=quality_report.to_dict(),
     )
+    answer_blocks = build_adaptive_answer_blocks(final_answer)
 
     yield _stage_event(
         stage="formatting",
@@ -2343,6 +2085,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         agent="Response Designer",
         title="Format ready",
         detail="The response is structured for easy reading and quick revision.",
+        turn_id=turn_id,
     )
     yield _stage_event(
         stage="delivering",
@@ -2350,6 +2093,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         agent="Tutor Voice",
         title="Delivering answer",
         detail="Finalizing the response in your study chat.",
+        turn_id=turn_id,
     )
     time.sleep(0.25)
     yield _stage_event(
@@ -2358,10 +2102,50 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         agent="Tutor Voice",
         title="Delivered",
         detail="Final answer delivered.",
+        turn_id=turn_id,
     )
     time.sleep(0.2)
 
     # ── Base64‑encode the entire answer to protect newlines ─────────────
+    yield semantic_event(
+        "answer.completed",
+        turn_id=turn_id,
+        answer=final_answer,
+        blocks=answer_blocks,
+        snapshot={
+            "coach_id": coach.coach_id,
+            "coach_name": coach.coach_name,
+            "next_best_action": recommendation,
+            "daily_strategy": recommendation,
+            "memory_used": [
+                {
+                    "title": memory.title,
+                    "summary": memory.summary,
+                    "importance": memory.importance,
+                }
+                for memory in memories
+            ],
+            "analytics_snapshot": {
+                "progress": progress,
+                "weak_topics": topic_snapshot["weak_topics"],
+                "strong_topics": topic_snapshot["strong_topics"],
+            },
+        },
+        metadata={
+            "intent": intent,
+            "answer_format": answer_format,
+            "query": query_understanding.to_dict(),
+            "retrieval_policy": retrieval_policy,
+            "quality": quality_report.to_dict(),
+            "assistance_blocks": assistance_blocks,
+            "adaptive_teacher": adaptive_context.get("has_signals", False),
+            "learning_blueprint": learning_blueprint,
+            "coach_plan": coach_plan.to_dict(),
+            "observability": observability,
+        },
+    )
+
+    # Keep the encoded answer for older clients while the semantic contract rolls out.
     encoded = base64.b64encode(final_answer.encode("utf-8")).decode("ascii")
     yield f"data: {encoded}\n\n"
     yield "data: [DONE]\n\n"
@@ -2420,6 +2204,8 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "coach_plan": coach_plan.to_dict(),
             "retrieval_policy": retrieval_policy,
             "compact_context": compact_context,
+            "lesson_memory": lesson_memory,
+            "answer_blocks": answer_blocks,
             "quality": quality_report.to_dict(),
             "observability": observability,
         },

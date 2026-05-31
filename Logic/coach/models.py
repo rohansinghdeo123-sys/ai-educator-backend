@@ -18,6 +18,9 @@ class QueryUnderstanding:
     needs_quality_review: bool = True
     requested_tools: List[str] = field(default_factory=list)
     anchor_terms: List[str] = field(default_factory=list)
+    topic_shift: bool = False
+    confidence: float = 0.72
+    teaching_strategy: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
