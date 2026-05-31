@@ -62,7 +62,11 @@ from Logic.section_doubt import (
     section_doubt,
 )
 from Logic.knowledge_graph import knowledge_graph
-from Logic.tools.artifact_generator import generate_study_artifacts
+from Logic.tools.artifact_generator import (
+    ARTIFACT_DATA_NOT_AVAILABLE,
+    available_artifact_sections,
+    generate_study_artifacts,
+)
 
 # ── Groq client for casual CEO chats ──
 import groq
@@ -705,16 +709,25 @@ def generate_artifacts(
     request: ArtifactGenerateRequest,
     _current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
-    section_id = normalize_topic(request.section_id or request.topic or "")
+    section_id = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        (request.section_id or request.topic or "").strip().lower(),
+    ).strip("_")
     try:
         return generate_study_artifacts(
             section_id=section_id,
             topic=request.topic,
+            subject=request.subject,
+            chapter=request.chapter,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except LookupError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ARTIFACT_DATA_NOT_AVAILABLE,
+        ) from exc
 
 
 # =====================================================
@@ -950,6 +963,17 @@ def health_check():
         "firebase_admin_ready": FIREBASE_ADMIN_READY,
         "firebase_admin_error": FIREBASE_ADMIN_ERROR,
         "knowledge_graph_chapters": knowledge_graph.list_chapters(),
+        "artifact_sections": available_artifact_sections(),
+        "artifacts_ready": bool(available_artifact_sections()),
+    }
+
+
+@app.get("/artifacts/catalog")
+def artifact_catalog():
+    return {
+        "subject": "Chemistry",
+        "available_sections": available_artifact_sections(),
+        "message": "Artifacts are generated only from ingested platform study data.",
     }
 
 

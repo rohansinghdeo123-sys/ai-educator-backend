@@ -1,18 +1,46 @@
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from Logic.knowledge_graph import knowledge_graph
-from Logic.tools.knowledge_search import search_knowledge_base
+from Logic.tools.knowledge_search import SECTION_FILE_MAP, search_knowledge_base
 
-SECTION_ALIASES = {
-    "basic_concepts_of_chemistry": "matter_definition",
-    "basic_concept_of_chemistry": "matter_definition",
-    "matter": "matter_definition",
-    "hydrocarbon": "alkanes",
-    "hydrocarbons": "alkanes",
-    "aromatic_hydrocarbons": "aromatics",
+ARTIFACT_DATA_NOT_AVAILABLE = "Artifact data not available for this section yet"
+
+HYDROCARBON_ARTIFACT_METADATA = {
+    "alkanes": {
+        "title": "Alkanes",
+        "definition": "Alkanes are saturated hydrocarbons containing only single covalent bonds between carbon atoms.",
+        "core_explanation": "Alkanes contain the maximum possible number of hydrogen atoms. Their structure explains why they are relatively unreactive and why substitution is their characteristic reaction.",
+        "properties": ["Saturated hydrocarbons", "Carbon-carbon single bonds", "General formula CₙH₂ₙ₊₂", "Substitution reactions", "Boiling point rises with molecular mass"],
+        "key_points": ["Open-chain alkanes follow the general formula CₙH₂ₙ₊₂.", "Methane is the simplest alkane.", "Alkanes are also called paraffins because they are relatively unreactive.", "Chain isomerism starts from butane.", "They mainly undergo combustion and substitution reactions."],
+        "examples": ["Methane, ethane, propane, and butane are common examples of alkanes."],
+    },
+    "alkenes": {
+        "title": "Alkenes",
+        "definition": "Alkenes are unsaturated hydrocarbons containing at least one carbon-carbon double bond.",
+        "core_explanation": "The carbon-carbon double bond contains one sigma bond and one pi bond. The weaker pi bond makes alkenes more reactive than alkanes.",
+        "properties": ["Unsaturated hydrocarbons", "Carbon-carbon double bond", "General formula CₙH₂ₙ", "Addition reactions", "Geometrical isomerism"],
+        "key_points": ["Open-chain alkenes with one double bond follow the general formula CₙH₂ₙ.", "The double bond contains one sigma bond and one pi bond.", "Alkenes are more reactive than alkanes.", "They mainly undergo addition reactions.", "Some alkenes show cis-trans isomerism."],
+        "examples": ["Ethene, propene, and but-2-ene are common examples of alkenes."],
+    },
+    "alkynes": {
+        "title": "Alkynes",
+        "definition": "Alkynes are unsaturated hydrocarbons containing at least one carbon-carbon triple bond.",
+        "core_explanation": "The carbon-carbon triple bond contains one sigma bond and two pi bonds. Terminal alkynes also show weak acidic character.",
+        "properties": ["Unsaturated hydrocarbons", "Carbon-carbon triple bond", "General formula CₙH₂ₙ₋₂", "Addition reactions", "Terminal alkynes are weakly acidic"],
+        "key_points": ["Open-chain alkynes with one triple bond follow the general formula CₙH₂ₙ₋₂.", "The triple bond contains one sigma bond and two pi bonds.", "Ethyne is the simplest alkyne.", "Alkynes undergo addition reactions.", "Only terminal alkynes show acidic character."],
+        "examples": ["Ethyne, propyne, and but-2-yne are common examples of alkynes."],
+    },
+    "aromatics": {
+        "title": "Aromatic Hydrocarbons",
+        "definition": "Aromatic hydrocarbons contain a stable ring system such as the benzene ring.",
+        "core_explanation": "Benzene is the central aromatic compound. Its delocalized electrons make the ring unusually stable, so substitution reactions are more common than addition reactions.",
+        "properties": ["Benzene ring", "Delocalized electrons", "Benzene formula C₆H₆", "Resonance stability", "Electrophilic substitution"],
+        "key_points": ["Benzene has the molecular formula C₆H₆.", "Its six carbon atoms form a planar ring.", "Delocalized electrons give benzene extra stability.", "Aromatic hydrocarbons usually undergo substitution reactions.", "Toluene is methylbenzene."],
+        "examples": ["Benzene, toluene, and naphthalene are common aromatic compounds."],
+    },
 }
-
 
 def _as_text(value: Any) -> str:
     if value is None:
@@ -44,21 +72,20 @@ def _short_label(text: str, fallback: str) -> str:
     return " ".join(words[:4])[:34].strip() or fallback
 
 
-def _find_concept(section_id: str, topic: Optional[str]) -> Optional[Dict[str, Any]]:
+def _find_exact_concept(section_id: str, topic: Optional[str]) -> Optional[Dict[str, Any]]:
     concept = knowledge_graph.get_concept(section_id)
     if concept:
         return concept
 
-    search_terms = [
-        topic or "",
-        section_id.replace("_", " "),
-    ]
-    for term in search_terms:
-        if not term.strip():
-            continue
-        matches = knowledge_graph.search_by_keyword(term, limit=1)
-        if matches:
-            return matches[0]
+    normalized_topic = re.sub(r"[^a-z0-9]+", "_", (topic or "").strip().lower()).strip("_")
+    for candidate in knowledge_graph.concepts.values():
+        candidate_title = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            _as_text(candidate.get("title")).lower(),
+        ).strip("_")
+        if normalized_topic and candidate_title == normalized_topic:
+            return candidate
 
     return None
 
@@ -79,6 +106,70 @@ def _first_sentence(value: str, fallback: str) -> str:
     return (match.group(1) if match else cleaned[:220]).strip()
 
 
+def _extract_formulas(context: str) -> List[str]:
+    formula_tokens = re.compile(
+        r"(?:[A-Z][a-z]?(?:[\u2080-\u2089\u20990-9\u208a\u208b+\-]*)){2,}"
+    )
+    general_hydrocarbon_tokens = re.compile(
+        r"C(?:n|\u2099)?H(?:n|[\u2080-\u2089\u20990-9\u208a\u208b+\-])+"
+    )
+    bond_tokens = re.compile(r"C\s*(?:=|\u2261)\s*C")
+    reaction_marker = re.compile(r"(?:\u2192|->)")
+    general_formulas: List[str] = []
+    standalone_formulas: List[str] = []
+    reactions: List[str] = []
+    bond_formulas: List[str] = []
+
+    def add(bucket: List[str], value: str) -> None:
+        cleaned = _strip_markdown(value).replace("\\", "").strip(" -:;,.")
+        if cleaned and cleaned not in bucket:
+            bucket.append(cleaned)
+
+    for raw_line in context.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        plain_line = _strip_markdown(line)
+        chemical_tokens = formula_tokens.findall(plain_line) + general_hydrocarbon_tokens.findall(plain_line)
+        meaningful_tokens = [
+            token
+            for token in chemical_tokens
+            if re.search(r"[\u2080-\u2089\u2099n0-9]", token)
+        ]
+        for match in general_hydrocarbon_tokens.findall(plain_line):
+            if "n" in match or "\u2099" in match:
+                add(general_formulas, match)
+
+        if reaction_marker.search(plain_line) and len(plain_line) <= 120:
+            left, right = reaction_marker.split(plain_line, maxsplit=1)
+            left_has_formula = bool(formula_tokens.search(left) or general_hydrocarbon_tokens.search(left))
+            right_has_formula = bool(formula_tokens.search(right) or general_hydrocarbon_tokens.search(right))
+            if left_has_formula and right_has_formula:
+                add(reactions, plain_line)
+                continue
+
+        for match in bond_tokens.findall(plain_line):
+            add(bond_formulas, match.replace(" ", ""))
+
+        if "formula" in plain_line.lower():
+            for match in meaningful_tokens:
+                add(standalone_formulas, match)
+        else:
+            compact_line = plain_line.replace(" ", "")
+            if general_hydrocarbon_tokens.fullmatch(compact_line) or formula_tokens.fullmatch(compact_line):
+                if re.search(r"[\u2080-\u2089\u2099n0-9]", compact_line):
+                    add(standalone_formulas, compact_line)
+
+        if len(general_formulas) + len(standalone_formulas) + len(reactions) + len(bond_formulas) >= 16:
+            break
+
+    formulas: List[str] = []
+    for formula in general_formulas[:1] + standalone_formulas + reactions + bond_formulas:
+        if formula not in formulas:
+            formulas.append(formula)
+    return formulas[:5]
+
+
 def _markdown_to_concept(section_id: str, topic: Optional[str]) -> Optional[Dict[str, Any]]:
     result = search_knowledge_base(
         section_id=section_id,
@@ -89,6 +180,47 @@ def _markdown_to_concept(section_id: str, topic: Optional[str]) -> Optional[Dict
     context = _as_text(result.get("context"))
     if not context or result.get("error"):
         return None
+
+    source_context = context
+    source_path = SECTION_FILE_MAP.get(section_id)
+    if source_path:
+        try:
+            with open(source_path, "r", encoding="utf-8") as source:
+                source_context = source.read()
+        except FileNotFoundError:
+            pass
+
+    metadata = HYDROCARBON_ARTIFACT_METADATA.get(section_id)
+    if metadata:
+        related_lookup = {
+            "alkanes": ["alkenes", "alkynes", "aromatics"],
+            "alkenes": ["alkanes", "alkynes", "aromatics"],
+            "alkynes": ["alkanes", "alkenes", "aromatics"],
+            "aromatics": ["alkanes", "alkenes", "alkynes"],
+        }
+        return {
+            "concept_id": section_id,
+            **metadata,
+            "formulas": _extract_formulas(source_context),
+            "common_mistakes": [
+                {
+                    "mistake": f"Treating {metadata['title']} as a memorization topic only.",
+                    "correction": "Connect each formula, property, and reaction to the bonding pattern first.",
+                    "frequency": "medium",
+                },
+                {
+                    "mistake": "Confusing similar hydrocarbon families.",
+                    "correction": "Check the bond type first, then apply formula, naming, and reaction rules.",
+                    "frequency": "high",
+                },
+            ],
+            "related_concepts": [
+                {"concept_id": item, "relationship": "related_hydrocarbon"}
+                for item in related_lookup[section_id]
+            ],
+            "prerequisites": [],
+            "_artifact_source": result.get("source", "markdown"),
+        }
 
     title = topic or section_id.replace("_", " ").title()
     heading = next(
@@ -122,14 +254,7 @@ def _markdown_to_concept(section_id: str, topic: Optional[str]) -> Optional[Dict
         if len(key_points) >= 8:
             break
 
-    formulas = []
-    formula_pattern = re.compile(r"(C[₀-₉nNH+\-\d\s]+|C\d*H\d*|[A-Za-z]+\s*=\s*[^.,;\n]+)")
-    for match in formula_pattern.findall(context):
-        formula = _strip_markdown(match)
-        if formula and formula not in formulas:
-            formulas.append(formula)
-        if len(formulas) >= 4:
-            break
+    formulas = _extract_formulas(source_context)
 
     examples = [
         sentence
@@ -382,17 +507,25 @@ def _build_mistake_cards(concept: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def generate_study_artifacts(section_id: str, topic: Optional[str] = None) -> Dict[str, Any]:
+def available_artifact_sections() -> List[str]:
+    return sorted(set(SECTION_FILE_MAP) | set(knowledge_graph.concepts))
+
+
+def generate_study_artifacts(
+    section_id: str,
+    topic: Optional[str] = None,
+    subject: Optional[str] = None,
+    chapter: Optional[str] = None,
+) -> Dict[str, Any]:
     normalized_id = re.sub(r"[^a-z0-9]+", "_", (section_id or "").strip().lower()).strip("_")
-    normalized_id = SECTION_ALIASES.get(normalized_id, normalized_id)
     if not normalized_id:
         raise ValueError("section_id is required.")
 
-    concept = _find_concept(normalized_id, topic)
-    if not concept:
+    concept = _find_exact_concept(normalized_id, topic)
+    if not concept and normalized_id in SECTION_FILE_MAP:
         concept = _markdown_to_concept(normalized_id, topic)
     if not concept:
-        raise LookupError(f"Section '{normalized_id}' was not found in the knowledge graph.")
+        raise LookupError(ARTIFACT_DATA_NOT_AVAILABLE)
 
     title = _as_text(concept.get("title")) or _title_from_concept_id(normalized_id)
     key_points = [_as_text(item) for item in _as_list(concept.get("key_points")) if _as_text(item)]
@@ -400,8 +533,13 @@ def generate_study_artifacts(section_id: str, topic: Optional[str] = None) -> Di
     mistakes = _as_list(concept.get("common_mistakes"))
 
     return {
+        "available": True,
         "source": _as_text(concept.get("_artifact_source")) or "knowledge_graph",
         "section_id": _as_text(concept.get("concept_id")) or normalized_id,
+        "subject": _as_text(subject) or "Chemistry",
+        "chapter": _as_text(chapter),
+        "topic": _as_text(topic) or title,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "title": title,
         "subtitle": _as_text(concept.get("definition")) or _as_text(concept.get("core_explanation")),
         "student_goal": f"Understand {title}, recall the key points, and avoid common exam mistakes.",

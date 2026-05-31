@@ -118,14 +118,9 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
     concept_data = ""
     concepts_found = []
     if knowledge_graph.concepts:
-        # Look for an exact concept_id match or keyword search
         exact = knowledge_graph.get_concept(section_id)
         if exact:
             concepts_found = [exact]
-        else:
-            keywords = [w.strip().lower() for w in question.replace("?", "").replace(".", "").split() if len(w) > 3]
-            search_kw = keywords[0] if keywords else section_id
-            concepts_found = knowledge_graph.search_by_keyword(search_kw, limit=5)
 
         if concepts_found:
             blocks = []
