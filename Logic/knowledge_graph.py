@@ -57,15 +57,57 @@ class KnowledgeGraph:
         Simple full‑text search in title and core_explanation.
         Used by AI agents to quickly find relevant concepts.
         """
-        results = []
-        keyword_lower = keyword.lower()
+        stopwords = {
+            "what", "why", "how", "explain", "define", "describe", "tell", "give",
+            "with", "from", "about", "than", "more", "less", "into", "this", "that",
+            "these", "those", "your", "please", "simple", "simply", "the", "and",
+            "are", "was", "were", "for", "does", "can",
+        }
+        query_terms = {
+            term
+            for term in keyword.lower().replace("_", " ").split()
+            if len(term) > 2 and term not in stopwords
+        }
+        if not query_terms:
+            return []
+
+        scored = []
         for concept in self.concepts.values():
-            if (keyword_lower in concept.get("title", "").lower() or
-                keyword_lower in concept.get("core_explanation", "").lower()):
-                results.append(concept)
-                if len(results) >= limit:
-                    break
-        return results
+            title = str(concept.get("title", "")).lower()
+            concept_id = str(concept.get("concept_id", "")).lower().replace("_", " ")
+            definition = str(concept.get("definition", "")).lower()
+            explanation = str(concept.get("core_explanation", "")).lower()
+            metadata = " ".join(
+                str(value)
+                for key in (
+                    "key_points",
+                    "examples",
+                    "properties",
+                    "applications",
+                    "formulas",
+                    "prerequisites",
+                    "learning_objectives",
+                )
+                for value in concept.get(key, []) or []
+            ).lower()
+
+            score = 0
+            for term in query_terms:
+                if term in concept_id:
+                    score += 8
+                if term in title:
+                    score += 7
+                if term in definition:
+                    score += 4
+                if term in explanation:
+                    score += 3
+                if term in metadata:
+                    score += 1
+            if score:
+                scored.append((score, concept))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [concept for _, concept in scored[:limit]]
 
     def list_chapters(self) -> List[str]:
         """Return names of all loaded chapters."""

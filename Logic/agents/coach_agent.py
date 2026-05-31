@@ -8,7 +8,6 @@ PERSONAL AI COACH AGENT – Hybrid autonomous architecture
 """
 
 import logging
-import os
 import time
 import uuid
 import base64
@@ -17,12 +16,20 @@ import re
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Generator
 
-from groq import Groq
-
 from Logic.agent_event_bus import event_bus
 from Logic.analytics_engine import get_user_analytics
+from Logic.coach import (
+    build_coach_plan,
+    build_compact_context,
+    coach_observability,
+    coach_settings,
+    coach_tool_registry,
+    llm_router,
+    score_coach_answer,
+    understand_query,
+)
+from Logic.coach.memory_store import build_memory_summary, interaction_messages
 from Logic.knowledge_graph import knowledge_graph
-from Logic.tools.knowledge_search import search_knowledge_base
 from models import (
     AICoachDailySignal,
     AICoachInteraction,
@@ -35,13 +42,12 @@ from models import (
 
 logger = logging.getLogger("ai_educator.agents.coach")
 
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-FAST_MODEL = os.getenv("GROQ_FAST_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
-TUTOR_MODEL = os.getenv("GROQ_TUTOR_MODEL", "openai/gpt-oss-120b")
-REVIEW_MODEL = os.getenv("GROQ_REVIEW_MODEL", "llama-3.3-70b-versatile")
+FAST_MODEL = coach_settings.fast_model
+TUTOR_MODEL = coach_settings.tutor_model
+REVIEW_MODEL = coach_settings.review_model
 MODEL_NAME = TUTOR_MODEL
 
-MATERIAL_NOT_FOUND_MESSAGE = "I could not find this in your study material. Please upload or select the correct chapter/data."
+MATERIAL_NOT_FOUND_MESSAGE = coach_settings.not_found_message
 
 
 COACH_NAMES = [
@@ -177,20 +183,17 @@ def _resolve_retrieval_question(question: str, adaptive_context: Dict[str, Any],
 
 def _retrieve_selected_material(request, adaptive_context: Dict[str, Any], conversation_context: Dict[str, Any]) -> Dict[str, Any]:
     scope = _selected_material_scope(request, adaptive_context)
-    section_id = scope.get("section_id") or scope.get("topic") or scope.get("chapter") or "general"
     retrieval_question = _resolve_retrieval_question(
         question=getattr(request, "question", "") or "",
         adaptive_context=adaptive_context,
         conversation_context=conversation_context,
     )
 
-    result = search_knowledge_base(
-        section_id=section_id,
-        question=retrieval_question or section_id,
-        max_paragraphs=8,
-        max_chars=5000,
-    )
-    result["scope"] = scope
+    result = coach_tool_registry.run(
+        "knowledge_search",
+        question=retrieval_question or scope.get("section_id") or "general",
+        scope=scope,
+    ).to_dict()
     result["retrieval_question"] = retrieval_question
     return result
 
@@ -350,16 +353,20 @@ def _looks_like_follow_up(question: str) -> bool:
     if not q:
         return False
 
-    words = re.findall(r"[a-zA-Z0-9]+", q)
-    if len(words) <= 5:
+    compact = q.rstrip("?.!")
+    exact_followups = {
+        "why", "how", "why is that", "how does that work", "one more example",
+        "practice this", "test me", "test me on this", "quiz me", "quiz me on this",
+    }
+    if compact in exact_followups:
         return True
 
     followup_starts = (
-        "why", "how", "then", "and", "but", "what about", "example",
-        "give example", "more", "simpler", "explain again", "this", "it",
-        "that", "same", "next", "practice", "show",
+        "then", "and", "but", "what about", "example", "give example", "more",
+        "simpler", "explain again", "this", "it", "that", "same", "next",
+        "practice this", "show me",
     )
-    return any(q.startswith(prefix) for prefix in followup_starts)
+    return any(q == prefix or q.startswith(f"{prefix} ") for prefix in followup_starts)
 
 
 def _build_conversation_context(
@@ -977,7 +984,7 @@ Adaptive response rules:
 - Choose the best format for this exact question. Do not reuse identical headings for every answer.
 - Beginner/confused students need simple language, analogy, one example, and one tiny check question.
 - Intermediate students need clean concept breakdown, exam relevance, and common mistake protection.
-- Advanced/curious students need deeper reasoning, mechanism, real-life application, and one edge case if useful.
+- Advanced/curious students need deeper reasoning, mechanism, real-life application, and one edge case only when the retrieved study material contains them.
 - Revision intent needs compact notes, formulas, and recall checkpoints.
 - Exam intent needs marks-ready structure, traps, important question style, and time-saving answer order.
 - Practice intent needs one or more questions, then feedback or a clear next action.
@@ -1043,8 +1050,8 @@ Recent thread:
 {conversation_context.get("recent_thread", "No previous lesson thread.")}
 """.strip()
 
-        response = groq_client.chat.completions.create(
-            model=FAST_MODEL,
+        blueprint = llm_router.complete(
+            role="profiler",
             messages=[
                 {"role": "system", "content": "You create concise private tutoring plans for another AI agent."},
                 {"role": "user", "content": prompt},
@@ -1052,7 +1059,6 @@ Recent thread:
             temperature=0.12,
             max_tokens=280,
         )
-        blueprint = response.choices[0].message.content.strip()
         return blueprint or fallback
     except Exception as exc:
         logger.error("[LEARNING INTELLIGENCE] Groq API error: %s", exc)
@@ -1101,48 +1107,20 @@ def _find_relevant_concept(question: str) -> Optional[Dict[str, Any]]:
 
 
 def _can_answer_definition_locally(question: str) -> bool:
-    terms = _extract_search_terms(question)
-    return "matter" in terms or _find_relevant_concept(question) is not None
+    return _find_relevant_concept(question) is not None
 
 
 def _build_complete_answer_from_kg(question: str) -> str:
-    terms = _extract_search_terms(question)
     concept = _find_relevant_concept(question)
 
-    if not concept and "matter" not in terms:
+    if not concept:
         return ""
 
-    title = concept.get("title", "Matter") if concept else "Matter"
-    definition = (
-        concept.get("definition", "Matter is anything that has mass and occupies space.")
-        if concept
-        else "Matter is anything that has mass and occupies space."
-    )
-    key_points = concept.get("key_points", [
-        "Matter has mass, so it can be measured.",
-        "Matter occupies space, so it has volume.",
-        "Matter is commonly found as solid, liquid, or gas.",
-    ]) if concept else [
-        "Matter has mass, so it can be measured.",
-        "Matter occupies space, so it has volume.",
-        "Matter is commonly found as solid, liquid, or gas.",
-    ]
-    examples = (
-        concept.get("examples", ["A book", "Water in a glass", "Air inside a balloon", "The human body"])
-        if concept
-        else ["A book", "Water in a glass", "Air inside a balloon", "The human body"]
-    )
-    common_mistakes = concept.get("common_mistakes", [
-        {
-            "mistake": "Thinking light, heat, or sound are matter.",
-            "correction": "They are forms of energy; they do not occupy space like matter.",
-        }
-    ]) if concept else [
-        {
-            "mistake": "Thinking light, heat, or sound are matter.",
-            "correction": "They are forms of energy; they do not occupy space like matter.",
-        }
-    ]
+    title = concept.get("title", "Selected concept")
+    definition = concept.get("definition", "")
+    key_points = concept.get("key_points", [])
+    examples = concept.get("examples", [])
+    common_mistakes = concept.get("common_mistakes", [])
 
     mistake_lines = []
     for item in common_mistakes[:3]:
@@ -1156,15 +1134,7 @@ def _build_complete_answer_from_kg(question: str) -> str:
         elif item:
             mistake_lines.append(f"- {item}")
 
-    simple_explanation = (
-        "In simple words, matter is the physical material around us. If something "
-        "has weight or mass and takes up space, it is matter."
-    )
-    if str(title).lower() != "matter":
-        simple_explanation = (
-            f"In simple words, {title} is the idea described above. First learn the "
-            "definition, then connect it with examples and exam points."
-        )
+    simple_explanation = concept.get("core_explanation") or definition
 
     sections = [
         ("Direct Answer", definition),
@@ -1173,12 +1143,10 @@ def _build_complete_answer_from_kg(question: str) -> str:
         ("Examples", "\n".join(f"- {example}" for example in examples[:5])),
         (
             "Common Mistakes",
-            "\n".join(mistake_lines)
-            if mistake_lines
-            else "- Do not memorize only words; understand the property or reason behind the definition.",
+            "\n".join(mistake_lines) if mistake_lines else "",
         ),
-        ("Exam-Ready Answer", f"{title} can be defined as: {definition}"),
-        ("Quick Revision", f"Remember: {definition}"),
+        ("Exam-Ready Answer", f"{title} can be defined as: {definition}" if definition else ""),
+        ("Quick Revision", f"Remember: {definition}" if definition else ""),
     ]
 
     return "\n\n".join(
@@ -1228,11 +1196,9 @@ def _build_study_prompt(
     material_policy = (
         "STRICT STUDY-MATERIAL POLICY:\n"
         "- Answer only from OFFICIAL RETRIEVED STUDY MATERIAL below.\n"
-        "- Do not use general knowledge, memory, or outside chemistry facts.\n"
+        "- Do not use general knowledge, model memory, or outside facts.\n"
         f"- If the material does not contain the answer, reply exactly: {not_found_message}\n"
         "- If the student asks a follow-up, keep the previous topic from the recent lesson thread unless they clearly ask for a new topic."
-        if strict_grounding
-        else "Use retrieved curriculum data when available. If it is missing, answer cautiously."
     )
 
     return f"""
@@ -1288,7 +1254,7 @@ OFFICIAL RETRIEVED STUDY MATERIAL:
 {graph_context if graph_context else not_found_message}
 
 KNOWLEDGE BASE (use this data if it helps):
-{graph_context if graph_context else "No specific curriculum data found – explain from your general knowledge."}
+{graph_context if graph_context else not_found_message}
 
 QUESTION FROM STUDENT:
 {question}
@@ -1393,6 +1359,7 @@ Your job is to transform the draft into the final answer a specialist teacher wo
 
 Review rules:
 - Fix factual errors, vague wording, and missing reasoning.
+- Preserve strict platform-data grounding. Never add facts, examples, formulas, or claims that are not present in the draft or supplied study context.
 - Keep the answer easy to revise from directly.
 - Preserve helpful references to the previous lesson if the student asked a follow-up.
 - Use clear headings ending with a colon.
@@ -1438,8 +1405,8 @@ def _review_and_polish_answer(
 
     try:
         selected_format = answer_format or _detect_answer_format(question, intent=intent)
-        response = groq_client.chat.completions.create(
-            model=REVIEW_MODEL,
+        reviewed = llm_router.complete(
+            role="reviewer",
             messages=[
                 {
                     "role": "system",
@@ -1458,7 +1425,6 @@ def _review_and_polish_answer(
             temperature=0.18,
             max_tokens=850,
         )
-        reviewed = response.choices[0].message.content.strip()
         return reviewed or draft
     except Exception as exc:
         logger.error("[COACH REVIEW] Groq API error: %s", exc)
@@ -1643,6 +1609,8 @@ def coach_agent(request, db=None) -> dict:
     intent = getattr(request, "intent", "general")
     mode = getattr(request, "mode", "coach")
     adaptive_context = _build_adaptive_context_from_request(request)
+    query_understanding = understand_query(question, declared_intent=intent)
+    intent = query_understanding.intent
     answer_format = _detect_answer_format(question, intent=intent, mode=mode)
 
     event_bus.emit(
@@ -1662,6 +1630,14 @@ def coach_agent(request, db=None) -> dict:
     recent_sessions = _build_recent_session_snapshot(_get_recent_sessions(db, user_id))
     memories = _get_recent_memories(db, coach.coach_id)
     recent_interactions = _get_recent_interactions(db, coach.coach_id, session_id=session_id)
+    query_understanding = understand_query(
+        question,
+        declared_intent=intent,
+        has_history=bool(recent_interactions),
+    )
+    intent = query_understanding.intent
+    answer_format = _detect_answer_format(question, intent=intent, mode=mode)
+    coach_plan = build_coach_plan(query_understanding)
     conversation_context = _build_conversation_context(
         question=question,
         coach=coach,
@@ -1669,10 +1645,10 @@ def coach_agent(request, db=None) -> dict:
         memories=memories,
     )
     conversation_context = _merge_frontend_context(conversation_context, adaptive_context)
-    strict_grounding = _strict_grounding_enabled(request, adaptive_context)
+    strict_grounding = _strict_grounding_enabled(request, adaptive_context) or coach_settings.strict_grounding_default
     retrieved_material = (
         _retrieve_selected_material(request, adaptive_context, conversation_context)
-        if strict_grounding
+        if strict_grounding and query_understanding.needs_retrieval
         else None
     )
     material_is_supported = (
@@ -1682,9 +1658,18 @@ def coach_agent(request, db=None) -> dict:
     )
     assistance_blocks = _build_assistance_blocks(question, answer_format)
     lightweight_reply = _build_lightweight_conversation_reply(question, conversation_context)
+    compact_context = build_compact_context(
+        query=query_understanding,
+        retrieval=retrieved_material or {},
+        recent_messages=interaction_messages(recent_interactions),
+        memory_summary=build_memory_summary(memories, recent_interactions),
+        student_state=adaptive_context["student_state"],
+    )
     learning_blueprint = (
         "- Conversational input detected. Reply naturally and do not continue the previous lesson unless the student asks."
         if lightweight_reply
+        else "- No matching ingested study source was found. Return the required material-not-found response without adding outside facts."
+        if strict_grounding and not material_is_supported
         else _run_learning_intelligence_agent(
             question=question,
             intent=intent,
@@ -1750,8 +1735,8 @@ def coach_agent(request, db=None) -> dict:
             )
 
         try:
-            response = groq_client.chat.completions.create(
-                model=TUTOR_MODEL,
+            draft = llm_router.complete(
+                role="tutor",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": question},
@@ -1759,7 +1744,6 @@ def coach_agent(request, db=None) -> dict:
                 temperature=0.35,
                 max_tokens=700,
             )
-            draft = response.choices[0].message.content.strip()
         except Exception as exc:
             logger.error("[COACH] Groq API error: %s", exc)
             draft = _material_not_found(adaptive_context) if strict_grounding else recommendation
@@ -1781,6 +1765,36 @@ def coach_agent(request, db=None) -> dict:
         answer = _apply_deterministic_format(reviewed)
         if len(answer) < 20:
             answer = draft
+
+    quality_report = score_coach_answer(
+        question=question,
+        answer=answer,
+        retrieved_context=str((retrieved_material or {}).get("context") or ""),
+        strict_grounding=strict_grounding and query_understanding.needs_retrieval,
+    )
+    if (
+        strict_grounding
+        and query_understanding.needs_retrieval
+        and quality_report.hallucination_risk >= 0.65
+    ):
+        answer = _material_not_found(adaptive_context)
+        quality_report = score_coach_answer(
+            question=question,
+            answer=answer,
+            retrieved_context=str((retrieved_material or {}).get("context") or ""),
+            strict_grounding=True,
+        )
+    observability = coach_observability.snapshot(
+        query=query_understanding.to_dict(),
+        retrieval={
+            "section_id": str((retrieved_material or {}).get("section_id") or ""),
+            "source": str((retrieved_material or {}).get("source") or ""),
+            "paragraphs_found": int((retrieved_material or {}).get("paragraphs_found") or 0),
+            "supported": material_is_supported,
+        },
+        plan=coach_plan.to_dict(),
+        quality=quality_report.to_dict(),
+    )
 
     event_bus.emit(
         "coach",
@@ -1821,6 +1835,7 @@ def coach_agent(request, db=None) -> dict:
             "adaptive_strategy": adaptive_context["adaptive_strategy"],
             "learning_context": adaptive_context["learning_context"],
             "learning_blueprint": learning_blueprint,
+            "coach_plan": coach_plan.to_dict(),
         },
     )
     _persist_interaction(
@@ -1842,11 +1857,26 @@ def coach_agent(request, db=None) -> dict:
             "learning_context": adaptive_context["learning_context"],
             "mentor_directive_used": bool(adaptive_context.get("mentor_directive")),
             "learning_blueprint": learning_blueprint,
+            "coach_plan": coach_plan.to_dict(),
+            "compact_context": compact_context,
+            "quality": quality_report.to_dict(),
         },
-        quality_score=0.9,
+        quality_score=quality_report.score,
     )
 
     latency_ms = round((time.time() - start_time) * 1000)
+
+    coach_observability.emit(
+        session_id,
+        "metric",
+        message="Coach answer scored and persisted.",
+        query_intent=intent,
+        tools=coach_plan.tools,
+        retrieved_chunks=int((retrieved_material or {}).get("paragraphs_found") or 0),
+        quality_score=quality_report.score,
+        quality_passed=quality_report.passed,
+        latency_ms=latency_ms,
+    )
 
     event_bus.emit(
         "coach",
@@ -1855,8 +1885,8 @@ def coach_agent(request, db=None) -> dict:
             "status": "success",
             "message": f"Coach response delivered by {coach.coach_name}",
             "latency_ms": latency_ms,
-            "quality_score": 0.9,
-            "quality_passed": True,
+            "quality_score": quality_report.score,
+            "quality_passed": quality_report.passed,
         },
         session_id=session_id,
     )
@@ -1890,6 +1920,9 @@ def coach_agent(request, db=None) -> dict:
             "assistance_blocks": assistance_blocks,
             "adaptive_teacher": adaptive_context.get("has_signals", False),
             "learning_blueprint": learning_blueprint,
+            "coach_plan": coach_plan.to_dict(),
+            "quality": quality_report.to_dict(),
+            "observability": observability,
         },
     }
 
@@ -1927,6 +1960,8 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     intent = getattr(request, "intent", "study_advice")
     mode = getattr(request, "mode", "coach")
     adaptive_context = _build_adaptive_context_from_request(request)
+    query_understanding = understand_query(question, declared_intent=intent)
+    intent = query_understanding.intent
     answer_format = _detect_answer_format(question, intent=intent, mode=mode)
 
     yield _stage_event(
@@ -1949,7 +1984,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         status="active",
         agent="Learning Profiler",
         title=f"Understanding need: {answer_format['label']}",
-        detail=f"Mapping intent, confidence, follow-up context, and likely weak points with {FAST_MODEL}.",
+        detail="Mapping intent, confidence, follow-up context, and likely weak points.",
     )
 
     coach = get_or_create_coach(db, user_id)
@@ -1958,6 +1993,14 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     recent_sessions = _build_recent_session_snapshot(_get_recent_sessions(db, user_id))
     memories = _get_recent_memories(db, coach.coach_id)
     recent_interactions = _get_recent_interactions(db, coach.coach_id, session_id=session_id)
+    query_understanding = understand_query(
+        question,
+        declared_intent=intent,
+        has_history=bool(recent_interactions),
+    )
+    intent = query_understanding.intent
+    answer_format = _detect_answer_format(question, intent=intent, mode=mode)
+    coach_plan = build_coach_plan(query_understanding)
     conversation_context = _build_conversation_context(
         question=question,
         coach=coach,
@@ -1965,10 +2008,10 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         memories=memories,
     )
     conversation_context = _merge_frontend_context(conversation_context, adaptive_context)
-    strict_grounding = _strict_grounding_enabled(request, adaptive_context)
+    strict_grounding = _strict_grounding_enabled(request, adaptive_context) or coach_settings.strict_grounding_default
     retrieved_material = (
         _retrieve_selected_material(request, adaptive_context, conversation_context)
-        if strict_grounding
+        if strict_grounding and query_understanding.needs_retrieval
         else None
     )
     material_is_supported = (
@@ -1978,6 +2021,13 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     )
     assistance_blocks = _build_assistance_blocks(question, answer_format)
     lightweight_reply = _build_lightweight_conversation_reply(question, conversation_context)
+    compact_context = build_compact_context(
+        query=query_understanding,
+        retrieval=retrieved_material or {},
+        recent_messages=interaction_messages(recent_interactions),
+        memory_summary=build_memory_summary(memories, recent_interactions),
+        student_state=adaptive_context["student_state"],
+    )
     if conversation_context.get("is_follow_up") and not lightweight_reply:
         yield _stage_event(
             stage="understanding",
@@ -1990,6 +2040,8 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     learning_blueprint = (
         "- Conversational input detected. Reply naturally and do not continue the previous lesson unless the student asks."
         if lightweight_reply
+        else "- No matching ingested study source was found. Return the required material-not-found response without adding outside facts."
+        if strict_grounding and not material_is_supported
         else _run_learning_intelligence_agent(
             question=question,
             intent=intent,
@@ -2029,7 +2081,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         detail=(
             "This is a short conversation turn, so I am not reopening the previous lesson."
             if lightweight_reply
-            else f"Building the first tutor response with {TUTOR_MODEL}."
+            else "Building the first tutor response from verified study material."
         ),
     )
 
@@ -2072,17 +2124,15 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
 
         draft = ""
         try:
-            draft_resp = groq_client.chat.completions.create(
-                model=TUTOR_MODEL,
+            draft = llm_router.complete(
+                role="tutor",
                 messages=[
                     {"role": "system", "content": draft_prompt},
                     {"role": "user", "content": question},
                 ],
                 temperature=0.35,
                 max_tokens=700,
-                stream=False,
             )
-            draft = draft_resp.choices[0].message.content.strip()
         except Exception as exc:
             logger.error("[COACH DRAFT] Groq error: %s", exc)
             fallback = _material_not_found(adaptive_context) if strict_grounding else (
@@ -2116,7 +2166,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             status="active",
             agent="Strategy Tutor",
             title="Refining explanation",
-            detail=f"Checking clarity, accuracy, and adaptive {answer_format['label']} structure with {REVIEW_MODEL}.",
+            detail=f"Checking clarity, accuracy, and adaptive {answer_format['label']} structure.",
         )
         time.sleep(0.12)
         yield _stage_event(
@@ -2137,8 +2187,8 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     streamed_answer = ""
     if should_review_answer:
         try:
-            review_stream = groq_client.chat.completions.create(
-                model=REVIEW_MODEL,
+            review_stream = llm_router.stream(
+                role="reviewer",
                 messages=[
                     {
                         "role": "system",
@@ -2156,7 +2206,6 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 ],
                 temperature=0.18,
                 max_tokens=850,
-                stream=True,
             )
             for chunk in review_stream:
                 delta = getattr(chunk.choices[0].delta, "content", None) or ""
@@ -2174,6 +2223,36 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         for delta in _iter_text_chunks(final_answer):
             streamed_answer += delta
             yield _answer_delta_event(delta)
+
+    quality_report = score_coach_answer(
+        question=question,
+        answer=final_answer,
+        retrieved_context=str((retrieved_material or {}).get("context") or ""),
+        strict_grounding=strict_grounding and query_understanding.needs_retrieval,
+    )
+    if (
+        strict_grounding
+        and query_understanding.needs_retrieval
+        and quality_report.hallucination_risk >= 0.65
+    ):
+        final_answer = _material_not_found(adaptive_context)
+        quality_report = score_coach_answer(
+            question=question,
+            answer=final_answer,
+            retrieved_context=str((retrieved_material or {}).get("context") or ""),
+            strict_grounding=True,
+        )
+    observability = coach_observability.snapshot(
+        query=query_understanding.to_dict(),
+        retrieval={
+            "section_id": str((retrieved_material or {}).get("section_id") or ""),
+            "source": str((retrieved_material or {}).get("source") or ""),
+            "paragraphs_found": int((retrieved_material or {}).get("paragraphs_found") or 0),
+            "supported": material_is_supported,
+        },
+        plan=coach_plan.to_dict(),
+        quality=quality_report.to_dict(),
+    )
 
     yield _stage_event(
         stage="formatting",
@@ -2200,7 +2279,6 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     time.sleep(0.2)
 
     # ── Base64‑encode the entire answer to protect newlines ─────────────
-    import base64
     encoded = base64.b64encode(final_answer.encode("utf-8")).decode("ascii")
     yield f"data: {encoded}\n\n"
     yield "data: [DONE]\n\n"
@@ -2233,6 +2311,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "adaptive_strategy": adaptive_context["adaptive_strategy"],
             "learning_context": adaptive_context["learning_context"],
             "learning_blueprint": learning_blueprint,
+            "coach_plan": coach_plan.to_dict(),
         },
     )
     _persist_interaction(
@@ -2254,8 +2333,23 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "learning_context": adaptive_context["learning_context"],
             "mentor_directive_used": bool(adaptive_context.get("mentor_directive")),
             "learning_blueprint": learning_blueprint,
+            "coach_plan": coach_plan.to_dict(),
+            "compact_context": compact_context,
+            "quality": quality_report.to_dict(),
+            "observability": observability,
         },
-        quality_score=0.9,
+        quality_score=quality_report.score,
+    )
+
+    coach_observability.emit(
+        session_id,
+        "metric",
+        message="Streaming coach answer scored and persisted.",
+        query_intent=intent,
+        tools=coach_plan.tools,
+        retrieved_chunks=int((retrieved_material or {}).get("paragraphs_found") or 0),
+        quality_score=quality_report.score,
+        quality_passed=quality_report.passed,
     )
 
     event_bus.emit(
@@ -2265,8 +2359,8 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "status": "success",
             "message": f"Coach reviewed and delivered by {coach.coach_name}",
             "latency_ms": 0,
-            "quality_score": 0.9,
-            "quality_passed": True,
+            "quality_score": quality_report.score,
+            "quality_passed": quality_report.passed,
         },
         session_id=session_id,
     )
