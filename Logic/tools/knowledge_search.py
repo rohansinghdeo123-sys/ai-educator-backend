@@ -138,6 +138,23 @@ def _build_concept_context(concept: dict) -> str:
     return "\n".join(lines)
 
 
+def _find_exact_graph_concept(section_id: str):
+    concept = knowledge_graph.get_concept(section_id)
+    if concept:
+        return concept
+
+    for candidate in knowledge_graph.concepts.values():
+        title_id = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(candidate.get("title") or "").strip().lower(),
+        ).strip("_")
+        if title_id == section_id:
+            return candidate
+
+    return None
+
+
 def search_knowledge_base(
     section_id: str,
     question: str,
@@ -237,13 +254,7 @@ def search_knowledge_base(
 
     # ── Step 2: Knowledge Graph fallback ──────────────────────────────
     if knowledge_graph.concepts:
-        # Try exact match with section_id as a concept_id
-        concept = knowledge_graph.get_concept(section_id)
-        if not concept:
-            # Try keyword search
-            concepts = knowledge_graph.search_by_keyword(section_id.replace("_", " "), limit=1)
-            if concepts:
-                concept = concepts[0]
+        concept = _find_exact_graph_concept(section_id)
 
         if concept:
             context = _build_concept_context(concept)
