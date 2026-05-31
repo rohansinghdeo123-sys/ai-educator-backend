@@ -10,7 +10,10 @@ class QueryUnderstanding:
     answer_format: str
     is_conversational: bool = False
     is_follow_up: bool = False
-    needs_retrieval: bool = True
+    needs_retrieval: bool = False
+    retrieval_policy: str = "none"
+    requires_grounding: bool = False
+    reasoning_mode: str = "general_reasoning"
     needs_memory: bool = True
     needs_quality_review: bool = True
     requested_tools: List[str] = field(default_factory=list)

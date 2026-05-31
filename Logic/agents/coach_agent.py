@@ -74,7 +74,58 @@ def _strict_grounding_enabled(request, adaptive_context: Optional[Dict[str, Any]
     if learning_context.get("scope") == "selected_study_material_only":
         return True
     answer_policy = str(learning_context.get("answer_policy") or "").lower()
-    return "study material only" in answer_policy or "retrieved study material only" in answer_policy
+    strict_markers = (
+        "answer from study material only",
+        "selected study material only",
+        "retrieved study material only",
+        "use only retrieved study material",
+    )
+    return any(marker in answer_policy for marker in strict_markers)
+
+
+def _previous_retrieval_policy(interactions: List[AICoachInteraction]) -> str:
+    for interaction in reversed(interactions or []):
+        metadata = interaction.metadata_json if isinstance(interaction.metadata_json, dict) else {}
+        policy = str(metadata.get("retrieval_policy") or "").strip().lower()
+        if policy in {"none", "optional", "required"}:
+            return policy
+    return "none"
+
+
+def _retrieval_policy(
+    request,
+    query_understanding,
+    adaptive_context: Optional[Dict[str, Any]] = None,
+    previous_policy: str = "none",
+) -> str:
+    """Choose whether RAG is unnecessary, useful, or mandatory for this turn."""
+    if coach_settings.strict_grounding_default or _strict_grounding_enabled(request, adaptive_context):
+        return "required"
+    if bool(getattr(query_understanding, "requires_grounding", False)):
+        return "required"
+    if bool(getattr(query_understanding, "is_follow_up", False)) and previous_policy == "required":
+        return "required"
+    if str(getattr(query_understanding, "retrieval_policy", "none")) == "optional":
+        return "optional"
+    return "none"
+
+
+def _apply_effective_retrieval_policy(query_understanding, retrieval_policy: str):
+    query_understanding.retrieval_policy = retrieval_policy
+    query_understanding.needs_retrieval = retrieval_policy != "none"
+    query_understanding.requires_grounding = retrieval_policy == "required"
+    if retrieval_policy == "required":
+        query_understanding.reasoning_mode = "source_grounded"
+    elif bool(getattr(query_understanding, "is_follow_up", False)):
+        query_understanding.reasoning_mode = "contextual_reasoning"
+
+    tools = list(getattr(query_understanding, "requested_tools", []) or [])
+    if retrieval_policy != "none" and "knowledge_search" not in tools:
+        tools.insert(0, "knowledge_search")
+    if retrieval_policy == "none" and "knowledge_search" in tools:
+        tools.remove("knowledge_search")
+    query_understanding.requested_tools = tools
+    return query_understanding
 
 
 def _selected_material_scope(request, adaptive_context: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
@@ -984,11 +1035,12 @@ Adaptive response rules:
 - Choose the best format for this exact question. Do not reuse identical headings for every answer.
 - Beginner/confused students need simple language, analogy, one example, and one tiny check question.
 - Intermediate students need clean concept breakdown, exam relevance, and common mistake protection.
-- Advanced/curious students need deeper reasoning, mechanism, real-life application, and one edge case only when the retrieved study material contains them.
+- Advanced/curious students need deeper reasoning, mechanism, real-life application, and one useful edge case when it improves understanding.
 - Revision intent needs compact notes, formulas, and recall checkpoints.
 - Exam intent needs marks-ready structure, traps, important question style, and time-saving answer order.
 - Practice intent needs one or more questions, then feedback or a clear next action.
-- If strict grounding is active, never switch topics and never use outside knowledge.
+- If strict grounding is active for this turn, never use outside knowledge. Otherwise reason naturally from reliable subject knowledge and the lesson context.
+- Treat retrieved study material as a tool, not as the default answer engine. Use it only when the route selected for this turn calls for it.
 - Never expose these analytics to the student. Just respond naturally as their teacher.
 - End with exactly one useful next step or check question unless the student asked only for a short answer.
 """.strip()
@@ -1008,6 +1060,7 @@ def _run_learning_intelligence_agent(
     answer_format: Dict[str, Any],
     adaptive_context: Optional[Dict[str, Any]],
     conversation_context: Optional[Dict[str, Any]],
+    retrieval_policy: str = "none",
 ) -> str:
     adaptive_context = adaptive_context or {}
     conversation_context = conversation_context or {}
@@ -1019,6 +1072,7 @@ def _run_learning_intelligence_agent(
         f"- Format: {answer_format.get('label', 'Concept Builder')}",
         f"- Student level: {student_state.get('knowledge_level', 'unknown')}",
         f"- Emotional state: {student_state.get('emotional_state', 'steady')}",
+        f"- Knowledge route: {retrieval_policy}",
         f"- Strategy: {adaptive_strategy.get('answer_style', 'adaptive teacher-led explanation')}",
         "- Teach the core idea, check understanding, and store the weak signal if confusion appears.",
     ])
@@ -1035,6 +1089,7 @@ Return 5-7 short bullets covering:
 - prerequisite risk
 - best teaching sequence
 - whether to test
+- whether to rely on reasoning, conversation memory, or retrieved study material
 - memory/weak-signal to store
 - ideal final response shape
 
@@ -1046,6 +1101,7 @@ Selected answer format: {answer_format.get("label", "Concept Builder")}
 Student state: {student_state}
 Adaptive strategy: {adaptive_strategy}
 Follow-up mode: {conversation_context.get("is_follow_up", False)}
+Retrieval policy: {retrieval_policy}
 Recent thread:
 {conversation_context.get("recent_thread", "No previous lesson thread.")}
 """.strip()
@@ -1168,24 +1224,11 @@ def _build_study_prompt(
     learning_blueprint: str = "",
     retrieved_material: Optional[Dict[str, Any]] = None,
     strict_grounding: bool = False,
+    retrieval_policy: str = "none",
 ) -> str:
     graph_context = ""
     if retrieved_material and str(retrieved_material.get("context") or "").strip():
         graph_context = str(retrieved_material.get("context") or "").strip()
-    elif not strict_grounding:
-        keywords = [w for w in question.lower().split() if len(w) > 2]
-        for kw in keywords[:3]:
-            concepts = knowledge_graph.search_by_keyword(kw, limit=2)
-            if concepts:
-                for c in concepts:
-                    graph_context += f"Definition: {c.get('definition', '')}\n"
-                    graph_context += f"Key Points:\n  " + "\n  ".join(c.get("key_points", [])) + "\n"
-                    graph_context += f"Examples:\n  " + "\n  ".join(c.get("examples", [])) + "\n"
-                    if c.get("common_mistakes"):
-                        graph_context += "Common Mistakes:\n  " + "\n  ".join(
-                            [f"{m['mistake']} -> {m['correction']}" for m in c["common_mistakes"]]
-                        ) + "\n"
-                    break
 
     adaptive_format = _build_answer_format_instruction(answer_format)
     adaptive_teaching = _build_adaptive_teaching_instruction(adaptive_context)
@@ -1193,13 +1236,31 @@ def _build_study_prompt(
     follow_up_mode = "YES" if conversation_context.get("is_follow_up") else "NO"
     material_scope = (retrieved_material or {}).get("scope", {}) if isinstance(retrieved_material, dict) else {}
     not_found_message = _material_not_found(adaptive_context)
-    material_policy = (
-        "STRICT STUDY-MATERIAL POLICY:\n"
-        "- Answer only from OFFICIAL RETRIEVED STUDY MATERIAL below.\n"
-        "- Do not use general knowledge, model memory, or outside facts.\n"
-        f"- If the material does not contain the answer, reply exactly: {not_found_message}\n"
-        "- If the student asks a follow-up, keep the previous topic from the recent lesson thread unless they clearly ask for a new topic."
-    )
+    if strict_grounding:
+        material_policy = (
+            "SOURCE-GROUNDED ANSWER POLICY:\n"
+            "- The student explicitly requested an answer grounded in their study material.\n"
+            "- Answer only from OFFICIAL RETRIEVED STUDY MATERIAL below.\n"
+            "- Do not use general knowledge, model memory, or outside facts for factual claims.\n"
+            f"- If the material does not contain the answer, reply exactly: {not_found_message}\n"
+            "- If the student asks a follow-up, keep the previous topic from the recent lesson thread unless they clearly ask for a new topic."
+        )
+    elif graph_context:
+        material_policy = (
+            "REASONING-FIRST WITH MATERIAL ENRICHMENT:\n"
+            "- First understand the student's actual question and reason through the clearest teaching route.\n"
+            "- Use the retrieved study material below when it genuinely improves accuracy or curriculum alignment.\n"
+            "- You may use reliable subject knowledge, logical reasoning, and conversation context beyond the retrieved excerpt.\n"
+            "- Never imply that a claim came from the student's notes unless it is present in the retrieved material."
+        )
+    else:
+        material_policy = (
+            "REASONING-FIRST OPEN TUTOR POLICY:\n"
+            "- Answer intelligently from reliable subject knowledge, logical reasoning, session memory, and conversation context.\n"
+            "- Do not behave like a keyword-search bot and do not force a study-material refusal.\n"
+            "- If a question depends on fresh or unavailable source material, say what is missing and ask for the relevant notes or source.\n"
+            "- If the student asks a follow-up, resolve short references from the recent lesson thread before answering."
+        )
 
     return f"""
 You are {coach.coach_name}, a specialist subject tutor and personal study coach.
@@ -1245,16 +1306,17 @@ COACH MEMORY:
 {conversation_context.get("durable_memory", "No durable memory yet.")}
 
 SELECTED STUDY SCOPE:
+Retrieval policy: {retrieval_policy}
 Subject: {material_scope.get("subject") or "unknown"}
 Chapter: {material_scope.get("chapter") or "unknown"}
 Topic: {material_scope.get("topic") or "unknown"}
 Section id: {material_scope.get("section_id") or "unknown"}
 
 OFFICIAL RETRIEVED STUDY MATERIAL:
-{graph_context if graph_context else not_found_message}
+{graph_context if graph_context else "No study-material retrieval was needed for this turn."}
 
 KNOWLEDGE BASE (use this data if it helps):
-{graph_context if graph_context else not_found_message}
+{graph_context if graph_context else "No retrieved excerpt. Use reasoning-first tutor behavior."}
 
 QUESTION FROM STUDENT:
 {question}
@@ -1348,9 +1410,16 @@ def _build_review_prompt(
     answer_format: Dict[str, Any],
     adaptive_context: Optional[Dict[str, Any]] = None,
     learning_blueprint: str = "",
+    strict_grounding: bool = False,
 ) -> str:
     adaptive_format = _build_answer_format_instruction(answer_format)
     adaptive_teaching = _build_adaptive_teaching_instruction(adaptive_context)
+
+    evidence_policy = (
+        "- Preserve strict platform-data grounding. Never add facts, examples, formulas, or claims that are not present in the draft or supplied study context."
+        if strict_grounding
+        else "- Verify the explanation using sound subject reasoning. Improve factual accuracy when needed, but do not invent source attributions or pretend an answer came from uploaded notes."
+    )
 
     return f"""
 You are the Subject Reviewer and Final Tutor for {coach.coach_name}.
@@ -1359,7 +1428,7 @@ Your job is to transform the draft into the final answer a specialist teacher wo
 
 Review rules:
 - Fix factual errors, vague wording, and missing reasoning.
-- Preserve strict platform-data grounding. Never add facts, examples, formulas, or claims that are not present in the draft or supplied study context.
+{evidence_policy}
 - Keep the answer easy to revise from directly.
 - Preserve helpful references to the previous lesson if the student asked a follow-up.
 - Use clear headings ending with a colon.
@@ -1399,6 +1468,7 @@ def _review_and_polish_answer(
     answer_format: Optional[Dict[str, Any]] = None,
     adaptive_context: Optional[Dict[str, Any]] = None,
     learning_blueprint: str = "",
+    strict_grounding: bool = False,
 ) -> str:
     if not draft or len(draft.strip()) < 20:
         return draft
@@ -1418,6 +1488,7 @@ def _review_and_polish_answer(
                         answer_format=selected_format,
                         adaptive_context=adaptive_context,
                         learning_blueprint=learning_blueprint,
+                        strict_grounding=strict_grounding,
                     ),
                 },
                 {"role": "user", "content": "Polish the draft into the final student answer."},
@@ -1645,15 +1716,23 @@ def coach_agent(request, db=None) -> dict:
         memories=memories,
     )
     conversation_context = _merge_frontend_context(conversation_context, adaptive_context)
-    strict_grounding = _strict_grounding_enabled(request, adaptive_context) or coach_settings.strict_grounding_default
+    retrieval_policy = _retrieval_policy(
+        request,
+        query_understanding,
+        adaptive_context,
+        previous_policy=_previous_retrieval_policy(recent_interactions),
+    )
+    query_understanding = _apply_effective_retrieval_policy(query_understanding, retrieval_policy)
+    coach_plan = build_coach_plan(query_understanding)
+    strict_grounding = retrieval_policy == "required"
     retrieved_material = (
         _retrieve_selected_material(request, adaptive_context, conversation_context)
-        if strict_grounding and query_understanding.needs_retrieval
+        if retrieval_policy != "none"
         else None
     )
     material_is_supported = (
         _material_supports_question(retrieved_material, adaptive_context, conversation_context)
-        if strict_grounding and retrieved_material is not None
+        if retrieved_material is not None
         else True
     )
     assistance_blocks = _build_assistance_blocks(question, answer_format)
@@ -1676,6 +1755,7 @@ def coach_agent(request, db=None) -> dict:
             answer_format=answer_format,
             adaptive_context=adaptive_context,
             conversation_context=conversation_context,
+            retrieval_policy=retrieval_policy,
         )
     )
 
@@ -1694,20 +1774,6 @@ def coach_agent(request, db=None) -> dict:
         answer = lightweight_reply
     elif strict_grounding and not material_is_supported:
         answer = _material_not_found(adaptive_context)
-    elif not strict_grounding and answer_format["id"] == "definition" and _can_answer_definition_locally(question):
-        answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
-        if adaptive_context.get("has_signals"):
-            answer = _apply_deterministic_format(
-                _review_and_polish_answer(
-                    coach=coach,
-                    question=question,
-                    draft=answer,
-                    intent=intent,
-                    answer_format=answer_format,
-                    adaptive_context=adaptive_context,
-                    learning_blueprint=learning_blueprint,
-                )
-            )
     else:
         if intent == "planning":
             system_prompt = _build_planning_prompt(
@@ -1732,6 +1798,7 @@ def coach_agent(request, db=None) -> dict:
                 learning_blueprint=learning_blueprint,
                 retrieved_material=retrieved_material,
                 strict_grounding=strict_grounding,
+                retrieval_policy=retrieval_policy,
             )
 
         try:
@@ -1761,6 +1828,7 @@ def coach_agent(request, db=None) -> dict:
             answer_format=answer_format,
             adaptive_context=adaptive_context,
             learning_blueprint=learning_blueprint,
+            strict_grounding=strict_grounding,
         )
         answer = _apply_deterministic_format(reviewed)
         if len(answer) < 20:
@@ -1770,11 +1838,10 @@ def coach_agent(request, db=None) -> dict:
         question=question,
         answer=answer,
         retrieved_context=str((retrieved_material or {}).get("context") or ""),
-        strict_grounding=strict_grounding and query_understanding.needs_retrieval,
+        strict_grounding=strict_grounding,
     )
     if (
         strict_grounding
-        and query_understanding.needs_retrieval
         and quality_report.hallucination_risk >= 0.65
     ):
         answer = _material_not_found(adaptive_context)
@@ -1787,6 +1854,7 @@ def coach_agent(request, db=None) -> dict:
     observability = coach_observability.snapshot(
         query=query_understanding.to_dict(),
         retrieval={
+            "policy": retrieval_policy,
             "section_id": str((retrieved_material or {}).get("section_id") or ""),
             "source": str((retrieved_material or {}).get("source") or ""),
             "paragraphs_found": int((retrieved_material or {}).get("paragraphs_found") or 0),
@@ -1836,6 +1904,7 @@ def coach_agent(request, db=None) -> dict:
             "learning_context": adaptive_context["learning_context"],
             "learning_blueprint": learning_blueprint,
             "coach_plan": coach_plan.to_dict(),
+            "retrieval_policy": retrieval_policy,
         },
     )
     _persist_interaction(
@@ -1858,6 +1927,7 @@ def coach_agent(request, db=None) -> dict:
             "mentor_directive_used": bool(adaptive_context.get("mentor_directive")),
             "learning_blueprint": learning_blueprint,
             "coach_plan": coach_plan.to_dict(),
+            "retrieval_policy": retrieval_policy,
             "compact_context": compact_context,
             "quality": quality_report.to_dict(),
         },
@@ -1921,6 +1991,7 @@ def coach_agent(request, db=None) -> dict:
             "adaptive_teacher": adaptive_context.get("has_signals", False),
             "learning_blueprint": learning_blueprint,
             "coach_plan": coach_plan.to_dict(),
+            "retrieval_policy": retrieval_policy,
             "quality": quality_report.to_dict(),
             "observability": observability,
         },
@@ -2008,15 +2079,23 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         memories=memories,
     )
     conversation_context = _merge_frontend_context(conversation_context, adaptive_context)
-    strict_grounding = _strict_grounding_enabled(request, adaptive_context) or coach_settings.strict_grounding_default
+    retrieval_policy = _retrieval_policy(
+        request,
+        query_understanding,
+        adaptive_context,
+        previous_policy=_previous_retrieval_policy(recent_interactions),
+    )
+    query_understanding = _apply_effective_retrieval_policy(query_understanding, retrieval_policy)
+    coach_plan = build_coach_plan(query_understanding)
+    strict_grounding = retrieval_policy == "required"
     retrieved_material = (
         _retrieve_selected_material(request, adaptive_context, conversation_context)
-        if strict_grounding and query_understanding.needs_retrieval
+        if retrieval_policy != "none"
         else None
     )
     material_is_supported = (
         _material_supports_question(retrieved_material, adaptive_context, conversation_context)
-        if strict_grounding and retrieved_material is not None
+        if retrieved_material is not None
         else True
     )
     assistance_blocks = _build_assistance_blocks(question, answer_format)
@@ -2048,6 +2127,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             answer_format=answer_format,
             adaptive_context=adaptive_context,
             conversation_context=conversation_context,
+            retrieval_policy=retrieval_policy,
         )
     )
 
@@ -2070,7 +2150,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         detail=(
             "Conversational reply selected."
             if lightweight_reply
-            else "Student need, answer format, and weak-signal route selected."
+            else f"Student need, answer format, and {retrieval_policy} retrieval route selected."
         ),
     )
     yield _stage_event(
@@ -2081,7 +2161,11 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         detail=(
             "This is a short conversation turn, so I am not reopening the previous lesson."
             if lightweight_reply
-            else "Building the first tutor response from verified study material."
+            else (
+                "Building the tutor response from verified study material."
+                if strict_grounding
+                else "Reasoning through the clearest tutor response using lesson context and the selected strategy."
+            )
         ),
     )
 
@@ -2093,9 +2177,6 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     elif strict_grounding and not material_is_supported:
         final_answer = _material_not_found(adaptive_context)
         should_review_answer = False
-    elif not strict_grounding and answer_format["id"] == "definition" and _can_answer_definition_locally(question):
-        final_answer = _apply_deterministic_format(_build_complete_answer_from_kg(question))
-        should_review_answer = bool(adaptive_context.get("has_signals"))
     else:
         if intent == "planning":
             draft_prompt = _build_planning_prompt(
@@ -2120,6 +2201,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 learning_blueprint=learning_blueprint,
                 retrieved_material=retrieved_material,
                 strict_grounding=strict_grounding,
+                retrieval_policy=retrieval_policy,
             )
 
         draft = ""
@@ -2200,6 +2282,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                             answer_format=answer_format,
                             adaptive_context=adaptive_context,
                             learning_blueprint=learning_blueprint,
+                            strict_grounding=strict_grounding,
                         ),
                     },
                     {"role": "user", "content": "Polish the draft into the final student answer."},
@@ -2228,11 +2311,10 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         question=question,
         answer=final_answer,
         retrieved_context=str((retrieved_material or {}).get("context") or ""),
-        strict_grounding=strict_grounding and query_understanding.needs_retrieval,
+        strict_grounding=strict_grounding,
     )
     if (
         strict_grounding
-        and query_understanding.needs_retrieval
         and quality_report.hallucination_risk >= 0.65
     ):
         final_answer = _material_not_found(adaptive_context)
@@ -2245,6 +2327,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     observability = coach_observability.snapshot(
         query=query_understanding.to_dict(),
         retrieval={
+            "policy": retrieval_policy,
             "section_id": str((retrieved_material or {}).get("section_id") or ""),
             "source": str((retrieved_material or {}).get("source") or ""),
             "paragraphs_found": int((retrieved_material or {}).get("paragraphs_found") or 0),
@@ -2312,6 +2395,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "learning_context": adaptive_context["learning_context"],
             "learning_blueprint": learning_blueprint,
             "coach_plan": coach_plan.to_dict(),
+            "retrieval_policy": retrieval_policy,
         },
     )
     _persist_interaction(
@@ -2334,6 +2418,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "mentor_directive_used": bool(adaptive_context.get("mentor_directive")),
             "learning_blueprint": learning_blueprint,
             "coach_plan": coach_plan.to_dict(),
+            "retrieval_policy": retrieval_policy,
             "compact_context": compact_context,
             "quality": quality_report.to_dict(),
             "observability": observability,

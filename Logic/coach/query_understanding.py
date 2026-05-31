@@ -1,4 +1,9 @@
-"""Fast deterministic intent analysis before any model call."""
+"""Fast reasoning-route analysis before any model call.
+
+The open Study Coach is intentionally not a retrieval-first chatbot. This
+module decides when the tutor can reason from the conversation and when the
+student is explicitly asking for fresh, source-grounded study material.
+"""
 
 import re
 from typing import Iterable, List
@@ -18,10 +23,30 @@ _FOLLOW_UP_PHRASES = (
     "why", "how", "why is that", "how does that work", "can you explain that",
     "one more example", "practice this", "test me on this", "quiz me on this",
 )
+_FOLLOW_UP_CONTEXT_PHRASES = (
+    "explain it", "explain this", "explain that", "simplify it", "simplify this",
+    "simpler words", "simple words", "another example", "more examples",
+    "show another", "tell me more", "go deeper", "in short",
+)
 _STOPWORDS = {
     "define", "explain", "please", "what", "why", "how", "this", "that", "with",
     "from", "about", "again", "more", "example", "give", "tell", "the", "and",
 }
+_GROUNDING_REQUESTS = (
+    "from my notes", "from the notes", "from my material", "study material",
+    "uploaded material", "uploaded notes", "selected chapter", "selected topic",
+    "chapter data", "knowledge base", "according to my notes", "according to the notes",
+    "according to ncert", "from ncert", "in ncert", "textbook says", "from the textbook",
+    "use my notes", "check my notes", "check the chapter", "check the textbook",
+    "use the chapter", "look in the notes", "verify from the notes",
+)
+_FRESHNESS_REQUESTS = (
+    "latest syllabus", "current syllabus", "updated syllabus", "new syllabus",
+    "latest notes", "updated notes", "latest study material",
+)
+_OPTIONAL_RETRIEVAL_HINTS = (
+    "chapter overview", "lesson overview", "curriculum overview", "chapter recap",
+)
 
 
 def _contains_any(value: str, terms: Iterable[str]) -> bool:
@@ -46,6 +71,7 @@ def understand_query(question: str, declared_intent: str = "general", has_histor
         and (
             compact in _FOLLOW_UP_PHRASES
             or any(normalized == marker or normalized.startswith(f"{marker} ") for marker in _FOLLOW_UP_MARKERS)
+            or _contains_any(normalized, _FOLLOW_UP_CONTEXT_PHRASES)
             or _contains_any(normalized, ("previous answer", "last answer", "same topic"))
         )
     )
@@ -82,10 +108,30 @@ def understand_query(question: str, declared_intent: str = "general", has_histor
         intent = declared if declared not in {"", "general", "concept", "curiosity"} else "concept"
         answer_format = "concept"
 
-    needs_retrieval = not is_conversational and intent != "planning"
+    requires_grounding = bool(
+        not is_conversational
+        and _contains_any(normalized, _GROUNDING_REQUESTS + _FRESHNESS_REQUESTS)
+    )
+    prefers_retrieval = bool(
+        not is_conversational
+        and not requires_grounding
+        and _contains_any(normalized, _OPTIONAL_RETRIEVAL_HINTS)
+    )
+    retrieval_policy = "required" if requires_grounding else "optional" if prefers_retrieval else "none"
+    needs_retrieval = retrieval_policy != "none"
     tools = ["knowledge_search"] if needs_retrieval else []
     if intent in {"practice", "exam"}:
         tools.append("answer_quality")
+
+    reasoning_mode = (
+        "conversation"
+        if is_conversational
+        else "source_grounded"
+        if requires_grounding
+        else "contextual_reasoning"
+        if is_follow_up
+        else "general_reasoning"
+    )
 
     return QueryUnderstanding(
         intent=intent,
@@ -93,6 +139,9 @@ def understand_query(question: str, declared_intent: str = "general", has_histor
         is_conversational=is_conversational,
         is_follow_up=is_follow_up,
         needs_retrieval=needs_retrieval,
+        retrieval_policy=retrieval_policy,
+        requires_grounding=requires_grounding,
+        reasoning_mode=reasoning_mode,
         needs_memory=has_history or is_follow_up,
         needs_quality_review=not is_conversational,
         requested_tools=tools,
