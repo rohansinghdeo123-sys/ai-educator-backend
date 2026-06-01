@@ -54,6 +54,8 @@ class LLMRouter:
         self._local.records = records[-24:]
 
     def model_for(self, role: str, complexity: str = "balanced") -> str:
+        if role == "vision":
+            return coach_settings.vision_model
         if role == "profiler" or complexity == "fast":
             return coach_settings.fast_model
         if role == "reviewer":
@@ -62,6 +64,8 @@ class LLMRouter:
 
     def _candidate_models(self, role: str, complexity: str) -> List[str]:
         primary = self.model_for(role, complexity=complexity)
+        if role == "vision":
+            return [primary]
         candidates = [primary]
         if coach_settings.fallback_model and coach_settings.fallback_model not in candidates:
             candidates.append(coach_settings.fallback_model)
@@ -70,7 +74,7 @@ class LLMRouter:
     def complete(
         self,
         role: str,
-        messages: Iterable[Dict[str, str]],
+        messages: Iterable[Dict[str, Any]],
         complexity: str = "balanced",
         **kwargs: Any,
     ) -> str:
@@ -115,7 +119,7 @@ class LLMRouter:
     def stream(
         self,
         role: str,
-        messages: Iterable[Dict[str, str]],
+        messages: Iterable[Dict[str, Any]],
         complexity: str = "balanced",
         **kwargs: Any,
     ) -> Iterator[Any]:
