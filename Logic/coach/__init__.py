@@ -2,6 +2,7 @@
 
 from .context_manager import build_compact_context
 from .llm_router import llm_router
+from .mastery_store import build_mastery_signal, persist_mastery_signal
 from .observability import coach_observability
 from .quality_scorer import score_coach_answer
 from .query_understanding import understand_query
@@ -24,6 +25,8 @@ __all__ = [
     "coach_tool_registry",
     "grounded_retriever",
     "llm_router",
+    "build_mastery_signal",
+    "persist_mastery_signal",
     "score_coach_answer",
     "build_adaptive_answer_blocks",
     "parse_semantic_event",

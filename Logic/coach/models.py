@@ -63,6 +63,8 @@ class QualityReport:
     clarity: float
     student_friendliness: float
     formatting: float
+    intent_satisfaction: float
+    readability: float
     hallucination_risk: float
     issues: List[str] = field(default_factory=list)
 
