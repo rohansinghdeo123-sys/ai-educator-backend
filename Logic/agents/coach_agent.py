@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Generator
 from Logic.agent_event_bus import event_bus
 from Logic.analytics_engine import get_user_analytics
 from Logic.coach import (
+    build_mastery_signal,
     build_coach_plan,
     build_adaptive_answer_blocks,
     build_compact_context,
@@ -27,6 +28,7 @@ from Logic.coach import (
     coach_tool_registry,
     llm_router,
     parse_semantic_event,
+    persist_mastery_signal,
     resolve_hybrid_query,
     score_coach_answer,
     semantic_event,
@@ -1743,6 +1745,8 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     question = getattr(request, "question", "")
     session_id = getattr(request, "session_id", f"coach-{user_id}")
     turn_id = f"turn_{uuid.uuid4().hex[:12]}"
+    llm_router.begin_turn(turn_id)
+    trace = coach_observability.start_turn(turn_id=turn_id, session_id=session_id)
     intent = getattr(request, "intent", "study_advice")
     mode = getattr(request, "mode", "coach")
     adaptive_context = _build_adaptive_context_from_request(request)
@@ -1776,6 +1780,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         detail="Mapping intent, confidence, follow-up context, and likely weak points.",
         turn_id=turn_id,
     )
+    trace.mark_phase("understanding")
 
     coach = get_or_create_coach(db, user_id)
     progress = _build_progress_snapshot(db, user_id)
@@ -1812,6 +1817,10 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     )
     conversation_context["lesson_memory"] = lesson_memory
     conversation_context["lesson_memory_prompt"] = format_layered_lesson_memory(lesson_memory)
+    trace.memory_layers = [
+        key for key, value in lesson_memory.items()
+        if value and key in {"recent_turns", "current_topic", "unresolved_doubt", "misconceptions", "preferences", "long_term_summary"}
+    ]
     retrieval_policy = _retrieval_policy(
         request,
         query_understanding,
@@ -1826,6 +1835,14 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         if retrieval_policy != "none"
         else None
     )
+    if retrieval_policy != "none":
+        trace.record_tool(
+            "knowledge_search",
+            policy=retrieval_policy,
+            section_id=str((retrieved_material or {}).get("section_id") or ""),
+            source=str((retrieved_material or {}).get("source") or ""),
+            paragraphs_found=int((retrieved_material or {}).get("paragraphs_found") or 0),
+        )
     material_is_supported = (
         _material_supports_question(retrieved_material, adaptive_context, conversation_context)
         if retrieved_material is not None
@@ -1850,6 +1867,8 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             detail="Using the recent lesson thread so the answer continues naturally.",
             turn_id=turn_id,
         )
+    if strict_grounding and not material_is_supported:
+        trace.record_fallback("required_material_not_found", retrieval_policy=retrieval_policy)
 
     learning_blueprint = (
         "- Conversational input detected. Reply naturally and do not continue the previous lesson unless the student asks."
@@ -1905,6 +1924,14 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         ),
         turn_id=turn_id,
     )
+    trace.mark_phase("drafting")
+    routing_tier = (
+        "fast"
+        if intent == "definition"
+        and not query_understanding.is_follow_up
+        and retrieval_policy == "none"
+        else "balanced"
+    )
 
     # ── Answer source ──────────────────────────────────────────────────
     should_review_answer = True
@@ -1949,11 +1976,13 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                     {"role": "system", "content": draft_prompt},
                     {"role": "user", "content": question},
                 ],
+                complexity=routing_tier,
                 temperature=0.35,
                 max_tokens=700,
             )
         except Exception as exc:
             logger.error("[COACH DRAFT] Groq error: %s", exc)
+            trace.record_fallback("tutor_model_failed", error=str(exc)[:240])
             fallback = _material_not_found(adaptive_context) if strict_grounding else (
                 recommendation if intent == "planning" else "I'm having trouble explaining that right now."
             )
@@ -1981,6 +2010,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         turn_id=turn_id,
     )
     if not lightweight_reply:
+        trace.mark_phase("reviewing")
         yield _stage_event(
             stage="reviewing",
             status="active",
@@ -2028,6 +2058,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                     },
                     {"role": "user", "content": "Polish the draft into the final student answer."},
                 ],
+                complexity="fast" if routing_tier == "fast" else "balanced",
                 temperature=0.18,
                 max_tokens=850,
             )
@@ -2039,6 +2070,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 yield _answer_delta_event(delta, turn_id=turn_id)
         except Exception as exc:
             logger.error("[COACH STREAM REVIEW] Groq API error: %s", exc)
+            trace.record_fallback("reviewer_stream_failed", error=str(exc)[:240])
 
     if streamed_answer.strip():
         final_answer = _apply_deterministic_format(streamed_answer)
@@ -2048,36 +2080,38 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             streamed_answer += delta
             yield _answer_delta_event(delta, turn_id=turn_id)
 
+    trace.mark_phase("quality")
     quality_report = score_coach_answer(
         question=question,
         answer=final_answer,
         retrieved_context=str((retrieved_material or {}).get("context") or ""),
         strict_grounding=strict_grounding,
+        intent=intent,
+        answer_format=str(answer_format.get("id") or "concept"),
     )
     if (
         strict_grounding
         and quality_report.hallucination_risk >= 0.65
     ):
+        trace.record_fallback("quality_guard_replaced_answer", hallucination_risk=quality_report.hallucination_risk)
         final_answer = _material_not_found(adaptive_context)
         quality_report = score_coach_answer(
             question=question,
             answer=final_answer,
             retrieved_context=str((retrieved_material or {}).get("context") or ""),
             strict_grounding=True,
+            intent=intent,
+            answer_format=str(answer_format.get("id") or "concept"),
         )
-    observability = coach_observability.snapshot(
-        query=query_understanding.to_dict(),
-        retrieval={
-            "policy": retrieval_policy,
-            "section_id": str((retrieved_material or {}).get("section_id") or ""),
-            "source": str((retrieved_material or {}).get("source") or ""),
-            "paragraphs_found": int((retrieved_material or {}).get("paragraphs_found") or 0),
-            "supported": material_is_supported,
-        },
-        plan=coach_plan.to_dict(),
-        quality=quality_report.to_dict(),
-    )
     answer_blocks = build_adaptive_answer_blocks(final_answer)
+    mastery_signal = build_mastery_signal(
+        query=query_understanding,
+        adaptive_context=adaptive_context,
+        scope=_selected_material_scope(request, adaptive_context),
+        quality=quality_report.to_dict(),
+        answer_blocks=answer_blocks,
+    )
+    trace.mark_phase("delivery")
 
     yield _stage_event(
         stage="formatting",
@@ -2105,6 +2139,22 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         turn_id=turn_id,
     )
     time.sleep(0.2)
+    latency_ms = trace.finish()
+    observability = coach_observability.snapshot(
+        query=query_understanding.to_dict(),
+        retrieval={
+            "policy": retrieval_policy,
+            "section_id": str((retrieved_material or {}).get("section_id") or ""),
+            "source": str((retrieved_material or {}).get("source") or ""),
+            "paragraphs_found": int((retrieved_material or {}).get("paragraphs_found") or 0),
+            "supported": material_is_supported,
+        },
+        plan=coach_plan.to_dict(),
+        quality=quality_report.to_dict(),
+        trace=trace,
+        model_calls=llm_router.records(),
+        mastery_signal=mastery_signal,
+    )
 
     # ── Base64‑encode the entire answer to protect newlines ─────────────
     yield semantic_event(
@@ -2142,6 +2192,8 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "learning_blueprint": learning_blueprint,
             "coach_plan": coach_plan.to_dict(),
             "observability": observability,
+            "mastery_signal": mastery_signal,
+            "latency_ms": latency_ms,
         },
     )
 
@@ -2180,6 +2232,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "learning_blueprint": learning_blueprint,
             "coach_plan": coach_plan.to_dict(),
             "retrieval_policy": retrieval_policy,
+            "mastery_signal": mastery_signal,
         },
     )
     _persist_interaction(
@@ -2208,9 +2261,11 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "answer_blocks": answer_blocks,
             "quality": quality_report.to_dict(),
             "observability": observability,
+            "mastery_signal": mastery_signal,
         },
         quality_score=quality_report.score,
     )
+    persisted_mastery_signal = persist_mastery_signal(db=db, coach=coach, signal=mastery_signal)
 
     coach_observability.emit(
         session_id,
@@ -2221,6 +2276,9 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         retrieved_chunks=int((retrieved_material or {}).get("paragraphs_found") or 0),
         quality_score=quality_report.score,
         quality_passed=quality_report.passed,
+        latency_ms=latency_ms,
+        model_calls=llm_router.records(),
+        mastery_signal=persisted_mastery_signal,
     )
 
     event_bus.emit(
@@ -2229,7 +2287,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         {
             "status": "success",
             "message": f"Coach reviewed and delivered by {coach.coach_name}",
-            "latency_ms": 0,
+            "latency_ms": latency_ms,
             "quality_score": quality_report.score,
             "quality_passed": quality_report.passed,
         },

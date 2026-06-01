@@ -67,7 +67,7 @@ def build_layered_lesson_memory(
         memory_type = str(getattr(memory, "memory_type", "") or "").lower()
         title = str(getattr(memory, "title", "") or "").strip()
         summary = str(getattr(memory, "summary", "") or "").strip()
-        if any(term in memory_type for term in ("misconception", "weak", "mistake")) and summary:
+        if any(term in memory_type for term in ("misconception", "weak", "mistake", "concept_watch")) and summary:
             misconceptions.append(f"{title}: {summary}" if title else summary)
 
     preferences = getattr(coach, "study_preferences", {}) or {}
