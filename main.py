@@ -839,6 +839,9 @@ def coach_chat(
             self.student_state = payload.student_state
             self.adaptive_strategy = payload.adaptive_strategy
             self.learning_context = payload.learning_context
+            self.attachments = [item.model_dump() for item in payload.attachments]
+            self.direct_answer = payload.direct_answer
+            self.socratic_mode = payload.socratic_mode
 
     result = coach_agent(CoachRequest(), db=db)
     return result
@@ -882,6 +885,9 @@ async def coach_chat_stream(
             self.student_state = payload.student_state
             self.adaptive_strategy = payload.adaptive_strategy
             self.learning_context = payload.learning_context
+            self.attachments = [item.model_dump() for item in payload.attachments]
+            self.direct_answer = payload.direct_answer
+            self.socratic_mode = payload.socratic_mode
 
     def event_stream():
         for token in coach_agent_stream(CoachRequest(), db=db):

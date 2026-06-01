@@ -188,6 +188,13 @@ class CoachMemoryResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class CoachAttachmentRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    mime_type: str = Field(min_length=1, max_length=80)
+    size_bytes: int = Field(default=0, ge=0)
+    data_url: str = Field(min_length=1)
+
+
 class CoachChatRequest(BaseModel):
     user_id: str
     message: str = Field(min_length=1, max_length=2500)
@@ -209,6 +216,9 @@ class CoachChatRequest(BaseModel):
     student_state: Dict[str, Any] = Field(default_factory=dict)
     adaptive_strategy: Dict[str, Any] = Field(default_factory=dict)
     learning_context: Dict[str, Any] = Field(default_factory=dict)
+    attachments: List[CoachAttachmentRequest] = Field(default_factory=list, max_length=5)
+    direct_answer: bool = False
+    socratic_mode: bool = True
 
 
 class CoachChatResponse(BaseModel):

@@ -10,6 +10,7 @@ class CoachSettings:
     fast_model: str = os.getenv("GROQ_FAST_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
     tutor_model: str = os.getenv("GROQ_TUTOR_MODEL", "openai/gpt-oss-120b")
     review_model: str = os.getenv("GROQ_REVIEW_MODEL", "llama-3.3-70b-versatile")
+    vision_model: str = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
     fallback_model: str = os.getenv("GROQ_FALLBACK_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
     llm_timeout_seconds: float = float(os.getenv("COACH_LLM_TIMEOUT_SECONDS", "22"))
     llm_max_attempts: int = int(os.getenv("COACH_LLM_MAX_ATTEMPTS", "2"))
@@ -17,6 +18,12 @@ class CoachSettings:
     max_retrieval_paragraphs: int = int(os.getenv("COACH_MAX_RETRIEVAL_PARAGRAPHS", "8"))
     memory_limit: int = int(os.getenv("COACH_MEMORY_LIMIT", "6"))
     interaction_limit: int = int(os.getenv("COACH_INTERACTION_LIMIT", "8"))
+    max_attachments: int = int(os.getenv("COACH_MAX_ATTACHMENTS", "5"))
+    max_image_attachments: int = int(os.getenv("COACH_MAX_IMAGE_ATTACHMENTS", "5"))
+    max_image_bytes: int = int(os.getenv("COACH_MAX_IMAGE_BYTES", str(4 * 1024 * 1024)))
+    max_document_bytes: int = int(os.getenv("COACH_MAX_DOCUMENT_BYTES", str(6 * 1024 * 1024)))
+    max_attachment_chars: int = int(os.getenv("COACH_MAX_ATTACHMENT_CHARS", "12000"))
+    max_pdf_pages: int = int(os.getenv("COACH_MAX_PDF_PAGES", "8"))
     strict_grounding_default: bool = os.getenv("COACH_STRICT_GROUNDING", "false").lower() == "true"
     not_found_message: str = os.getenv(
         "COACH_NOT_FOUND_MESSAGE",

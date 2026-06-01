@@ -5,7 +5,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from database import Base
-from Logic.coach.evaluation_suite import run_offline_coach_evaluation
+from Logic.coach.evaluation_suite import SCENARIOS, run_offline_coach_evaluation
+from Logic.coach.attachments import prepare_attachments
+from Logic.coach.mastery_engine import build_active_mastery_profile
+from Logic.coach.specialist_tools import calculator, formula_checker
+from Logic.coach.unified_orchestrator import build_orchestration_plan
 from Logic.coach.llm_router import LLMRouter
 from Logic.coach.mastery_store import build_mastery_signal, persist_mastery_signal
 from Logic.coach.quality_scorer import score_coach_answer
@@ -36,6 +40,7 @@ class CoachArchitectureTests(unittest.TestCase):
     def test_offline_routing_suite(self):
         report = run_offline_coach_evaluation()
         self.assertTrue(report["passed"], report)
+        self.assertGreaterEqual(len(SCENARIOS), 150)
 
     def test_conversational_thanks_does_not_reopen_lesson(self):
         query = understand_query("Thank you", has_history=True)
@@ -86,6 +91,46 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertEqual(records[0]["status"], "error")
         self.assertEqual(records[1]["status"], "success")
         self.assertTrue(records[1]["fallback"])
+
+    def test_unified_orchestrator_routes_specialists_selectively(self):
+        simple = build_orchestration_plan(understand_query("Define matter"), "Define matter")
+        chemistry = build_orchestration_plan(understand_query("Explain C2H6"), "Explain C2H6")
+        numerical = build_orchestration_plan(understand_query("Calculate 20 / 5"), "Calculate 20 / 5")
+        homework = build_orchestration_plan(understand_query("Help me solve this homework"), "Help me solve this homework")
+        direct = build_orchestration_plan(understand_query("Help me solve this homework"), "Help me solve this homework", direct_answer=True)
+        self.assertEqual(simple["tools"], ["answer_verifier"])
+        self.assertIn("formula_checker", chemistry["tools"])
+        self.assertIn("calculator", numerical["tools"])
+        self.assertIn("socratic_tutor", homework["tools"])
+        self.assertNotIn("socratic_tutor", direct["tools"])
+
+    def test_text_attachment_becomes_source_context(self):
+        payload = "data:text/plain;base64,TWF0dGVyIGhhcyBtYXNzIGFuZCBvY2N1cGllcyBzcGFjZS4="
+        bundle = prepare_attachments([{"name": "notes.txt", "mime_type": "text/plain", "data_url": payload}], "Define matter")
+        self.assertIn("Matter has mass", bundle.context)
+        self.assertEqual(bundle.document_count, 1)
+        self.assertEqual(bundle.citations[0]["source"], "Uploaded material")
+
+    def test_active_mastery_profile_simplifies_repeated_confusion(self):
+        memory = SimpleNamespace(metadata_json={
+            "topic": "alkanes",
+            "observations": 3,
+            "support_count": 2,
+            "average_confidence": 42,
+            "last_observed_at": "2026-05-30T00:00:00",
+        })
+        profile = build_active_mastery_profile([memory], {"topic": "alkanes"})
+        self.assertEqual(profile["route"], "simplify_and_reinforce")
+        unrelated = build_active_mastery_profile([memory], {"topic": "fractions"})
+        self.assertEqual(unrelated["route"], "baseline")
+
+    def test_specialist_calculator_and_formula_checker_are_bounded(self):
+        calculation = calculator("Calculate 20 / 5")
+        formulas = formula_checker("Explain CH4 and C2H6. Carbon remains a normal word.")
+        unsafe = calculator("Run import os")
+        self.assertEqual(calculation["result"], 4.0)
+        self.assertEqual(formulas["formulas"], ["CH4", "C2H6"])
+        self.assertFalse(unsafe["used"])
 
     def test_mastery_memory_is_deduplicated(self):
         engine = create_engine("sqlite:///:memory:")
