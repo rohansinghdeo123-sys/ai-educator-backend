@@ -13,6 +13,8 @@ from .settings import coach_settings
 
 _ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 _ALLOWED_DOCUMENT_TYPES = {"application/pdf", "text/plain"}
+_ALLOWED_TYPES = _ALLOWED_IMAGE_TYPES | _ALLOWED_DOCUMENT_TYPES
+_DATA_URL_RE = re.compile(r"^data:(?P<mime>[-\w.+/]+)(?:;charset=[^;,]+)?;base64,", re.IGNORECASE)
 
 
 @dataclass
@@ -38,15 +40,42 @@ def _safe_name(value: Any, index: int) -> str:
     return clean[:100] or f"attachment-{index + 1}"
 
 
-def _decode_data_url(value: Any) -> bytes:
+def _decode_data_url(value: Any) -> tuple[bytes, str]:
     data_url = str(value or "")
     if "," not in data_url:
-        return b""
-    _, payload = data_url.split(",", 1)
+        return b"", ""
+    header, payload = data_url.split(",", 1)
+    match = _DATA_URL_RE.match(f"{header},")
+    if not match:
+        return b"", ""
     try:
-        return base64.b64decode(payload, validate=True)
+        return base64.b64decode(payload, validate=True), match.group("mime").lower()
     except Exception:
-        return b""
+        return b"", match.group("mime").lower()
+
+
+def _looks_like_text(raw: bytes) -> bool:
+    if b"\x00" in raw[:512]:
+        return False
+    try:
+        raw[:4096].decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+def _matches_file_signature(raw: bytes, mime_type: str) -> bool:
+    if mime_type == "image/jpeg":
+        return raw.startswith(b"\xff\xd8\xff")
+    if mime_type == "image/png":
+        return raw.startswith(b"\x89PNG\r\n\x1a\n")
+    if mime_type == "image/webp":
+        return len(raw) >= 12 and raw.startswith(b"RIFF") and raw[8:12] == b"WEBP"
+    if mime_type == "application/pdf":
+        return raw.startswith(b"%PDF-")
+    if mime_type == "text/plain":
+        return _looks_like_text(raw)
+    return False
 
 
 def _extract_pdf_text(raw: bytes) -> str:
@@ -107,9 +136,18 @@ def prepare_attachments(
         mime_type = str(item.get("mime_type") or item.get("type") or "").lower().strip()
         name = _safe_name(item.get("name"), index)
         data_url = str(item.get("data_url") or "")
-        raw = _decode_data_url(data_url)
+        raw, data_url_mime = _decode_data_url(data_url)
         if not raw:
             bundle.warnings.append(f"{name}: file data could not be read.")
+            continue
+        if mime_type not in _ALLOWED_TYPES:
+            bundle.warnings.append(f"{name}: unsupported file type.")
+            continue
+        if data_url_mime and data_url_mime != mime_type:
+            bundle.warnings.append(f"{name}: file type does not match the uploaded data.")
+            continue
+        if not _matches_file_signature(raw, mime_type):
+            bundle.warnings.append(f"{name}: file signature did not match the declared type.")
             continue
 
         max_bytes = (
@@ -139,10 +177,6 @@ def prepare_attachments(
             text = _extract_pdf_text(raw)
         elif mime_type == "text/plain":
             text = raw.decode("utf-8", errors="ignore")[: coach_settings.max_attachment_chars]
-        else:
-            bundle.warnings.append(f"{name}: unsupported file type.")
-            continue
-
         bundle.document_count += 1
         bundle.safe_attachments.append(safe_item)
         if text.strip():

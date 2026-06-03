@@ -11,17 +11,22 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import json
 import logging
 import re
+import time
+import uuid
+from collections import defaultdict, deque
 from datetime import date, datetime, timezone
+from hashlib import sha256
+from threading import Lock
 from typing import Any, Dict, List, Optional, Generator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
-from database import SessionLocal, engine
+from database import SessionLocal, check_db_health, engine
 from models import (
     AICoachDailySignal,
     AICoachMemory,
@@ -120,6 +125,106 @@ logging.basicConfig(
 
 logger = logging.getLogger("ai_educator.main")
 
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def env_list(name: str, default: List[str]) -> List[str]:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+ALLOWED_ORIGINS = env_list(
+    "ALLOWED_ORIGINS",
+    [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://agentifyai.in",
+        "https://www.agentifyai.in",
+    ],
+)
+RATE_LIMIT_ENABLED = env_bool("RATE_LIMIT_ENABLED", True)
+RATE_LIMIT_PER_MINUTE = env_int("RATE_LIMIT_PER_MINUTE", 120)
+AI_RATE_LIMIT_PER_MINUTE = env_int("AI_RATE_LIMIT_PER_MINUTE", 24)
+ADMIN_RATE_LIMIT_PER_MINUTE = env_int("ADMIN_RATE_LIMIT_PER_MINUTE", 180)
+AI_DAILY_QUOTA_PER_USER = env_int("AI_DAILY_QUOTA_PER_USER", 180)
+EXAM_DAILY_QUOTA_PER_USER = env_int("EXAM_DAILY_QUOTA_PER_USER", 80)
+ARTIFACT_DAILY_QUOTA_PER_USER = env_int("ARTIFACT_DAILY_QUOTA_PER_USER", 40)
+
+AI_RATE_LIMIT_PATHS = {
+    "/section-ai",
+    "/generate-mcqs",
+    "/generate-probable-questions",
+    "/artifacts/generate",
+    "/agent",
+    "/coach/chat",
+    "/coach/chat/stream",
+}
+
+QUOTA_LIMITS = {
+    "coach": AI_DAILY_QUOTA_PER_USER,
+    "exam": EXAM_DAILY_QUOTA_PER_USER,
+    "artifact": ARTIFACT_DAILY_QUOTA_PER_USER,
+    "agent": AI_DAILY_QUOTA_PER_USER,
+}
+
+
+class SlidingWindowLimiter:
+    def __init__(self) -> None:
+        self._events: Dict[str, deque[float]] = defaultdict(deque)
+        self._lock = Lock()
+
+    def allow(self, key: str, limit: int, window_seconds: int) -> tuple[bool, int]:
+        if limit <= 0:
+            return True, 0
+        now = time.time()
+        cutoff = now - window_seconds
+        with self._lock:
+            bucket = self._events[key]
+            while bucket and bucket[0] <= cutoff:
+                bucket.popleft()
+            if len(bucket) >= limit:
+                retry_after = max(1, int(window_seconds - (now - bucket[0])))
+                return False, retry_after
+            bucket.append(now)
+            return True, 0
+
+
+class DailyQuotaStore:
+    def __init__(self) -> None:
+        self._counts: Dict[str, int] = defaultdict(int)
+        self._lock = Lock()
+
+    def consume(self, user_id: str, quota_name: str, limit: int) -> tuple[bool, int]:
+        if limit <= 0:
+            return True, 0
+        day = date.today().isoformat()
+        safe_user = sha256(str(user_id).encode("utf-8")).hexdigest()[:16]
+        key = f"{day}:{quota_name}:{safe_user}"
+        with self._lock:
+            current = self._counts[key]
+            if current >= limit:
+                return False, current
+            self._counts[key] = current + 1
+            return True, self._counts[key]
+
+
+rate_limiter = SlidingWindowLimiter()
+daily_quotas = DailyQuotaStore()
+
 # ================= CREATE TABLES =================
 Base.metadata.create_all(bind=engine)
 
@@ -159,11 +264,60 @@ app = FastAPI(title="AI Educator Backend - Agentic v2.0 + Secure Admin + Coach A
 # ================= CORS =================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID", "X-Response-Time-ms", "Retry-After"],
 )
+
+
+def client_rate_key(request: Request) -> str:
+    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    client_host = forwarded or (request.client.host if request.client else "unknown")
+    auth_header = request.headers.get("authorization") or ""
+    if auth_header:
+        token_hash = sha256(auth_header.encode("utf-8")).hexdigest()[:16]
+        return f"auth:{token_hash}:{request.url.path}"
+    return f"ip:{client_host}:{request.url.path}"
+
+
+def minute_limit_for_path(path: str) -> int:
+    if path.startswith("/admin"):
+        return ADMIN_RATE_LIMIT_PER_MINUTE
+    if path in AI_RATE_LIMIT_PATHS or path.startswith("/coach/autonomous-study"):
+        return AI_RATE_LIMIT_PER_MINUTE
+    return RATE_LIMIT_PER_MINUTE
+
+
+@app.middleware("http")
+async def production_guardrails(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    request.state.request_id = request_id
+
+    if RATE_LIMIT_ENABLED and request.method.upper() != "OPTIONS":
+        limit = minute_limit_for_path(request.url.path)
+        allowed, retry_after = rate_limiter.allow(client_rate_key(request), limit, 60)
+        if not allowed:
+            return JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={
+                    "detail": "Too many requests. Please slow down and try again.",
+                    "request_id": request_id,
+                },
+                headers={"X-Request-ID": request_id, "Retry-After": str(retry_after)},
+            )
+
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("Request failed | request_id=%s path=%s", request_id, request.url.path)
+        raise
+
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Response-Time-ms"] = str(round((time.perf_counter() - started) * 1000, 2))
+    return response
 
 
 # ================= FIREBASE ADMIN =================
@@ -330,6 +484,18 @@ def require_authenticated_user_id(decoded_token: Dict[str, Any]) -> str:
         )
 
     return token_uid
+
+
+def enforce_user_quota(user_id: str, quota_name: str) -> None:
+    limit = QUOTA_LIMITS.get(quota_name, AI_DAILY_QUOTA_PER_USER)
+    allowed, used = daily_quotas.consume(user_id, quota_name, limit)
+    if allowed:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=f"Daily {quota_name} quota reached. Please continue after the quota resets.",
+        headers={"Retry-After": "86400"},
+    )
 
 
 # ================= DATABASE =================
@@ -747,8 +913,9 @@ def create_test_history(
 @app.post("/section-ai")
 def section_ai(
     request: SectionAIRequest,
-    _current_user: Dict[str, Any] = Depends(verify_firebase_user),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
+    enforce_user_quota(require_authenticated_user_id(current_user), "coach")
     section_id = normalize_topic(request.section_id)
     answer = section_doubt(
         question=request.question,
@@ -768,8 +935,9 @@ def section_ai(
 @app.post("/generate-mcqs")
 def generate_mcqs(
     request: GenerateMCQRequest,
-    _current_user: Dict[str, Any] = Depends(verify_firebase_user),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
+    enforce_user_quota(require_authenticated_user_id(current_user), "exam")
     section_id = normalize_topic(request.section_id or request.topic)
 
     return generate_structured_mcqs(
@@ -787,8 +955,9 @@ def generate_mcqs(
 @app.post("/generate-probable-questions")
 def generate_probable_questions(
     request: GenerateProbableRequest,
-    _current_user: Dict[str, Any] = Depends(verify_firebase_user),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
+    enforce_user_quota(require_authenticated_user_id(current_user), "exam")
     section_id = normalize_topic(request.section_id or request.topic)
 
     return generate_structured_probable_questions(
@@ -805,8 +974,9 @@ def generate_probable_questions(
 @app.post("/artifacts/generate")
 def generate_artifacts(
     request: ArtifactGenerateRequest,
-    _current_user: Dict[str, Any] = Depends(verify_firebase_user),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
+    enforce_user_quota(require_authenticated_user_id(current_user), "artifact")
     section_id = re.sub(
         r"[^a-z0-9]+",
         "_",
@@ -835,8 +1005,9 @@ def generate_artifacts(
 def agent_endpoint(
     request: SectionAIRequest,
     db: Session = Depends(get_db),
-    _current_user: Dict[str, Any] = Depends(verify_firebase_user),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
+    enforce_user_quota(require_authenticated_user_id(current_user), "agent")
     return route_to_agent(request, db=db)
 
 
@@ -912,6 +1083,7 @@ def coach_chat(
     current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
     require_same_user_or_admin(payload.user_id, current_user)
+    enforce_user_quota(payload.user_id, "coach")
 
     class CoachRequest:
         def __init__(self):
@@ -958,6 +1130,7 @@ async def coach_chat_stream(
     as they arrive, creating a real‑time typing effect.
     """
     require_same_user_or_admin(payload.user_id, current_user)
+    enforce_user_quota(payload.user_id, "coach")
 
     class CoachRequest:
         def __init__(self):
@@ -1023,6 +1196,7 @@ def coach_autonomous_study(
     current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
     require_same_user_or_admin(user_id, current_user)
+    enforce_user_quota(user_id, "coach")
 
     mission = run_autonomous_study_loop(
         db=db,
@@ -1055,20 +1229,40 @@ def reset_chat(
 # =====================================================
 # HEALTH CHECK
 # =====================================================
+@app.get("/health/live")
+def liveness_probe():
+    return {"status": "ok", "service": "agentifyai-backend"}
+
+
+@app.get("/health/ready")
+def readiness_probe():
+    db_ready = check_db_health()
+    firebase_ready = bool(FIREBASE_ADMIN_READY)
+    knowledge_ready = bool(knowledge_graph.list_chapters())
+    artifact_ready = bool(available_artifact_sections())
+    ready = db_ready and firebase_ready
+    return JSONResponse(
+        status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={
+            "status": "ready" if ready else "degraded",
+            "database": db_ready,
+            "firebase": firebase_ready,
+            "knowledge_graph": knowledge_ready,
+            "artifacts": artifact_ready,
+            "version": "2.5.0-production-guardrails",
+        },
+    )
+
+
 @app.get("/health")
 def health_check():
     return {
-        "status": "online",
-        "version": "2.4.0-secure-admin-coach",
-        "engine": "multi-agent-orchestrator",
-        "admin_panel": True,
-        "dashboard_api": True,
-        "coach_api": True,
-        "firebase_admin_ready": FIREBASE_ADMIN_READY,
-        "firebase_admin_error": FIREBASE_ADMIN_ERROR,
-        "knowledge_graph_chapters": knowledge_graph.list_chapters(),
-        "artifact_sections": available_artifact_sections(),
-        "artifacts_ready": bool(available_artifact_sections()),
+        "status": "online" if check_db_health() else "degraded",
+        "version": "2.5.0-production-guardrails",
+        "service": "agentifyai-backend",
+        "request_ids": True,
+        "rate_limits": RATE_LIMIT_ENABLED,
+        "cors_origins_configured": len(ALLOWED_ORIGINS),
     }
 
 
