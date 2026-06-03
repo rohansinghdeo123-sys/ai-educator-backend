@@ -42,6 +42,13 @@ class TestHistoryCreate(BaseModel):
     time_spent_seconds: int = 0
     focus_score: float = 0.0
     session_type: str = "exam"
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    response_latency_ms: int = Field(default=0, ge=0)
+    hint_count: int = Field(default=0, ge=0)
+    retry_count: int = Field(default=0, ge=0)
+    confidence_before: Optional[float] = Field(default=None, ge=0, le=100)
+    confidence_after: Optional[float] = Field(default=None, ge=0, le=100)
     replay_data: Optional[Dict[str, Any]] = None
 
 
@@ -56,6 +63,13 @@ class TestHistoryResponse(BaseModel):
     accuracy_rate: float
     focus_score: float
     session_type: str
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    response_latency_ms: int = 0
+    hint_count: int = 0
+    retry_count: int = 0
+    confidence_before: Optional[float] = None
+    confidence_after: Optional[float] = None
 
     model_config = {"from_attributes": True}
 

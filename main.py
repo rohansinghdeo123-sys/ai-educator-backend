@@ -11,13 +11,14 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import json
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Generator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from database import SessionLocal, engine
@@ -121,6 +122,36 @@ logger = logging.getLogger("ai_educator.main")
 
 # ================= CREATE TABLES =================
 Base.metadata.create_all(bind=engine)
+
+
+def ensure_session_telemetry_columns() -> None:
+    """Backfill telemetry columns until the production Alembic pass lands."""
+    ddl_by_column = {
+        "started_at": "TIMESTAMP",
+        "completed_at": "TIMESTAMP",
+        "response_latency_ms": "INTEGER DEFAULT 0",
+        "hint_count": "INTEGER DEFAULT 0",
+        "retry_count": "INTEGER DEFAULT 0",
+        "confidence_before": "FLOAT",
+        "confidence_after": "FLOAT",
+    }
+    try:
+        inspector = inspect(engine)
+        if "test_history" not in inspector.get_table_names():
+            return
+        existing = {column["name"] for column in inspector.get_columns("test_history")}
+        missing = [(name, ddl) for name, ddl in ddl_by_column.items() if name not in existing]
+        if not missing:
+            return
+        with engine.begin() as conn:
+            for name, ddl in missing:
+                conn.execute(text(f"ALTER TABLE test_history ADD COLUMN {name} {ddl}"))
+        logger.info("DATABASE: Added session telemetry columns: %s", ", ".join(name for name, _ in missing))
+    except Exception as exc:
+        logger.warning("DATABASE: Session telemetry column check skipped: %s", exc)
+
+
+ensure_session_telemetry_columns()
 
 # ================= APP INIT =================
 app = FastAPI(title="AI Educator Backend - Agentic v2.0 + Secure Admin + Coach API")
@@ -417,6 +448,13 @@ class SubmitSessionRequest(BaseModel):
     time_spent_seconds: int = Field(default=0, ge=0)
     focus_score: float = Field(default=0.0, ge=0, le=100)
     session_type: str = "exam"
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    response_latency_ms: int = Field(default=0, ge=0)
+    hint_count: int = Field(default=0, ge=0)
+    retry_count: int = Field(default=0, ge=0)
+    confidence_before: Optional[float] = Field(default=None, ge=0, le=100)
+    confidence_after: Optional[float] = Field(default=None, ge=0, le=100)
     replay_data: Optional[Dict[str, Any]] = None
 
 
@@ -495,6 +533,18 @@ def progress_payload(user: UserProgress) -> Dict[str, Any]:
     }
 
 
+def utc_naive(value: Optional[datetime]) -> Optional[datetime]:
+    if not value:
+        return None
+    if value.tzinfo:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def iso_or_none(value: Optional[datetime]) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
 def format_test_session(test: TestHistory) -> Dict[str, Any]:
     questions = int(test.total_questions or 0)
     correct = int(test.score or 0)
@@ -511,6 +561,15 @@ def format_test_session(test: TestHistory) -> Dict[str, Any]:
         if test.date
         else None
     )
+    started_at = getattr(test, "started_at", None)
+    completed_at = getattr(test, "completed_at", None)
+    confidence_before = getattr(test, "confidence_before", None)
+    confidence_after = getattr(test, "confidence_after", None)
+    confidence_change = (
+        round(float(confidence_after) - float(confidence_before), 1)
+        if confidence_before is not None and confidence_after is not None
+        else None
+    )
 
     return {
         "id": str(test.id),
@@ -525,6 +584,26 @@ def format_test_session(test: TestHistory) -> Dict[str, Any]:
         "timestamp": timestamp,
         "status": "completed",
         "performance": accuracy,
+        "time_spent_seconds": seconds,
+        "accuracy_rate": round(float(test.accuracy_rate or accuracy), 1),
+        "focus_score": round(float(test.focus_score or 0), 1),
+        "session_type": test.session_type or "exam",
+        "started_at": iso_or_none(started_at),
+        "completed_at": iso_or_none(completed_at),
+        "startedAt": iso_or_none(started_at),
+        "completedAt": iso_or_none(completed_at),
+        "response_latency_ms": int(getattr(test, "response_latency_ms", 0) or 0),
+        "responseLatencyMs": int(getattr(test, "response_latency_ms", 0) or 0),
+        "hint_count": int(getattr(test, "hint_count", 0) or 0),
+        "hintCount": int(getattr(test, "hint_count", 0) or 0),
+        "retry_count": int(getattr(test, "retry_count", 0) or 0),
+        "retryCount": int(getattr(test, "retry_count", 0) or 0),
+        "confidence_before": confidence_before,
+        "confidence_after": confidence_after,
+        "confidenceBefore": confidence_before,
+        "confidenceAfter": confidence_after,
+        "confidence_change": confidence_change,
+        "confidenceChange": confidence_change,
     }
 
 
@@ -603,9 +682,21 @@ def create_test_history(
     focus_score: float = 0.0,
     session_type: str = "exam",
     replay_data: Optional[Dict[str, Any]] = None,
+    started_at: Optional[datetime] = None,
+    completed_at: Optional[datetime] = None,
+    response_latency_ms: int = 0,
+    hint_count: int = 0,
+    retry_count: int = 0,
+    confidence_before: Optional[float] = None,
+    confidence_after: Optional[float] = None,
 ) -> TestHistory:
     correct = max(0, min(score, total_questions))
     accuracy_rate = round((correct / total_questions) * 100, 2) if total_questions else 0.0
+    started_at = utc_naive(started_at)
+    completed_at = utc_naive(completed_at)
+    measured_seconds = max(0, time_spent_seconds)
+    if measured_seconds == 0 and started_at and completed_at:
+        measured_seconds = max(0, int((completed_at - started_at).total_seconds()))
 
     test = TestHistory(
         user_id=user_id,
@@ -614,10 +705,17 @@ def create_test_history(
         score=correct,
         total_questions=total_questions,
         xp_earned=xp_earned,
-        time_spent_seconds=max(0, time_spent_seconds),
+        time_spent_seconds=measured_seconds,
         accuracy_rate=accuracy_rate,
         focus_score=max(0.0, min(100.0, focus_score)),
         session_type=session_type or "exam",
+        started_at=started_at,
+        completed_at=completed_at,
+        response_latency_ms=max(0, int(response_latency_ms or 0)),
+        hint_count=max(0, int(hint_count or 0)),
+        retry_count=max(0, int(retry_count or 0)),
+        confidence_before=confidence_before,
+        confidence_after=confidence_after,
     )
 
     db.add(test)
@@ -636,7 +734,7 @@ def create_test_history(
         topic=normalize_topic(topic),
         correct_answers=correct,
         total_questions=total_questions,
-        time_spent=max(0, time_spent_seconds),
+        time_spent=measured_seconds,
     )
 
     db.refresh(test)
@@ -1275,6 +1373,13 @@ def submit_session(
         focus_score=payload.focus_score,
         session_type=payload.session_type,
         replay_data=payload.replay_data,
+        started_at=payload.started_at,
+        completed_at=payload.completed_at,
+        response_latency_ms=payload.response_latency_ms,
+        hint_count=payload.hint_count,
+        retry_count=payload.retry_count,
+        confidence_before=payload.confidence_before,
+        confidence_after=payload.confidence_after,
     )
 
     user = get_or_create_progress(db, payload.user_id)
@@ -1321,6 +1426,13 @@ def save_test(
         focus_score=float(test.focus_score or 0),
         session_type=test.session_type or "exam",
         replay_data=test.replay_data,
+        started_at=test.started_at,
+        completed_at=test.completed_at,
+        response_latency_ms=test.response_latency_ms,
+        hint_count=test.hint_count,
+        retry_count=test.retry_count,
+        confidence_before=test.confidence_before,
+        confidence_after=test.confidence_after,
     )
 
     db.commit()

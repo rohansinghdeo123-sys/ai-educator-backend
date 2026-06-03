@@ -76,6 +76,13 @@ class TestHistory(Base):
     accuracy_rate = Column(Float, default=0.0)
     focus_score = Column(Float, default=0.0)
     session_type = Column(String, default="exam")
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    response_latency_ms = Column(Integer, default=0)
+    hint_count = Column(Integer, default=0)
+    retry_count = Column(Integer, default=0)
+    confidence_before = Column(Float, nullable=True)
+    confidence_after = Column(Float, nullable=True)
 
     details = relationship(
         "SessionDetail",
