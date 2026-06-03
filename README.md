@@ -72,6 +72,9 @@ API routes, but its internal services are split into focused modules under
 - `costing.py` estimates model input/output tokens and cost for each coach call.
 - `Logic/observability_store.py` persists Ops events plus model/tool/turn traces
   so monitoring survives backend restarts.
+- `multimodal_learning.py` converts uploaded images, screenshots, PDFs, and
+  text notes into structured OCR text, handwritten maths lines, parsed formulas,
+  and educational diagram specs for the Coach.
 
 ### Reasoning-first answer policy
 
@@ -81,6 +84,16 @@ invokes RAG only when source-grounded study material is useful or explicitly
 requested. Retrieval is tracked as `none`, `optional`, or `required`.
 
 Revision, Exam, and Artifact workspaces remain strict material-grounded flows.
+
+### Multimodal learning
+
+Study Coach attachments are validated before use. Supported inputs are PNG,
+JPEG, WebP, PDF, and text files. Images use the configured vision model for
+OCR-style extraction of visible text, handwritten work, equations, formulas, and
+diagram labels. PDFs/text are parsed locally where possible. The extracted
+signals are passed to formula checking, diagram planning, source metadata, and
+the final tutor prompt. Image extraction is model-assisted, so unclear
+handwriting is marked for verification instead of treated as guaranteed truth.
 When a student explicitly asks Open Coach to answer from notes, textbook data,
 or uploaded material, Open Coach also switches to strict grounding and returns
 the configured not-found message if the requested source is unavailable.
