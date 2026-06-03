@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, Iterator, List
 
 from groq import Groq
 
+from .costing import estimate_messages_tokens, estimate_model_cost_usd, estimate_text_tokens
 from .settings import coach_settings
 
 
@@ -24,6 +25,9 @@ class ModelCallRecord:
     attempt: int
     fallback: bool = False
     error: str = ""
+    estimated_input_tokens: int = 0
+    estimated_output_tokens: int = 0
+    estimated_cost_usd: float = 0.0
 
 
 class LLMRouter:
@@ -71,6 +75,43 @@ class LLMRouter:
             candidates.append(coach_settings.fallback_model)
         return candidates[: max(1, coach_settings.llm_max_attempts)]
 
+    def _record_call(
+        self,
+        *,
+        role: str,
+        model: str,
+        mode: str,
+        status: str,
+        started_at: float,
+        attempt: int,
+        input_tokens: int,
+        output_text: Any = "",
+        fallback: bool = False,
+        error: str = "",
+    ) -> None:
+        output_tokens = estimate_text_tokens(output_text)
+        self._record(ModelCallRecord(
+            role=role,
+            model=model,
+            provider=coach_settings.provider,
+            mode=mode,
+            status=status,
+            latency_ms=round((time.perf_counter() - started_at) * 1000),
+            attempt=attempt,
+            fallback=fallback,
+            error=error[:240],
+            estimated_input_tokens=input_tokens,
+            estimated_output_tokens=output_tokens,
+            estimated_cost_usd=estimate_model_cost_usd(model, input_tokens, output_tokens),
+        ))
+
+    @staticmethod
+    def _chunk_text(chunk: Any) -> str:
+        try:
+            return chunk.choices[0].delta.content or ""
+        except Exception:
+            return ""
+
     def complete(
         self,
         role: str,
@@ -80,6 +121,7 @@ class LLMRouter:
     ) -> str:
         last_error: Exception | None = None
         message_rows = list(messages)
+        input_tokens = estimate_messages_tokens(message_rows)
         for attempt, model in enumerate(self._candidate_models(role, complexity), start=1):
             started_at = time.perf_counter()
             try:
@@ -90,30 +132,31 @@ class LLMRouter:
                     **kwargs,
                 )
                 content = (response.choices[0].message.content or "").strip()
-                self._record(ModelCallRecord(
+                self._record_call(
                     role=role,
                     model=model,
-                    provider=coach_settings.provider,
                     mode="complete",
                     status="success",
-                    latency_ms=round((time.perf_counter() - started_at) * 1000),
+                    started_at=started_at,
                     attempt=attempt,
+                    input_tokens=input_tokens,
+                    output_text=content,
                     fallback=attempt > 1,
-                ))
+                )
                 return content
             except Exception as exc:
                 last_error = exc
-                self._record(ModelCallRecord(
+                self._record_call(
                     role=role,
                     model=model,
-                    provider=coach_settings.provider,
                     mode="complete",
                     status="error",
-                    latency_ms=round((time.perf_counter() - started_at) * 1000),
+                    started_at=started_at,
                     attempt=attempt,
+                    input_tokens=input_tokens,
                     fallback=attempt > 1,
-                    error=str(exc)[:240],
-                ))
+                    error=str(exc),
+                )
         raise last_error or RuntimeError(f"No model route was available for role '{role}'.")
 
     def stream(
@@ -124,11 +167,13 @@ class LLMRouter:
         **kwargs: Any,
     ) -> Iterator[Any]:
         message_rows = list(messages)
+        input_tokens = estimate_messages_tokens(message_rows)
         last_error: Exception | None = None
         emitted_chunks = 0
 
         for attempt, model in enumerate(self._candidate_models(role, complexity), start=1):
             started_at = time.perf_counter()
+            output_parts: list[str] = []
             try:
                 response = self._client().chat.completions.create(
                     model=model,
@@ -138,31 +183,36 @@ class LLMRouter:
                 )
                 for chunk in response:
                     emitted_chunks += 1
+                    chunk_text = self._chunk_text(chunk)
+                    if chunk_text:
+                        output_parts.append(chunk_text)
                     yield chunk
-                self._record(ModelCallRecord(
+                self._record_call(
                     role=role,
                     model=model,
-                    provider=coach_settings.provider,
                     mode="stream",
                     status="success",
-                    latency_ms=round((time.perf_counter() - started_at) * 1000),
+                    started_at=started_at,
                     attempt=attempt,
+                    input_tokens=input_tokens,
+                    output_text="".join(output_parts),
                     fallback=attempt > 1,
-                ))
+                )
                 return
             except Exception as exc:
                 last_error = exc
-                self._record(ModelCallRecord(
+                self._record_call(
                     role=role,
                     model=model,
-                    provider=coach_settings.provider,
                     mode="stream",
                     status="error",
-                    latency_ms=round((time.perf_counter() - started_at) * 1000),
+                    started_at=started_at,
                     attempt=attempt,
+                    input_tokens=input_tokens,
+                    output_text="".join(output_parts),
                     fallback=attempt > 1,
-                    error=str(exc)[:240],
-                ))
+                    error=str(exc),
+                )
                 if emitted_chunks:
                     raise
         raise last_error or RuntimeError(f"No streaming model route was available for role '{role}'.")
