@@ -1,5 +1,6 @@
-from types import SimpleNamespace
 import unittest
+from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -15,7 +16,8 @@ from Logic.coach.mastery_store import build_mastery_signal, persist_mastery_sign
 from Logic.coach.quality_scorer import score_coach_answer
 from Logic.coach.query_understanding import understand_query
 from Logic.coach.turn_engine import build_adaptive_answer_blocks, parse_semantic_event, semantic_event
-from models import AICoachMemory, AICoachProfile
+from Logic.analytics_engine import get_user_analytics
+from models import AICoachMemory, AICoachProfile, TestHistory, UserProgress
 
 
 class FakeCompletions:
@@ -158,6 +160,47 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertEqual(len(memories), 1)
         self.assertEqual(memories[0].metadata_json["observations"], 2)
         self.assertEqual(memories[0].metadata_json["support_count"], 2)
+        db.close()
+
+    def test_learning_telemetry_uses_measured_session_signals(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        started_at = datetime(2026, 6, 3, 10, 0, 0)
+        completed_at = started_at + timedelta(seconds=142)
+        db.add(UserProgress(user_id="student_telemetry", total_tests=1, total_questions=1, total_correct=1, xp=10))
+        db.add(
+            TestHistory(
+                user_id="student_telemetry",
+                date=date.today(),
+                topic="alkanes",
+                score=1,
+                total_questions=1,
+                xp_earned=10,
+                time_spent_seconds=142,
+                accuracy_rate=100,
+                focus_score=84,
+                session_type="autonomous_mission",
+                started_at=started_at,
+                completed_at=completed_at,
+                response_latency_ms=780,
+                hint_count=1,
+                retry_count=2,
+                confidence_before=45,
+                confidence_after=70,
+            )
+        )
+        db.commit()
+
+        analytics = get_user_analytics(db, "student_telemetry")
+
+        self.assertEqual(analytics["learning_telemetry"]["measured_sessions"], 1)
+        self.assertEqual(analytics["learning_telemetry"]["avg_session_seconds"], 142)
+        self.assertEqual(analytics["learning_telemetry"]["avg_response_latency_ms"], 780)
+        self.assertEqual(analytics["learning_telemetry"]["total_hints_used"], 1)
+        self.assertEqual(analytics["learning_telemetry"]["total_retries"], 2)
+        self.assertEqual(analytics["learning_telemetry"]["avg_confidence_change"], 25)
         db.close()
 
 
