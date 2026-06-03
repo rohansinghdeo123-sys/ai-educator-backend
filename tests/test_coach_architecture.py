@@ -113,6 +113,12 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertEqual(bundle.document_count, 1)
         self.assertEqual(bundle.citations[0]["source"], "Uploaded material")
 
+    def test_attachment_validation_rejects_mime_mismatch(self):
+        payload = "data:application/pdf;base64,TWF0dGVyIGhhcyBtYXNzLg=="
+        bundle = prepare_attachments([{"name": "fake.txt", "mime_type": "text/plain", "data_url": payload}], "Define matter")
+        self.assertFalse(bundle.safe_attachments)
+        self.assertTrue(any("does not match" in warning for warning in bundle.warnings))
+
     def test_active_mastery_profile_simplifies_repeated_confusion(self):
         memory = SimpleNamespace(metadata_json={
             "topic": "alkanes",

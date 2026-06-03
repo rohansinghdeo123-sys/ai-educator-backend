@@ -54,3 +54,44 @@ Revision, Exam, and Artifact workspaces remain strict material-grounded flows.
 When a student explicitly asks Open Coach to answer from notes, textbook data,
 or uploaded material, Open Coach also switches to strict grounding and returns
 the configured not-found message if the requested source is unavailable.
+
+## Production guardrails
+
+Set these environment variables before deploying:
+
+- `ALLOWED_ORIGINS`: comma-separated frontend origins. Defaults include local
+  development plus `https://agentifyai.in` and `https://www.agentifyai.in`.
+- `RATE_LIMIT_ENABLED`: defaults to `true`.
+- `RATE_LIMIT_PER_MINUTE`: default general limit is `120`.
+- `AI_RATE_LIMIT_PER_MINUTE`: default AI endpoint limit is `24`.
+- `ADMIN_RATE_LIMIT_PER_MINUTE`: default admin limit is `180`.
+- `AI_DAILY_QUOTA_PER_USER`: default daily coach quota is `180`.
+- `EXAM_DAILY_QUOTA_PER_USER`: default daily exam-generation quota is `80`.
+- `ARTIFACT_DAILY_QUOTA_PER_USER`: default daily artifact quota is `40`.
+
+Every response includes `X-Request-ID` and `X-Response-Time-ms`. Pass your own
+`X-Request-ID` from the frontend or gateway when you want to correlate logs.
+
+Health probes:
+
+- `GET /health/live`: liveness check for process uptime.
+- `GET /health/ready`: readiness check for database and Firebase Admin.
+- `GET /health`: public safe status without secret/debug details.
+
+Uploads are bounded and validated by MIME type, data URL type, file signature,
+file size, PDF page count, and extracted text size before entering tutor context.
+
+## Database migrations
+
+Alembic is configured under `migrations/`.
+
+Run migrations from the backend root:
+
+```bash
+alembic upgrade head
+```
+
+The app still contains a small compatibility backfill for session telemetry
+columns so existing deployments do not break before the first migration is run.
+Once deployments consistently run Alembic, that compatibility block can be
+removed.
