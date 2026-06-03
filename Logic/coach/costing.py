@@ -79,10 +79,17 @@ def estimate_messages_tokens(messages: Iterable[Mapping[str, Any]]) -> int:
     return total + image_count * VISION_IMAGE_TOKEN_ESTIMATE
 
 
-def estimate_model_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
-    input_price, output_price = _price_overrides().get(
-        model,
-        (DEFAULT_INPUT_USD_PER_1M, DEFAULT_OUTPUT_USD_PER_1M),
+def estimate_model_cost_usd(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    provider: str = "",
+) -> float:
+    overrides = _price_overrides()
+    provider_key = f"{provider}:{model}" if provider else ""
+    input_price, output_price = overrides.get(
+        provider_key,
+        overrides.get(model, (DEFAULT_INPUT_USD_PER_1M, DEFAULT_OUTPUT_USD_PER_1M)),
     )
     cost = (input_tokens / 1_000_000) * input_price + (output_tokens / 1_000_000) * output_price
     return round(cost, 8)

@@ -154,16 +154,17 @@ def persist_coach_trace(
     )
 
     for call in model_calls:
+        call_status = str(call.get("status") or "success")
         db.add(
             ModelToolTrace(
                 user_id=user_id,
                 session_id=session_id,
                 turn_id=turn_id,
-                trace_type="model",
+                trace_type="model" if call_status != "skipped" else "route",
                 name=str(call.get("role") or "model_call"),
                 provider=str(call.get("provider") or ""),
                 model=str(call.get("model") or ""),
-                status=str(call.get("status") or "success"),
+                status=call_status,
                 latency_ms=_as_int(call.get("latency_ms")),
                 estimated_input_tokens=_as_int(call.get("estimated_input_tokens")),
                 estimated_output_tokens=_as_int(call.get("estimated_output_tokens")),

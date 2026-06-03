@@ -2,7 +2,9 @@
 
 ## Study Page model routing
 
-The Study Page backend uses a small multi-agent model stack on Groq so routine work stays fast and affordable while harder tutor answers get a stronger model.
+The Study Page backend uses a small multi-agent model stack with budget-aware
+multi-provider failover. Groq remains the default provider, and OpenRouter or
+OpenAI-compatible providers can be added without changing code.
 
 Default routing:
 
@@ -19,6 +21,31 @@ Optional overrides:
 - `GROQ_CASUAL_MODEL`
 
 `GROQ_MODEL` is no longer used as the Study Page default. Use the specific variables above when changing model routing.
+
+Multi-provider failover:
+
+- `COACH_PROVIDER_ORDER`: comma-separated provider order, for example
+  `groq,openrouter,openai`.
+- `COACH_LLM_MAX_ATTEMPTS`: total route attempts per model call. A value of `3`
+  can try Groq, OpenRouter, and OpenAI primary routes before failing.
+- `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`, `OPENROUTER_FAST_MODEL`,
+  `OPENROUTER_TUTOR_MODEL`, `OPENROUTER_REVIEW_MODEL`,
+  `OPENROUTER_VISION_MODEL`, and `OPENROUTER_FALLBACK_MODEL`.
+- `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_FAST_MODEL`,
+  `OPENAI_TUTOR_MODEL`, `OPENAI_REVIEW_MODEL`, `OPENAI_VISION_MODEL`, and
+  `OPENAI_FALLBACK_MODEL`.
+
+Budget-aware routing:
+
+- `COACH_BUDGET_ROUTING`: defaults to `true`.
+- `COACH_ROUTE_PREFERENCE`: `balanced` keeps quality/provider order for main
+  tutor calls while choosing cheaper routes for fast/profiler work.
+  `lowest_cost` always sorts available routes by estimated price.
+- `COACH_TURN_BUDGET_USD`: optional max estimated spend per coach turn.
+- `COACH_DAILY_BUDGET_USD`: optional max estimated model spend over the last
+  24 hours, using durable `model_tool_traces`.
+- `COACH_ROUTE_OUTPUT_TOKEN_ESTIMATE`: default output token estimate used for
+  pre-call route budgeting when a request does not pass `max_tokens`.
 
 ## Unified Study Lab coach architecture
 

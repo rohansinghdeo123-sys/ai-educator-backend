@@ -1,6 +1,7 @@
 import unittest
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -50,6 +51,47 @@ class FakeCompletions:
 class FakeClient:
     def __init__(self):
         self.chat = SimpleNamespace(completions=FakeCompletions())
+
+
+class AlwaysFailCompletions:
+    def create(self, **_kwargs):
+        raise RuntimeError("provider unavailable")
+
+
+class StaticCompletions:
+    def __init__(self, content: str):
+        self.content = content
+        self.calls = 0
+        self.requests = []
+
+    def create(self, **kwargs):
+        self.calls += 1
+        self.requests.append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))],
+        )
+
+
+class StaticStreamCompletions:
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.calls = 0
+
+    def create(self, **kwargs):
+        self.calls += 1
+        if kwargs.get("stream"):
+            return [
+                SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=chunk))])
+                for chunk in self.chunks
+            ]
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="".join(self.chunks)))]
+        )
+
+
+class ProviderClient:
+    def __init__(self, completions):
+        self.chat = SimpleNamespace(completions=completions)
 
 
 class CoachArchitectureTests(unittest.TestCase):
@@ -110,6 +152,133 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertGreater(records[1]["estimated_input_tokens"], 0)
         self.assertGreater(records[1]["estimated_output_tokens"], 0)
         self.assertGreaterEqual(records[1]["estimated_cost_usd"], 0)
+
+    def test_router_fails_over_across_providers(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "COACH_PROVIDER_ORDER": "groq,openrouter",
+                "COACH_LLM_MAX_ATTEMPTS": "2",
+                "COACH_BUDGET_ROUTING": "false",
+                "OPENROUTER_API_KEY": "test-key",
+                "OPENROUTER_TUTOR_MODEL": "openrouter/test-tutor",
+            },
+            clear=False,
+        ):
+            router = LLMRouter()
+            router._provider_clients["groq"] = ProviderClient(AlwaysFailCompletions())
+            router._provider_clients["openrouter"] = ProviderClient(StaticCompletions("OpenRouter recovered"))
+            router.begin_turn("turn_provider_failover")
+
+            answer = router.complete("tutor", [{"role": "user", "content": "Explain force"}], max_tokens=120)
+            records = router.records()
+
+        self.assertEqual(answer, "OpenRouter recovered")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["provider"], "groq")
+        self.assertEqual(records[0]["status"], "error")
+        self.assertEqual(records[1]["provider"], "openrouter")
+        self.assertEqual(records[1]["status"], "success")
+        self.assertTrue(records[1]["fallback"])
+
+    def test_router_stream_fails_over_across_providers(self):
+        stream = StaticStreamCompletions(["Better", " answer"])
+        with patch.dict(
+            "os.environ",
+            {
+                "COACH_PROVIDER_ORDER": "groq,openrouter",
+                "COACH_LLM_MAX_ATTEMPTS": "2",
+                "COACH_BUDGET_ROUTING": "false",
+                "OPENROUTER_API_KEY": "test-key",
+                "OPENROUTER_REVIEW_MODEL": "openrouter/reviewer",
+            },
+            clear=False,
+        ):
+            router = LLMRouter()
+            router._provider_clients["groq"] = ProviderClient(AlwaysFailCompletions())
+            router._provider_clients["openrouter"] = ProviderClient(stream)
+            router.begin_turn("turn_stream_failover")
+
+            chunks = list(router.stream("reviewer", [{"role": "user", "content": "Review this"}], max_tokens=120))
+            records = router.records()
+
+        text = "".join(chunk.choices[0].delta.content for chunk in chunks)
+        self.assertEqual(text, "Better answer")
+        self.assertEqual(records[0]["provider"], "groq")
+        self.assertEqual(records[0]["status"], "error")
+        self.assertEqual(records[1]["provider"], "openrouter")
+        self.assertEqual(records[1]["mode"], "stream")
+        self.assertEqual(records[1]["status"], "success")
+        self.assertGreater(records[1]["estimated_output_tokens"], 0)
+
+    def test_router_prefers_lowest_cost_when_configured(self):
+        cheap = StaticCompletions("Cheap route selected")
+        with patch.dict(
+            "os.environ",
+            {
+                "COACH_PROVIDER_ORDER": "groq,openrouter",
+                "COACH_LLM_MAX_ATTEMPTS": "2",
+                "COACH_BUDGET_ROUTING": "true",
+                "COACH_ROUTE_PREFERENCE": "lowest_cost",
+                "COACH_DAILY_BUDGET_USD": "0",
+                "COACH_TURN_BUDGET_USD": "0",
+                "OPENROUTER_API_KEY": "test-key",
+                "OPENROUTER_TUTOR_MODEL": "openrouter/cheap",
+                "COACH_MODEL_PRICES_PER_1M": (
+                    "groq:openai/gpt-oss-120b=10:10;"
+                    "openrouter:openrouter/cheap=0.001:0.001"
+                ),
+            },
+            clear=False,
+        ):
+            router = LLMRouter()
+            router._provider_clients["groq"] = ProviderClient(StaticCompletions("Expensive route"))
+            router._provider_clients["openrouter"] = ProviderClient(cheap)
+            router.begin_turn("turn_lowest_cost")
+
+            answer = router.complete("tutor", [{"role": "user", "content": "Explain work"}], max_tokens=120)
+            records = router.records()
+
+        self.assertEqual(answer, "Cheap route selected")
+        self.assertEqual(records[0]["provider"], "openrouter")
+        self.assertEqual(records[0]["budget_action"], "allowed")
+        self.assertEqual(cheap.calls, 1)
+
+    def test_router_skips_over_budget_route_and_uses_cheaper_fallback_provider(self):
+        cheap = StaticCompletions("Budget safe answer")
+        with patch.dict(
+            "os.environ",
+            {
+                "COACH_PROVIDER_ORDER": "groq,openrouter",
+                "COACH_LLM_MAX_ATTEMPTS": "2",
+                "COACH_BUDGET_ROUTING": "true",
+                "COACH_ROUTE_PREFERENCE": "balanced",
+                "COACH_DAILY_BUDGET_USD": "0",
+                "COACH_TURN_BUDGET_USD": "0.0001",
+                "OPENROUTER_API_KEY": "test-key",
+                "OPENROUTER_TUTOR_MODEL": "openrouter/cheap",
+                "COACH_MODEL_PRICES_PER_1M": (
+                    "groq:openai/gpt-oss-120b=10:10;"
+                    "openrouter:openrouter/cheap=0.001:0.001"
+                ),
+            },
+            clear=False,
+        ):
+            router = LLMRouter()
+            router._provider_clients["groq"] = ProviderClient(StaticCompletions("Should be skipped"))
+            router._provider_clients["openrouter"] = ProviderClient(cheap)
+            router.begin_turn("turn_budget_skip")
+
+            answer = router.complete("tutor", [{"role": "user", "content": "Explain pressure"}], max_tokens=120)
+            records = router.records()
+
+        self.assertEqual(answer, "Budget safe answer")
+        self.assertEqual(records[0]["provider"], "groq")
+        self.assertEqual(records[0]["status"], "skipped")
+        self.assertEqual(records[0]["budget_action"], "skipped")
+        self.assertEqual(records[1]["provider"], "openrouter")
+        self.assertEqual(records[1]["status"], "success")
+        self.assertEqual(cheap.calls, 1)
 
     def test_unified_orchestrator_routes_specialists_selectively(self):
         simple = build_orchestration_plan(understand_query("Define matter"), "Define matter")
