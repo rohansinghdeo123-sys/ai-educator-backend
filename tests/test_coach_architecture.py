@@ -17,7 +17,21 @@ from Logic.coach.quality_scorer import score_coach_answer
 from Logic.coach.query_understanding import understand_query
 from Logic.coach.turn_engine import build_adaptive_answer_blocks, parse_semantic_event, semantic_event
 from Logic.analytics_engine import get_user_analytics
-from models import AICoachMemory, AICoachProfile, TestHistory, UserProgress
+from Logic.agent_event_bus import AgentEvent
+from Logic.observability_store import (
+    get_observability_events_since,
+    get_observability_summary,
+    persist_coach_trace,
+    persist_observability_event,
+)
+from models import (
+    AICoachMemory,
+    AICoachProfile,
+    ModelToolTrace,
+    ObservabilityEvent,
+    TestHistory,
+    UserProgress,
+)
 
 
 class FakeCompletions:
@@ -93,6 +107,9 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertEqual(records[0]["status"], "error")
         self.assertEqual(records[1]["status"], "success")
         self.assertTrue(records[1]["fallback"])
+        self.assertGreater(records[1]["estimated_input_tokens"], 0)
+        self.assertGreater(records[1]["estimated_output_tokens"], 0)
+        self.assertGreaterEqual(records[1]["estimated_cost_usd"], 0)
 
     def test_unified_orchestrator_routes_specialists_selectively(self):
         simple = build_orchestration_plan(understand_query("Define matter"), "Define matter")
@@ -207,6 +224,72 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertEqual(analytics["learning_telemetry"]["total_hints_used"], 1)
         self.assertEqual(analytics["learning_telemetry"]["total_retries"], 2)
         self.assertEqual(analytics["learning_telemetry"]["avg_confidence_change"], 25)
+        db.close()
+
+    def test_durable_observability_stores_events_and_trace_costs(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+
+        event = AgentEvent(
+            version=7,
+            timestamp=datetime.utcnow().isoformat(),
+            agent_id="coach",
+            event_type="metric",
+            data={
+                "message": "Coach answer scored and persisted.",
+                "latency_ms": 640,
+                "estimated_cost_usd": 0.00009,
+            },
+            session_id="session_obs",
+        )
+        persist_observability_event(db, event)
+        events = get_observability_events_since(db, 0)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["version"], 7)
+        self.assertEqual(db.query(ObservabilityEvent).count(), 1)
+
+        metrics = persist_coach_trace(
+            db,
+            user_id="student_obs",
+            session_id="session_obs",
+            turn_id="turn_obs",
+            observability={
+                "latency_ms": 1200,
+                "query": {"intent": "definition"},
+                "retrieval": {"policy": "none"},
+                "plan": {"strategy": "simple"},
+                "quality": {"passed": True, "score": 0.91},
+                "trace": {
+                    "phases_ms": {"received": 10, "answering": 1000},
+                    "tools": [{"name": "answer_verifier", "passed": True}],
+                },
+                "model_calls": [
+                    {
+                        "role": "tutor",
+                        "model": "openai/gpt-oss-120b",
+                        "provider": "groq",
+                        "mode": "complete",
+                        "status": "success",
+                        "latency_ms": 520,
+                        "attempt": 1,
+                        "estimated_input_tokens": 220,
+                        "estimated_output_tokens": 95,
+                        "estimated_cost_usd": 0.000101,
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(metrics["model_calls"], 1)
+        self.assertEqual(metrics["tool_calls"], 1)
+        self.assertEqual(db.query(ModelToolTrace).count(), 3)
+        summary = get_observability_summary(db)
+        self.assertEqual(summary["model_calls"], 1)
+        self.assertEqual(summary["tool_calls"], 1)
+        self.assertEqual(summary["turns"], 1)
+        self.assertGreater(summary["estimated_cost_usd"], 0)
         db.close()
 
 

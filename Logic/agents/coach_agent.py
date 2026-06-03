@@ -46,6 +46,7 @@ from Logic.coach.memory_store import (
     interaction_messages,
 )
 from Logic.knowledge_graph import knowledge_graph
+from Logic.observability_store import persist_coach_trace
 from models import (
     AICoachDailySignal,
     AICoachInteraction,
@@ -2258,6 +2259,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         model_calls=llm_router.records(),
         mastery_signal=mastery_signal,
     )
+    observability["latency_ms"] = latency_ms
 
     # ── Base64‑encode the entire answer to protect newlines ─────────────
     yield semantic_event(
@@ -2387,6 +2389,18 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         quality_score=quality_report.score,
     )
     persisted_mastery_signal = persist_mastery_signal(db=db, coach=coach, signal=mastery_signal)
+    trace_metrics: Dict[str, Any] = {}
+    try:
+        trace_metrics = persist_coach_trace(
+            db,
+            user_id=user_id,
+            session_id=session_id,
+            turn_id=turn_id,
+            observability=observability,
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.warning("Could not persist coach observability trace: %s", exc)
 
     coach_observability.emit(
         session_id,
@@ -2398,8 +2412,12 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         quality_score=quality_report.score,
         quality_passed=quality_report.passed,
         latency_ms=latency_ms,
+        estimated_cost_usd=trace_metrics.get("estimated_cost_usd", 0.0),
+        estimated_input_tokens=trace_metrics.get("estimated_input_tokens", 0),
+        estimated_output_tokens=trace_metrics.get("estimated_output_tokens", 0),
         model_calls=llm_router.records(),
         mastery_signal=persisted_mastery_signal,
+        trace_metrics=trace_metrics,
     )
 
     event_bus.emit(

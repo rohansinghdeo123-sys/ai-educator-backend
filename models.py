@@ -273,3 +273,56 @@ class AICoachDailySignal(Base):
     risk_level = Column(String, default="normal")
 
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# =========================================================
+# DURABLE OBSERVABILITY
+# =========================================================
+class ObservabilityEvent(Base):
+    """
+    Durable copy of agent events that were previously only kept in memory.
+    Ops can now recover recent activity after restarts and inspect historical failures.
+    """
+    __tablename__ = "observability_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_version = Column(Integer, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    agent_id = Column(String, index=True)
+    event_type = Column(String, index=True)
+    severity = Column(String, default="info", index=True)
+    session_id = Column(String, default="", index=True)
+    source = Column(String, default="event_bus")
+
+    summary = Column(Text, default="")
+    latency_ms = Column(Integer, default=0)
+    estimated_cost_usd = Column(Float, default=0.0)
+    data_json = Column(JSON, default=dict)
+
+
+class ModelToolTrace(Base):
+    """
+    Durable trace row for model calls, tool calls, and full coach turns.
+    Costs are estimated unless the provider later returns exact token accounting.
+    """
+    __tablename__ = "model_tool_traces"
+
+    id = Column(Integer, primary_key=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    user_id = Column(String, nullable=True, index=True)
+    session_id = Column(String, nullable=True, index=True)
+    turn_id = Column(String, nullable=True, index=True)
+
+    trace_type = Column(String, index=True)  # model, tool, turn
+    name = Column(String, index=True)
+    provider = Column(String, nullable=True)
+    model = Column(String, nullable=True)
+    status = Column(String, default="success", index=True)
+
+    latency_ms = Column(Integer, default=0)
+    estimated_input_tokens = Column(Integer, default=0)
+    estimated_output_tokens = Column(Integer, default=0)
+    estimated_cost_usd = Column(Float, default=0.0)
+    metadata_json = Column(JSON, default=dict)

@@ -22,6 +22,7 @@ import logging
 from datetime import datetime
 from collections import deque
 from dataclasses import dataclass, field, asdict
+from typing import Callable, Optional
 
 logger = logging.getLogger("ai_educator.event_bus")
 
@@ -90,9 +91,14 @@ class AgentEventBus:
         self._agents: dict[str, AgentStatus] = {}
         self._version_counter: int = 0
         self._lock = threading.Lock()
+        self._sink: Optional[Callable[[AgentEvent], None]] = None
 
         # Register default agents
         self._register_default_agents()
+
+    def set_sink(self, sink: Callable[[AgentEvent], None] | None) -> None:
+        """Attach an optional durable persistence sink for emitted events."""
+        self._sink = sink
 
     def _register_default_agents(self):
         """Register all known agents with their default status."""
@@ -163,6 +169,12 @@ class AgentEventBus:
             logger.warning(log_msg)
         else:
             logger.info(log_msg)
+
+        if self._sink:
+            try:
+                self._sink(event)
+            except Exception as exc:
+                logger.warning("Event sink failed for %s/%s: %s", agent_id, event_type, exc)
 
     def _update_agent_status(self, agent_id: str, event: AgentEvent):
         """Update the agent registry based on the event. Must be called with lock held."""

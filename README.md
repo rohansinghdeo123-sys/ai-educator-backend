@@ -42,6 +42,9 @@ API routes, but its internal services are split into focused modules under
 - `quality_scorer.py` scores relevance, grounding, completeness, clarity,
   student friendliness, formatting, and hallucination risk.
 - `observability.py` records structured coach metrics through the event bus.
+- `costing.py` estimates model input/output tokens and cost for each coach call.
+- `Logic/observability_store.py` persists Ops events plus model/tool/turn traces
+  so monitoring survives backend restarts.
 
 ### Reasoning-first answer policy
 
@@ -68,9 +71,17 @@ Set these environment variables before deploying:
 - `AI_DAILY_QUOTA_PER_USER`: default daily coach quota is `180`.
 - `EXAM_DAILY_QUOTA_PER_USER`: default daily exam-generation quota is `80`.
 - `ARTIFACT_DAILY_QUOTA_PER_USER`: default daily artifact quota is `40`.
+- `COACH_DEFAULT_INPUT_USD_PER_1M` and `COACH_DEFAULT_OUTPUT_USD_PER_1M`:
+  default estimated model prices when a specific model override is not set.
+- `COACH_MODEL_PRICES_PER_1M`: optional semicolon-separated model prices, for
+  example `model-a=0.20:0.60;model-b=0.10:0.30`.
 
 Every response includes `X-Request-ID` and `X-Response-Time-ms`. Pass your own
 `X-Request-ID` from the frontend or gateway when you want to correlate logs.
+
+Ops observability is durable. `/admin/poll`, `/admin/events`, and `/admin/stats`
+now include database-backed observability summaries, model-call counts,
+tool-call counts, average latency, and estimated cost.
 
 Health probes:
 

@@ -55,6 +55,13 @@ from Logic.agent_event_bus import event_bus
 from Logic.agent_router import get_agent_registry, route_to_agent
 from Logic.analytics_engine import get_user_analytics, update_topic_performance
 from Logic.autonomous_study_loop import run_autonomous_study_loop
+from Logic.observability_store import (
+    get_latest_observability_version,
+    get_observability_events_since,
+    get_observability_summary,
+    get_recent_observability_events,
+    persist_event_from_bus,
+)
 from Logic.agents.coach_agent import (
     get_or_create_coach,
     run_daily_learning_cycle,
@@ -257,6 +264,7 @@ def ensure_session_telemetry_columns() -> None:
 
 
 ensure_session_telemetry_columns()
+event_bus.set_sink(persist_event_from_bus)
 
 # ================= APP INIT =================
 app = FastAPI(title="AI Educator Backend - Agentic v2.0 + Secure Admin + Coach API")
@@ -1324,38 +1332,63 @@ def admin_get_events(
     agent_id: Optional[str] = Query(default=None),
     severity: Optional[str] = Query(default=None),
     event_type: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
     _current_admin: Dict[str, Any] = Depends(require_admin),
 ):
-    return {
-        "events": event_bus.get_recent_events(
+    events = get_recent_observability_events(
+        db,
+        limit=limit,
+        agent_id=agent_id,
+        severity=severity,
+        event_type=event_type,
+    )
+    durable = bool(events)
+    if not events:
+        events = event_bus.get_recent_events(
             limit=limit,
             agent_id=agent_id,
             severity=severity,
             event_type=event_type,
-        ),
+        )
+    return {
+        "events": events,
+        "durable": durable,
         "total_buffered": len(event_bus._events),
+        "observability": get_observability_summary(db),
     }
 
 
 @app.get("/admin/poll")
 def admin_poll(
     since: int = Query(default=0, description="Event version cursor. Pass 0 on first call."),
+    db: Session = Depends(get_db),
     _current_admin: Dict[str, Any] = Depends(require_admin),
 ):
-    new_events = event_bus.get_events_since(since)
-    latest_version = event_bus.get_latest_version()
+    new_events = get_observability_events_since(db, since)
+    if not new_events:
+        new_events = event_bus.get_events_since(since)
+    latest_version = max(event_bus.get_latest_version(), get_latest_observability_version(db))
+    observability = get_observability_summary(db)
+    system = event_bus.get_system_stats()
+    system["observability"] = observability
 
     return {
         "events": new_events,
         "agents": event_bus.get_all_agents(),
-        "system": event_bus.get_system_stats(),
+        "system": system,
+        "observability": observability,
         "version": latest_version,
     }
 
 
 @app.get("/admin/stats")
-def admin_get_stats(_current_admin: Dict[str, Any] = Depends(require_admin)):
-    return event_bus.get_system_stats()
+def admin_get_stats(
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    stats = event_bus.get_system_stats()
+    stats["observability"] = get_observability_summary(db)
+    return stats
 
 
 @app.post("/admin/command")
