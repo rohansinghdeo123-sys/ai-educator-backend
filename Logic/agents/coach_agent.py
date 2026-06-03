@@ -87,13 +87,9 @@ def _merge_attachment_material(
     attachment_bundle,
     scope: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    attachment_context = "\n\n".join(
-        value for value in (
-            str(getattr(attachment_bundle, "context", "") or "").strip(),
-            str(getattr(attachment_bundle, "vision_summary", "") or "").strip(),
-        )
-        if value
-    )
+    structured_context = str(getattr(attachment_bundle, "context", "") or "").strip()
+    raw_vision_context = str(getattr(attachment_bundle, "vision_summary", "") or "").strip()
+    attachment_context = structured_context or raw_vision_context
     if not attachment_context:
         return retrieved_material
 
@@ -1882,6 +1878,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         question=question,
         llm_router=llm_router,
     )
+    multimodal_payload = getattr(attachment_bundle, "multimodal", {}) or {}
     retrieved_material = (
         _retrieve_selected_material(request, adaptive_context, conversation_context)
         if retrieval_policy != "none"
@@ -1903,6 +1900,12 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             images=attachment_bundle.image_count,
             documents=attachment_bundle.document_count,
             warnings=attachment_bundle.warnings,
+            multimodal={
+                "confidence": multimodal_payload.get("confidence", 0),
+                "formulas": len(multimodal_payload.get("formulas") or []),
+                "math_lines": len(multimodal_payload.get("math_lines") or []),
+                "diagrams": len(multimodal_payload.get("diagram_specs") or []),
+            },
         )
     material_is_supported = (
         _material_supports_question(retrieved_material, adaptive_context, conversation_context)
@@ -1915,7 +1918,11 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if "calculator" in orchestration_plan["tools"]:
         tool_outputs["calculator"] = coach_tool_registry.run("calculator", question=question)
     if "formula_checker" in orchestration_plan["tools"]:
-        tool_outputs["formula_checker"] = coach_tool_registry.run("formula_checker", question=question)
+        tool_outputs["formula_checker"] = coach_tool_registry.run(
+            "formula_checker",
+            question=question,
+            multimodal=multimodal_payload,
+        )
     if "practice_generator" in orchestration_plan["tools"]:
         tool_outputs["practice_generator"] = coach_tool_registry.run(
             "practice_generator",
@@ -1927,6 +1934,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "diagram_helper",
             question=question,
             topic=str(selected_scope.get("topic") or ""),
+            multimodal=multimodal_payload,
         )
     if "safety_review" in orchestration_plan["tools"]:
         tool_outputs["safety_review"] = coach_tool_registry.run("safety_review", question=question)
@@ -2308,6 +2316,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 "direct_answer": orchestration_plan["direct_answer"],
             },
             "sources": source_bundle,
+            "multimodal": multimodal_payload,
             "verification": verification,
             "latency_ms": latency_ms,
         },
@@ -2352,6 +2361,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "mastery_profile": mastery_profile,
             "orchestration": orchestration_plan,
             "sources": source_bundle,
+            "multimodal": multimodal_payload,
         },
     )
     _persist_interaction(
@@ -2385,6 +2395,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "orchestration": orchestration_plan,
             "sources": source_bundle,
             "verification": verification,
+            "multimodal": multimodal_payload,
         },
         quality_score=quality_report.score,
     )

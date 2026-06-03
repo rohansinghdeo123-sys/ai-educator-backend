@@ -7,6 +7,7 @@ import operator
 import re
 from typing import Any, Dict
 
+from .multimodal_learning import infer_diagram_specs, parse_formula_signals
 from .quality_scorer import score_coach_answer
 
 
@@ -19,7 +20,6 @@ _OPERATORS = {
     ast.USub: operator.neg,
     ast.UAdd: operator.pos,
 }
-_FORMULA_PATTERN = re.compile(r"\b(?:[A-Z][a-z]?\d*){2,}(?:[+-]\d*|[+-])?\b")
 
 
 def _evaluate(node: ast.AST) -> float:
@@ -50,14 +50,20 @@ def calculator(question: str) -> Dict[str, Any]:
     return {"used": False, "reason": "No explicit arithmetic expression found."}
 
 
-def formula_checker(question: str, answer: str = "") -> Dict[str, Any]:
-    formulas = []
-    for value in _FORMULA_PATTERN.findall(f"{question} {answer}"):
-        if value not in formulas:
-            formulas.append(value)
+def formula_checker(question: str, answer: str = "", multimodal: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    multimodal = multimodal if isinstance(multimodal, dict) else {}
+    extracted = []
+    for item in multimodal.get("formulas") or []:
+        if isinstance(item, dict):
+            extracted.append(str(item.get("raw") or item.get("display") or ""))
+        else:
+            extracted.append(str(item))
+    formulas = parse_formula_signals(f"{question}\n{answer}\n" + "\n".join(extracted))
+    formatted = [formula.to_dict() for formula in formulas]
     return {
         "used": bool(formulas),
-        "formulas": formulas[:12],
+        "formulas": [formula.raw for formula in formulas[:12]],
+        "formatted": formatted[:12],
         "directive": "Keep chemical symbols, subscripts, charges, and equations exact." if formulas else "",
     }
 
@@ -74,14 +80,41 @@ def practice_generator(question: str, topic: str = "", difficulty: str = "adapti
     }
 
 
-def diagram_helper(question: str, topic: str = "") -> Dict[str, Any]:
+def diagram_helper(question: str, topic: str = "", multimodal: Dict[str, Any] | None = None) -> Dict[str, Any]:
     normalized = (question or "").lower()
-    diagram_type = "reaction flow" if any(term in normalized for term in ("reaction", "mechanism")) else "concept sketch"
+    multimodal = multimodal if isinstance(multimodal, dict) else {}
+    context = "\n".join(
+        value
+        for value in (
+            str(multimodal.get("ocr_text") or ""),
+            str(multimodal.get("handwritten_text") or ""),
+            "\n".join(str(line) for line in multimodal.get("math_lines") or []),
+        )
+        if value
+    )
+    formula_signals = parse_formula_signals(
+        "\n".join(
+            str(item.get("raw") or item.get("display") or item)
+            for item in multimodal.get("formulas") or []
+        )
+    )
+    specs = [spec.to_dict() for spec in infer_diagram_specs(question, context, formula_signals)]
+    diagram_type = (
+        specs[0]["diagram_type"]
+        if specs
+        else "reaction flow"
+        if any(term in normalized for term in ("reaction", "mechanism"))
+        else "concept sketch"
+    )
     return {
         "used": True,
         "diagram_type": diagram_type,
         "topic": topic or "current concept",
-        "directive": "Describe a simple labelled visual only if it makes the explanation easier to understand.",
+        "diagram_specs": specs,
+        "directive": (
+            "When a diagram helps, describe the labelled visual using the diagram_specs. "
+            "Keep it educational and tied to the student's exact doubt; do not add decoration."
+        ),
     }
 
 

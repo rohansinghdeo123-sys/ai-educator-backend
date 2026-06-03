@@ -8,6 +8,11 @@ from io import BytesIO
 import re
 from typing import Any, Dict, Iterable, List
 
+from .multimodal_learning import (
+    MultimodalExtraction,
+    build_multimodal_extraction,
+    build_multimodal_extraction_from_json,
+)
 from .settings import coach_settings
 
 
@@ -21,6 +26,7 @@ _DATA_URL_RE = re.compile(r"^data:(?P<mime>[-\w.+/]+)(?:;charset=[^;,]+)?;base64
 class AttachmentBundle:
     context: str = ""
     vision_summary: str = ""
+    multimodal: Dict[str, Any] = field(default_factory=dict)
     citations: List[Dict[str, Any]] = field(default_factory=list)
     safe_attachments: List[Dict[str, Any]] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -101,8 +107,12 @@ def _vision_summary(question: str, images: List[Dict[str, Any]], llm_router: Any
     content: List[Dict[str, Any]] = [{
         "type": "text",
         "text": (
-            "Read the attached school-study image or screenshot carefully. Extract the visible "
-            "question, formulas, labels, and any handwritten working. Describe only what is visible. "
+            "Read the attached school-study image or screenshot carefully. Return JSON only. "
+            "Extract printed OCR text, handwritten work, equations, formulas, visible diagram labels, "
+            "and the likely school topic. Do not solve the problem yet; only extract what is visible. "
+            "JSON shape: {\"visible_text\":\"...\",\"handwritten_work\":\"...\","
+            "\"math_lines\":[\"...\"],\"formulas\":[\"...\"],\"diagram_labels\":[\"...\"],"
+            "\"likely_topic\":\"...\",\"confidence\":0.0}. "
             f"The student asked: {question}"
         ),
     }]
@@ -129,6 +139,7 @@ def prepare_attachments(
     bundle = AttachmentBundle()
     images_for_vision: List[Dict[str, Any]] = []
     documents: List[str] = []
+    document_text_parts: List[str] = []
 
     for index, item in enumerate(list(attachments or [])[: coach_settings.max_attachments]):
         if not isinstance(item, dict):
@@ -181,6 +192,7 @@ def prepare_attachments(
         bundle.safe_attachments.append(safe_item)
         if text.strip():
             documents.append(f"UPLOADED MATERIAL: {name}\n{text.strip()}")
+            document_text_parts.append(text.strip())
         else:
             bundle.warnings.append(f"{name}: no readable text was extracted.")
         bundle.citations.append({
@@ -191,6 +203,30 @@ def prepare_attachments(
             "excerpt": text[:220].strip() or "Uploaded document supplied by the student.",
         })
 
-    bundle.context = "\n\n".join(documents)[: coach_settings.max_attachment_chars]
     bundle.vision_summary = _vision_summary(question, images_for_vision, llm_router)
+    document_text = "\n\n".join(document_text_parts)
+    extraction: MultimodalExtraction
+    if bundle.vision_summary:
+        extraction = build_multimodal_extraction_from_json(
+            question=question,
+            raw_response=bundle.vision_summary,
+            fallback_text=document_text,
+        )
+    else:
+        extraction = build_multimodal_extraction(
+            question=question,
+            document_text=document_text,
+        )
+    bundle.multimodal = extraction.to_dict()
+    extraction_context = extraction.as_context()
+    bundle.context = "\n\n".join(
+        value
+        for value in (
+            "\n\n".join(documents),
+            extraction_context,
+        )
+        if value.strip()
+    )[: coach_settings.max_attachment_chars]
+    if extraction.warnings:
+        bundle.warnings.extend(warning for warning in extraction.warnings if warning not in bundle.warnings)
     return bundle

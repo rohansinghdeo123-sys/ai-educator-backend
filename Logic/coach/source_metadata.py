@@ -30,6 +30,23 @@ def build_source_bundle(
 
     attachment_citations = list(getattr(attachment_bundle, "citations", []) or [])
     citations.extend(attachment_citations)
+    multimodal = getattr(attachment_bundle, "multimodal", {}) or {}
+    if multimodal and any(
+        multimodal.get(key)
+        for key in ("ocr_text", "handwritten_text", "math_lines", "formulas", "diagram_specs")
+    ):
+        extraction_excerpt = _excerpt(
+            multimodal.get("ocr_text")
+            or multimodal.get("handwritten_text")
+            or "Structured OCR, formula, and diagram extraction from uploaded material."
+        )
+        citations.append({
+            "id": "upload-multimodal-extraction",
+            "label": "Multimodal extraction",
+            "source": "Uploaded material analysis",
+            "section_id": "",
+            "excerpt": extraction_excerpt,
+        })
     has_image = any(str(item.get("source") or "") == "Uploaded image" for item in attachment_citations)
     grounded = bool(citations)
     return {

@@ -10,7 +10,9 @@ from database import Base
 from Logic.coach.evaluation_suite import SCENARIOS, run_offline_coach_evaluation
 from Logic.coach.attachments import prepare_attachments
 from Logic.coach.mastery_engine import build_active_mastery_profile
-from Logic.coach.specialist_tools import calculator, formula_checker
+from Logic.coach.multimodal_learning import infer_diagram_specs, parse_formula_signals
+from Logic.coach.source_metadata import build_source_bundle
+from Logic.coach.specialist_tools import calculator, diagram_helper, formula_checker
 from Logic.coach.unified_orchestrator import build_orchestration_plan
 from Logic.coach.llm_router import LLMRouter
 from Logic.coach.mastery_store import build_mastery_signal, persist_mastery_signal
@@ -92,6 +94,21 @@ class StaticStreamCompletions:
 class ProviderClient:
     def __init__(self, completions):
         self.chat = SimpleNamespace(completions=completions)
+
+
+class FakeVisionRouter:
+    def complete(self, **_kwargs):
+        return """
+{
+  "visible_text": "Find force when mass = 2 kg and acceleration = 3 m/s^2. CH4 is methane.",
+  "handwritten_work": "F = ma",
+  "math_lines": ["F = m × a", "F = 2 × 3"],
+  "formulas": ["F = ma", "CH4"],
+  "diagram_labels": ["object", "force arrow", "mass"],
+  "likely_topic": "Newton's second law",
+  "confidence": 0.86
+}
+""".strip()
 
 
 class CoachArchitectureTests(unittest.TestCase):
@@ -298,6 +315,7 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertIn("Matter has mass", bundle.context)
         self.assertEqual(bundle.document_count, 1)
         self.assertEqual(bundle.citations[0]["source"], "Uploaded material")
+        self.assertIn("multimodal", bundle.to_dict())
 
     def test_attachment_validation_rejects_mime_mismatch(self):
         payload = "data:application/pdf;base64,TWF0dGVyIGhhcyBtYXNzLg=="
@@ -324,7 +342,43 @@ class CoachArchitectureTests(unittest.TestCase):
         unsafe = calculator("Run import os")
         self.assertEqual(calculation["result"], 4.0)
         self.assertEqual(formulas["formulas"], ["CH4", "C2H6"])
+        self.assertEqual(formulas["formatted"][0]["display"], "CH₄")
         self.assertFalse(unsafe["used"])
+
+    def test_multimodal_image_extracts_ocr_math_formulas_and_diagram_specs(self):
+        one_pixel_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+        bundle = prepare_attachments(
+            [{
+                "name": "force-doubt.png",
+                "mime_type": "image/png",
+                "data_url": f"data:image/png;base64,{one_pixel_png}",
+            }],
+            "Solve this handwritten force question with a diagram",
+            llm_router=FakeVisionRouter(),
+        )
+
+        self.assertEqual(bundle.image_count, 1)
+        self.assertIn("MULTIMODAL EXTRACTION", bundle.context)
+        self.assertIn("F = ma", bundle.context)
+        self.assertTrue(bundle.multimodal["math_lines"])
+        self.assertIn("CH4", [item["raw"] for item in bundle.multimodal["formulas"]])
+        self.assertTrue(bundle.multimodal["diagram_specs"])
+
+        sources = build_source_bundle(None, bundle)
+        self.assertTrue(any(item["id"] == "upload-multimodal-extraction" for item in sources["citations"]))
+
+    def test_multimodal_formula_parser_and_diagram_helper_are_student_safe(self):
+        formulas = parse_formula_signals("Can carbon form CH4? Use v^2 = u^2 + 2as. Class remains text.")
+        raw_values = [formula.raw for formula in formulas]
+        self.assertIn("CH4", raw_values)
+        self.assertIn("v^2 = u^2 + 2as", raw_values)
+        self.assertFalse(any(value in {"Can", "Class"} for value in raw_values))
+        self.assertTrue(any(formula.kind == "math" for formula in formulas))
+
+        diagrams = infer_diagram_specs("Explain photosynthesis with a diagram", "CO2 + H2O -> C6H12O6 + O2")
+        self.assertEqual(diagrams[0].diagram_type, "process_flow")
+        helper = diagram_helper("Draw a circuit with battery and resistor")
+        self.assertEqual(helper["diagram_specs"][0]["diagram_type"], "circuit_diagram")
 
     def test_mastery_memory_is_deduplicated(self):
         engine = create_engine("sqlite:///:memory:")
