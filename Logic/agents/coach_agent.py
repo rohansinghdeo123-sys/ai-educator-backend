@@ -1940,7 +1940,12 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         tool_outputs["safety_review"] = coach_tool_registry.run("safety_review", question=question)
     for tool_name, output in tool_outputs.items():
         trace.record_tool(tool_name, result=output)
-    source_bundle = build_source_bundle(retrieved_material, attachment_bundle)
+    source_bundle = build_source_bundle(
+        retrieved_material,
+        attachment_bundle,
+        retrieval_policy=retrieval_policy,
+        material_supported=material_is_supported,
+    )
     orchestration_prompt = format_orchestration_prompt(orchestration_plan, tool_outputs, mastery_profile)
     assistance_blocks = _build_assistance_blocks(question, answer_format)
     lightweight_reply = _build_lightweight_conversation_reply(question, conversation_context)

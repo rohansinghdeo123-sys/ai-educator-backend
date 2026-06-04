@@ -205,8 +205,8 @@ class CoachMemoryResponse(BaseModel):
 class CoachAttachmentRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     mime_type: str = Field(min_length=1, max_length=80)
-    size_bytes: int = Field(default=0, ge=0)
-    data_url: str = Field(min_length=1)
+    size_bytes: int = Field(default=0, ge=0, le=6_500_000)
+    data_url: str = Field(min_length=1, max_length=8_800_000)
 
 
 class CoachChatRequest(BaseModel):

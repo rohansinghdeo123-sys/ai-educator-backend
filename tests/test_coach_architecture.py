@@ -21,6 +21,13 @@ from Logic.coach.query_understanding import understand_query
 from Logic.coach.turn_engine import build_adaptive_answer_blocks, parse_semantic_event, semantic_event
 from Logic.analytics_engine import get_user_analytics
 from Logic.agent_event_bus import AgentEvent
+from main import (
+    _conversation_rows_for_user,
+    _group_conversation_rows,
+    _serialize_coach_conversation,
+    format_test_session,
+    session_id_belongs_to_user,
+)
 from Logic.observability_store import (
     get_observability_events_since,
     get_observability_summary,
@@ -29,6 +36,7 @@ from Logic.observability_store import (
 )
 from models import (
     AICoachMemory,
+    AICoachInteraction,
     AICoachProfile,
     ModelToolTrace,
     ObservabilityEvent,
@@ -112,6 +120,97 @@ class FakeVisionRouter:
 
 
 class CoachArchitectureTests(unittest.TestCase):
+    def test_session_summary_includes_replay_contract(self):
+        test = SimpleNamespace(
+            id=42,
+            total_questions=2,
+            score=1,
+            time_spent_seconds=75,
+            date=date(2026, 6, 4),
+            started_at=datetime(2026, 6, 4, 8, 0),
+            completed_at=datetime(2026, 6, 4, 8, 2),
+            confidence_before=40,
+            confidence_after=65,
+            topic="alkanes",
+            xp_earned=10,
+            focus_score=88,
+            accuracy_rate=50,
+            session_type="exam",
+            response_latency_ms=320,
+            hint_count=1,
+            retry_count=2,
+            details=SimpleNamespace(
+                replay_data={
+                    "questions": [
+                        {
+                            "question": "What is methane?",
+                            "correct_answer": "CH4",
+                            "user_answer": "CH4",
+                        }
+                    ]
+                }
+            ),
+        )
+
+        payload = format_test_session(test)
+
+        self.assertTrue(payload["has_replay"])
+        self.assertEqual(payload["replay_question_count"], 1)
+        self.assertEqual(payload["replay_data"]["questions"][0]["correct_answer"], "CH4")
+
+    def test_session_id_ownership_matches_frontend_patterns(self):
+        uid = "student123"
+        self.assertTrue(session_id_belongs_to_user(f"coach-{uid}-conv_a", uid))
+        self.assertTrue(session_id_belongs_to_user(f"revision-{uid}-alkanes-summary", uid))
+        self.assertTrue(session_id_belongs_to_user(f"exam-{uid}-alkanes-123", uid))
+        self.assertTrue(session_id_belongs_to_user(f"probable-{uid}-alkanes-123", uid))
+        self.assertFalse(session_id_belongs_to_user("coach-other-conv_a", uid))
+
+    def test_persisted_coach_interactions_serialize_as_conversation(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        uid = "student123"
+        coach = AICoachProfile(coach_id="coach_conv", user_id=uid)
+        db.add(coach)
+        db.add_all([
+            AICoachInteraction(
+                coach_id=coach.coach_id,
+                user_id=uid,
+                role="user",
+                message="What is matter?",
+                intent="definition",
+                mode="coach",
+                metadata_json={"session_id": f"coach-{uid}-conv_a"},
+            ),
+            AICoachInteraction(
+                coach_id=coach.coach_id,
+                user_id=uid,
+                role="assistant",
+                message="Matter has mass and occupies space.",
+                intent="definition",
+                mode="coach",
+                metadata_json={
+                    "session_id": f"coach-{uid}-conv_a",
+                    "answer_blocks": [{"kind": "explanation", "title": "Core idea", "content": "Matter has mass."}],
+                    "sources": {"grounded": False, "indicator": "General tutor reasoning", "citations": []},
+                    "conversation_pinned": True,
+                },
+            ),
+        ])
+        db.commit()
+
+        rows = _conversation_rows_for_user(db, coach, uid)
+        grouped = _group_conversation_rows(rows)
+        payload = _serialize_coach_conversation(f"coach-{uid}-conv_a", grouped[f"coach-{uid}-conv_a"])
+
+        self.assertEqual(payload["id"], "conv_a")
+        self.assertEqual(payload["messages"][0]["role"], "user")
+        self.assertEqual(payload["messages"][1]["role"], "coach")
+        self.assertEqual(payload["messages"][1]["sources"]["indicator"], "General tutor reasoning")
+        self.assertTrue(payload["pinned"])
+
     def test_offline_routing_suite(self):
         report = run_offline_coach_evaluation()
         self.assertTrue(report["passed"], report)
@@ -366,6 +465,28 @@ class CoachArchitectureTests(unittest.TestCase):
 
         sources = build_source_bundle(None, bundle)
         self.assertTrue(any(item["id"] == "upload-multimodal-extraction" for item in sources["citations"]))
+
+    def test_source_bundle_distinguishes_general_reasoning_from_notes(self):
+        general = build_source_bundle(None, None, retrieval_policy="none", material_supported=True)
+        self.assertFalse(general["grounded"])
+        self.assertEqual(general["answer_basis"], "general_reasoning")
+        self.assertEqual(general["indicator"], "General tutor reasoning")
+
+        notes = build_source_bundle(
+            {
+                "context": "Alkanes are saturated hydrocarbons with single covalent bonds.",
+                "section_id": "alkanes",
+                "source": "Hydrocarbon notes",
+                "scope": {"topic": "Alkanes", "chapter": "Hydrocarbon"},
+            },
+            None,
+            retrieval_policy="required",
+            material_supported=True,
+        )
+        self.assertTrue(notes["grounded"])
+        self.assertEqual(notes["answer_basis"], "notes")
+        self.assertEqual(notes["indicator"], "Based on your notes")
+        self.assertEqual(notes["citations"][0]["kind"], "notes")
 
     def test_multimodal_formula_parser_and_diagram_helper_are_student_safe(self):
         formulas = parse_formula_signals("Can carbon form CH4? Use v^2 = u^2 + 2as. Class remains text.")
