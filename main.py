@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal, check_db_health, engine
 from models import (
     AICoachDailySignal,
+    AICoachInteraction,
     AICoachMemory,
     AICoachProfile,
     Base,
@@ -494,6 +495,31 @@ def require_authenticated_user_id(decoded_token: Dict[str, Any]) -> str:
     return token_uid
 
 
+def session_id_belongs_to_user(session_id: str, user_id: str) -> bool:
+    session = str(session_id or "").strip()
+    uid = str(user_id or "").strip()
+    if not session or not uid:
+        return False
+
+    owned_prefixes = (
+        f"coach-{uid}-",
+        f"coach_{uid}_",
+        f"revision-{uid}-",
+        f"exam-{uid}-",
+        f"probable-{uid}-",
+        f"autonomous-{uid}-",
+        f"widget-{uid}",
+    )
+    owned_exact = {
+        uid,
+        f"coach-{uid}",
+        f"coach_{uid}",
+        f"widget-{uid}",
+    }
+
+    return session in owned_exact or any(session.startswith(prefix) for prefix in owned_prefixes)
+
+
 def enforce_user_quota(user_id: str, quota_name: str) -> None:
     limit = QUOTA_LIMITS.get(quota_name, AI_DAILY_QUOTA_PER_USER)
     allowed, used = daily_quotas.consume(user_id, quota_name, limit)
@@ -548,7 +574,15 @@ class SectionAIRequest(BaseModel):
 
 
 class ResetRequest(BaseModel):
-    session_id: str
+    session_id: str = Field(min_length=1, max_length=160)
+    user_id: Optional[str] = None
+
+
+class CoachConversationPatch(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=72)
+    pinned: Optional[bool] = None
+    archived: Optional[bool] = None
+    titleLocked: Optional[bool] = None
 
 
 class AgentCommandRequest(BaseModel):
@@ -744,6 +778,12 @@ def format_test_session(test: TestHistory) -> Dict[str, Any]:
         if confidence_before is not None and confidence_after is not None
         else None
     )
+    replay_data = test.details.replay_data if getattr(test, "details", None) else {}
+    replay_question_count = 0
+    if isinstance(replay_data, dict):
+        questions_payload = replay_data.get("questions")
+        if isinstance(questions_payload, list):
+            replay_question_count = len(questions_payload)
 
     return {
         "id": str(test.id),
@@ -778,6 +818,9 @@ def format_test_session(test: TestHistory) -> Dict[str, Any]:
         "confidenceAfter": confidence_after,
         "confidence_change": confidence_change,
         "confidenceChange": confidence_change,
+        "has_replay": bool(replay_question_count),
+        "replay_question_count": replay_question_count,
+        "replay_data": replay_data or {},
     }
 
 
@@ -843,6 +886,123 @@ def serialize_daily_signal(signal: Optional[AICoachDailySignal]) -> Optional[Dic
         "recommendation": signal.recommendation,
         "risk_level": signal.risk_level,
     }
+
+
+def _interaction_metadata(row: AICoachInteraction) -> Dict[str, Any]:
+    return row.metadata_json if isinstance(row.metadata_json, dict) else {}
+
+
+def _interaction_session_id(row: AICoachInteraction) -> str:
+    return str(_interaction_metadata(row).get("session_id") or "").strip()
+
+
+def _conversation_title_from(message: str) -> str:
+    compact = " ".join(str(message or "").split())
+    if not compact:
+        return "New study chat"
+    return compact[:54] + ("..." if len(compact) > 54 else "")
+
+
+def _serialize_coach_interaction_message(row: AICoachInteraction) -> Dict[str, Any]:
+    metadata = _interaction_metadata(row)
+    role = "coach" if row.role == "assistant" else "user"
+    payload: Dict[str, Any] = {
+        "role": role,
+        "content": row.message or "",
+        "timestamp": row.created_at.strftime("%H:%M") if row.created_at else "",
+    }
+    if role == "coach":
+        answer_blocks = metadata.get("answer_blocks")
+        sources = metadata.get("sources")
+        if isinstance(answer_blocks, list):
+            payload["blocks"] = answer_blocks
+        if isinstance(sources, dict):
+            payload["sources"] = sources
+        orchestration = metadata.get("orchestration") if isinstance(metadata.get("orchestration"), dict) else {}
+        if "socratic" in orchestration:
+            payload["socratic"] = bool(orchestration.get("socratic"))
+    return payload
+
+
+def _conversation_metadata(rows: List[AICoachInteraction]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for row in rows:
+        metadata = _interaction_metadata(row)
+        for key in ("conversation_title", "conversation_pinned", "conversation_archived", "conversation_title_locked"):
+            if key in metadata:
+                merged[key] = metadata[key]
+    return merged
+
+
+def _serialize_coach_conversation(session_id: str, rows: List[AICoachInteraction]) -> Dict[str, Any]:
+    sorted_rows = sorted(rows, key=lambda item: item.id or 0)
+    metadata = _conversation_metadata(sorted_rows)
+    first_user = next((row for row in sorted_rows if row.role == "user" and row.message), sorted_rows[0])
+    last_row = sorted_rows[-1]
+    title = str(metadata.get("conversation_title") or _conversation_title_from(first_user.message))
+    last_metadata = _interaction_metadata(last_row)
+    learning_context = last_metadata.get("learning_context") if isinstance(last_metadata.get("learning_context"), dict) else {}
+    return {
+        "id": session_id.replace(f"coach-{last_row.user_id}-", "", 1) if session_id.startswith(f"coach-{last_row.user_id}-") else session_id,
+        "sessionId": session_id,
+        "title": title,
+        "updatedAt": last_row.created_at.isoformat() if last_row.created_at else datetime.utcnow().isoformat(),
+        "chapter": str(learning_context.get("selected_chapter") or "Open tutor"),
+        "topic": str(learning_context.get("selected_topic") or "Any subject"),
+        "messages": [_serialize_coach_interaction_message(row) for row in sorted_rows],
+        "pinned": bool(metadata.get("conversation_pinned")),
+        "archived": bool(metadata.get("conversation_archived")),
+        "titleLocked": bool(metadata.get("conversation_title_locked")),
+        "messageCount": len(sorted_rows),
+    }
+
+
+def _conversation_rows_for_user(
+    db: Session,
+    coach: AICoachProfile,
+    user_id: str,
+    limit: int = 400,
+) -> List[AICoachInteraction]:
+    rows = (
+        db.query(AICoachInteraction)
+        .filter(AICoachInteraction.coach_id == coach.coach_id)
+        .filter(AICoachInteraction.user_id == user_id)
+        .order_by(AICoachInteraction.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        row for row in rows
+        if _interaction_session_id(row)
+        and session_id_belongs_to_user(_interaction_session_id(row), user_id)
+    ]
+
+
+def _group_conversation_rows(rows: List[AICoachInteraction]) -> Dict[str, List[AICoachInteraction]]:
+    grouped: Dict[str, List[AICoachInteraction]] = defaultdict(list)
+    for row in rows:
+        grouped[_interaction_session_id(row)].append(row)
+    return grouped
+
+
+def _session_id_from_conversation_id(user_id: str, conversation_id: str) -> str:
+    raw = str(conversation_id or "").strip()
+    if session_id_belongs_to_user(raw, user_id):
+        return raw
+    return f"coach-{user_id}-{raw}"
+
+
+def _apply_conversation_patch(row: AICoachInteraction, patch: CoachConversationPatch) -> None:
+    metadata = dict(_interaction_metadata(row))
+    if patch.title is not None:
+        metadata["conversation_title"] = patch.title.strip() or "New study chat"
+    if patch.pinned is not None:
+        metadata["conversation_pinned"] = bool(patch.pinned)
+    if patch.archived is not None:
+        metadata["conversation_archived"] = bool(patch.archived)
+    if patch.titleLocked is not None:
+        metadata["conversation_title_locked"] = bool(patch.titleLocked)
+    row.metadata_json = metadata
 
 
 def create_test_history(
@@ -1042,6 +1202,120 @@ def coach_bootstrap(
     return CoachProfileResponse(**serialize_coach_profile(coach))
 
 
+@app.get("/coach/conversations/{user_id}")
+def coach_conversations(
+    user_id: str,
+    include_archived: bool = Query(default=True),
+    limit: int = Query(default=40, ge=1, le=80),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+    coach = get_or_create_coach(db=db, user_id=user_id)
+    rows = _conversation_rows_for_user(db, coach, user_id)
+    grouped = _group_conversation_rows(rows)
+    conversations = [
+        _serialize_coach_conversation(session_id, session_rows)
+        for session_id, session_rows in grouped.items()
+    ]
+    if not include_archived:
+        conversations = [item for item in conversations if not item.get("archived")]
+    conversations.sort(key=lambda item: (bool(item.get("pinned")), item.get("updatedAt") or ""), reverse=True)
+    return {
+        "user_id": user_id,
+        "conversations": conversations[:limit],
+    }
+
+
+@app.get("/coach/conversations/{user_id}/{conversation_id}")
+def coach_conversation_detail(
+    user_id: str,
+    conversation_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+    session_id = _session_id_from_conversation_id(user_id, conversation_id)
+    if not is_backend_admin(current_user) and not session_id_belongs_to_user(session_id, user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed for this conversation")
+
+    coach = get_or_create_coach(db=db, user_id=user_id)
+    rows = [
+        row for row in _conversation_rows_for_user(db, coach, user_id, limit=800)
+        if _interaction_session_id(row) == session_id
+    ]
+    if not rows:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+
+    return {
+        "user_id": user_id,
+        "conversation": _serialize_coach_conversation(session_id, rows),
+    }
+
+
+@app.patch("/coach/conversations/{user_id}/{conversation_id}")
+def update_coach_conversation(
+    user_id: str,
+    conversation_id: str,
+    patch: CoachConversationPatch,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+    session_id = _session_id_from_conversation_id(user_id, conversation_id)
+    if not is_backend_admin(current_user) and not session_id_belongs_to_user(session_id, user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed for this conversation")
+
+    coach = get_or_create_coach(db=db, user_id=user_id)
+    rows = [
+        row for row in _conversation_rows_for_user(db, coach, user_id, limit=800)
+        if _interaction_session_id(row) == session_id
+    ]
+    if not rows:
+        return {
+            "user_id": user_id,
+            "conversation": None,
+            "status": "no_saved_messages",
+        }
+    for row in rows:
+        _apply_conversation_patch(row, patch)
+    db.commit()
+    return {
+        "user_id": user_id,
+        "conversation": _serialize_coach_conversation(session_id, rows),
+        "status": "updated",
+    }
+
+
+@app.delete("/coach/conversations/{user_id}/{conversation_id}")
+def delete_coach_conversation(
+    user_id: str,
+    conversation_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+    session_id = _session_id_from_conversation_id(user_id, conversation_id)
+    if not is_backend_admin(current_user) and not session_id_belongs_to_user(session_id, user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed for this conversation")
+
+    coach = get_or_create_coach(db=db, user_id=user_id)
+    rows = [
+        row for row in _conversation_rows_for_user(db, coach, user_id, limit=800)
+        if _interaction_session_id(row) == session_id
+    ]
+    deleted = len(rows)
+    for row in rows:
+        db.delete(row)
+    db.commit()
+    return {
+        "user_id": user_id,
+        "session_id": session_id,
+        "deleted": deleted,
+        "status": "deleted",
+    }
+
+
 @app.get("/coach/{user_id}", response_model=CoachDashboardResponse)
 def coach_dashboard(
     user_id: str,
@@ -1228,8 +1502,19 @@ def coach_autonomous_study(
 @app.post("/reset-chat")
 def reset_chat(
     request: ResetRequest,
-    _current_user: Dict[str, Any] = Depends(verify_firebase_user),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
+    token_uid = require_authenticated_user_id(current_user)
+    target_uid = request.user_id or token_uid
+    if request.user_id:
+        require_same_user_or_admin(request.user_id, current_user)
+
+    if not is_backend_admin(current_user) and not session_id_belongs_to_user(request.session_id, target_uid):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Session reset is allowed only for your own learning session.",
+        )
+
     reset_conversation(request.session_id)
     return {"status": "cleared", "message": "Agent memory reset successfully"}
 
@@ -1538,6 +1823,16 @@ def update_progress(
     current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
     require_same_user_or_admin(progress.user_id, current_user)
+    allow_client_overwrite = os.getenv("ALLOW_CLIENT_PROGRESS_OVERWRITE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if not allow_client_overwrite and not is_backend_admin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Direct progress overwrite is disabled. Submit completed sessions instead.",
+        )
 
     user = get_or_create_progress(db, progress.user_id)
 
