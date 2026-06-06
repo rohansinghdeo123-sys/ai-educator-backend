@@ -17,6 +17,7 @@ AGENT_ROLES = {
     "planner",
     "lead_coach_orchestrator",
     "intent_profiler",
+    "conversation_responder",
     "response_planner",
     "context_retriever",
     "tool_gateway",
@@ -33,6 +34,7 @@ AGENT_ROLES = {
 MESSAGE_TYPES = {
     "request_received",
     "profile_result",
+    "conversation_result",
     "response_plan",
     "context_result",
     "tool_results",
