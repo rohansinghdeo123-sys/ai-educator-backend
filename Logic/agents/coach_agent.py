@@ -17,6 +17,15 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Generator
 
 from Logic.agent_event_bus import event_bus
+from Logic.agent_runtime import (
+    build_initial_agent_state,
+    complete_agent_run,
+    record_agent_handoff,
+    record_agent_messages,
+    record_agent_step,
+    record_agent_tool_calls,
+    start_agent_run,
+)
 from Logic.analytics_engine import get_user_analytics
 from Logic.coach import (
     build_mastery_signal,
@@ -24,13 +33,21 @@ from Logic.coach import (
     build_coach_plan,
     build_adaptive_answer_blocks,
     build_compact_context,
+    build_lead_coach_decision,
+    build_student_memory_update,
+    build_response_plan,
+    build_response_plan_instruction,
+    decide_answer_repair,
     coach_observability,
     coach_settings,
-    coach_tool_registry,
+    tool_gateway,
     build_orchestration_plan,
     build_source_bundle,
+    evaluate_turn_growth,
+    evaluate_retrieval_gate,
     format_orchestration_prompt,
-    llm_router,
+    model_gateway,
+    mark_repair_applied,
     parse_semantic_event,
     persist_mastery_signal,
     prepare_attachments,
@@ -279,11 +296,14 @@ def _retrieve_selected_material(request, adaptive_context: Dict[str, Any], conve
         conversation_context=conversation_context,
     )
 
-    result = coach_tool_registry.run(
+    result_payload = tool_gateway.run(
         "knowledge_search",
+        agent_name="context_retriever",
+        task="Retrieve selected study material for grounded tutoring.",
         question=retrieval_question or scope.get("section_id") or "general",
         scope=scope,
-    ).to_dict()
+    )
+    result = result_payload.to_dict() if hasattr(result_payload, "to_dict") else _as_dict(result_payload)
     result["retrieval_question"] = retrieval_question
     return result
 
@@ -973,6 +993,7 @@ Recommended sections:
 Format-specific rules:
 {rules}
 
+Response Planner output is the higher-priority style contract. If it asks for a shorter, longer, table-free, answer-only, source-only, quiz, code, or exam format, follow that over these recommended sections.
 Do not force every section if the question is simple. Use only the sections that genuinely help the student.
 For Study Page responses, prefer clean learning-block headings when they fit:
 Direct Answer, Concept, Simple Explanation, Example, Common Mistake, Formula, Exam Tip, Quick Check, Next Step.
@@ -1145,12 +1166,16 @@ Recent thread:
 {conversation_context.get("recent_thread", "No previous lesson thread.")}
 """.strip()
 
-        blueprint = llm_router.complete(
+        blueprint = model_gateway.complete(
             role="profiler",
             messages=[
                 {"role": "system", "content": "You create concise private tutoring plans for another AI agent."},
                 {"role": "user", "content": prompt},
             ],
+            agent_name="intent_profiler",
+            task="Create a private learning blueprint for the tutor model.",
+            student_visible=False,
+            safety_tier="planning",
             temperature=0.12,
             max_tokens=280,
         )
@@ -1264,12 +1289,14 @@ def _build_study_prompt(
     retrieved_material: Optional[Dict[str, Any]] = None,
     strict_grounding: bool = False,
     retrieval_policy: str = "none",
+    response_plan: Optional[Dict[str, Any]] = None,
 ) -> str:
     graph_context = ""
     if retrieved_material and str(retrieved_material.get("context") or "").strip():
         graph_context = str(retrieved_material.get("context") or "").strip()
 
     adaptive_format = _build_answer_format_instruction(answer_format)
+    response_plan_instruction = build_response_plan_instruction(response_plan)
     adaptive_teaching = _build_adaptive_teaching_instruction(adaptive_context)
     conversation_context = conversation_context or {}
     follow_up_mode = "YES" if conversation_context.get("is_follow_up") else "NO"
@@ -1311,7 +1338,7 @@ Base formatting rules:
 - Put a blank line between sections.
 - Use short paragraphs and dash bullets.
 - Start with the most useful answer for this exact question.
-- Avoid raw markdown tables, decorative symbols, and long unbroken paragraphs.
+- Use markdown tables only when the Response Planner format_style is table; otherwise avoid tables, decorative symbols, and long unbroken paragraphs.
 - If the question is too broad, answer the core concept first and then add what to study next.
 - Avoid sounding like a fixed template. The format should feel intentionally chosen for the student's need.
 
@@ -1324,6 +1351,8 @@ Private tuition behavior:
 - The UI shows clickable help blocks, so do not print button labels as plain text unless they are part of the teaching answer.
 
 {adaptive_format}
+
+{response_plan_instruction}
 
 {adaptive_teaching}
 
@@ -1375,6 +1404,7 @@ def _build_planning_prompt(
     recommendation: str,
     adaptive_context: Optional[Dict[str, Any]] = None,
     learning_blueprint: str = "",
+    response_plan: Optional[Dict[str, Any]] = None,
 ) -> str:
     memory_text = "\n".join(
         f"- {memory.title}: {memory.summary}"
@@ -1396,6 +1426,7 @@ def _build_planning_prompt(
         graph_hints = "\nCURRICULUM INSIGHTS (use these to prioritise):\n" + graph_hints
 
     adaptive_teaching = _build_adaptive_teaching_instruction(adaptive_context)
+    response_plan_instruction = build_response_plan_instruction(response_plan)
 
     return f"""
 You are {coach.coach_name}, a personal AI study coach.
@@ -1410,6 +1441,8 @@ Formatting rules:
 - Adapt the plan length and detail to the student's confidence, speed, and current need.
 
 {adaptive_teaching}
+
+{response_plan_instruction}
 
 LEARNING INTELLIGENCE BLUEPRINT:
 {learning_blueprint or "No separate blueprint was generated. Build the most efficient plan from analytics and student state."}
@@ -1453,8 +1486,10 @@ def _build_review_prompt(
     adaptive_context: Optional[Dict[str, Any]] = None,
     learning_blueprint: str = "",
     strict_grounding: bool = False,
+    response_plan: Optional[Dict[str, Any]] = None,
 ) -> str:
     adaptive_format = _build_answer_format_instruction(answer_format)
+    response_plan_instruction = build_response_plan_instruction(response_plan)
     adaptive_teaching = _build_adaptive_teaching_instruction(adaptive_context)
 
     evidence_policy = (
@@ -1478,14 +1513,17 @@ Review rules:
 - Prefer short paragraphs and dash bullets.
 - Preserve the selected answer structure unless the question clearly needs something simpler.
 - Make the final response feel like a human teacher chose the best format for this specific student.
+- Verify final answer length, format, tone, grounding, examples/formula/code/summary, and follow-up behavior match the Response Planner.
 - Remove any repetitive, generic, or over-templated wording.
 - Do not mention that you reviewed the answer.
-- Do not include JSON, metadata, markdown tables, or decorative symbols.
+- Do not include JSON, metadata, or decorative symbols. Use a table only when Response Planner format_style is table.
 - If the draft is already strong, polish it without changing the meaning.
 
 Intent: {intent}
 
 {adaptive_format}
+
+{response_plan_instruction}
 
 {adaptive_teaching}
 
@@ -1511,13 +1549,14 @@ def _review_and_polish_answer(
     adaptive_context: Optional[Dict[str, Any]] = None,
     learning_blueprint: str = "",
     strict_grounding: bool = False,
+    response_plan: Optional[Dict[str, Any]] = None,
 ) -> str:
     if not draft or len(draft.strip()) < 20:
         return draft
 
     try:
         selected_format = answer_format or _detect_answer_format(question, intent=intent)
-        reviewed = llm_router.complete(
+        reviewed = model_gateway.complete(
             role="reviewer",
             messages=[
                 {
@@ -1531,10 +1570,15 @@ def _review_and_polish_answer(
                         adaptive_context=adaptive_context,
                         learning_blueprint=learning_blueprint,
                         strict_grounding=strict_grounding,
+                        response_plan=response_plan,
                     ),
                 },
                 {"role": "user", "content": "Polish the draft into the final student answer."},
             ],
+            agent_name="answer_reviewer",
+            task="Polish a tutor draft into a student-friendly final answer.",
+            student_visible=True,
+            safety_tier="final_answer",
             temperature=0.18,
             max_tokens=850,
         )
@@ -1773,15 +1817,46 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     question = getattr(request, "question", "")
     session_id = getattr(request, "session_id", f"coach-{user_id}")
     turn_id = f"turn_{uuid.uuid4().hex[:12]}"
-    llm_router.begin_turn(turn_id)
+    model_gateway.begin_turn(turn_id)
+    tool_gateway.begin_turn(turn_id)
     trace = coach_observability.start_turn(turn_id=turn_id, session_id=session_id)
-    intent = getattr(request, "intent", "study_advice")
+    declared_intent = getattr(request, "intent", "study_advice")
+    intent = declared_intent
     mode = getattr(request, "mode", "coach")
     adaptive_context = _build_adaptive_context_from_request(request)
     raw_attachments = list(getattr(request, "attachments", []) or [])
     query_understanding = understand_query(question, declared_intent=intent)
     intent = query_understanding.intent
     answer_format = _detect_answer_format(question, intent=intent, mode=mode)
+    agent_state = build_initial_agent_state(
+        request=request,
+        turn_id=turn_id,
+        user_id=user_id,
+        session_id=session_id,
+        question=question,
+        mode=mode,
+        query=query_understanding,
+        answer_format=answer_format,
+        adaptive_context=adaptive_context,
+    )
+    start_agent_run(
+        db,
+        state=agent_state,
+        workflow_name="study_coach_turn",
+        lead_agent="lead_coach_orchestrator",
+        metadata={"endpoint": "coach_stream", "student_visible": False},
+    )
+    record_agent_step(
+        db,
+        run_id=turn_id,
+        step_name="request_received",
+        agent_name="lead_coach_orchestrator",
+        output_data={
+            "mode": mode,
+            "initial_intent": declared_intent,
+            "attachment_count": len(raw_attachments),
+        },
+    )
 
     yield semantic_event("turn.started", turn_id=turn_id, session_id=session_id)
     yield _stage_event(
@@ -1821,15 +1896,49 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         question,
         declared_intent=intent,
         has_history=bool(recent_interactions),
-        classifier=lambda messages: llm_router.complete(
+        classifier=lambda messages: model_gateway.complete(
             role="profiler",
             messages=messages,
+            agent_name="intent_profiler",
+            task="Classify intent, follow-up status, and retrieval policy.",
+            student_visible=False,
+            safety_tier="routing",
             temperature=0.05,
             max_tokens=240,
         ),
     )
     intent = query_understanding.intent
     answer_format = _detect_answer_format(question, intent=intent, mode=mode)
+    agent_state.apply_query(query_understanding, answer_format)
+    agent_state.add_message(
+        sender_agent="intent_profiler",
+        receiver_agent="lead_coach_orchestrator",
+        message_type="profile_result",
+        task="Classify the student turn and choose the first learning route.",
+        evidence={"has_history": bool(recent_interactions), "answer_format": answer_format},
+        confidence=getattr(query_understanding, "confidence", 0.72),
+        result=query_understanding.to_dict(),
+    )
+    record_agent_handoff(
+        db,
+        run_id=turn_id,
+        from_agent="lead_coach_orchestrator",
+        to_agent="intent_profiler",
+        reason="Classify intent, follow-up status, retrieval need, and answer format.",
+        input_data={"declared_intent": declared_intent, "has_history": bool(recent_interactions)},
+        result_data=query_understanding.to_dict(),
+    )
+    record_agent_step(
+        db,
+        run_id=turn_id,
+        step_name="intent_profiled",
+        agent_name="intent_profiler",
+        output_data={
+            "intent": query_understanding.intent,
+            "retrieval_policy": query_understanding.retrieval_policy,
+            "answer_format": answer_format,
+        },
+    )
     coach_plan = build_coach_plan(query_understanding)
     conversation_context = _build_conversation_context(
         question=question,
@@ -1838,6 +1947,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         memories=memories,
     )
     conversation_context = _merge_frontend_context(conversation_context, adaptive_context)
+    agent_state.apply_conversation_context(conversation_context)
     lesson_memory = build_layered_lesson_memory(
         coach=coach,
         memories=memories,
@@ -1857,13 +1967,76 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         previous_policy=_previous_retrieval_policy(recent_interactions),
     )
     query_understanding = _apply_effective_retrieval_policy(query_understanding, retrieval_policy)
+    agent_state.apply_query(query_understanding, answer_format)
     coach_plan = build_coach_plan(query_understanding)
     strict_grounding = retrieval_policy == "required"
     selected_scope = _selected_material_scope(request, adaptive_context)
+    agent_state.apply_scope(selected_scope)
     mastery_profile = build_active_mastery_profile(
         memories=memories,
         scope=selected_scope,
         anchors=query_understanding.anchor_terms,
+    )
+    response_plan = build_response_plan(
+        question=question,
+        query=query_understanding,
+        answer_format=answer_format,
+        mode=mode,
+        retrieval_policy=retrieval_policy,
+        selected_scope=selected_scope,
+        attachments=raw_attachments,
+        adaptive_context=adaptive_context,
+        conversation_context=conversation_context,
+    )
+    if response_plan.grounding_required and retrieval_policy != "required":
+        retrieval_policy = "required"
+        query_understanding = _apply_effective_retrieval_policy(query_understanding, retrieval_policy)
+        agent_state.apply_query(query_understanding, answer_format)
+        coach_plan = build_coach_plan(query_understanding)
+        strict_grounding = True
+    elif response_plan.use_rag and retrieval_policy == "none":
+        retrieval_policy = "optional"
+        query_understanding = _apply_effective_retrieval_policy(query_understanding, retrieval_policy)
+        agent_state.apply_query(query_understanding, answer_format)
+        coach_plan = build_coach_plan(query_understanding)
+        strict_grounding = False
+    response_plan_payload = response_plan.to_dict()
+    agent_state.metadata["response_plan"] = response_plan_payload
+    agent_state.add_message(
+        sender_agent="response_planner",
+        receiver_agent="lead_coach_orchestrator",
+        message_type="response_plan",
+        task="Choose the best answer length, format, tone, grounding, and follow-up behavior before tutoring.",
+        evidence={
+            "answer_format": answer_format,
+            "retrieval_policy": retrieval_policy,
+            "selected_scope": selected_scope,
+            "has_attachments": bool(raw_attachments),
+        },
+        confidence=0.9,
+        result=response_plan_payload,
+    )
+    record_agent_handoff(
+        db,
+        run_id=turn_id,
+        from_agent="lead_coach_orchestrator",
+        to_agent="response_planner",
+        reason="Plan dynamic answer delivery before retrieval, tools, tutor draft, and review.",
+        input_data={
+            "question": question,
+            "intent": intent,
+            "answer_format": answer_format,
+            "retrieval_policy": retrieval_policy,
+            "selected_scope": selected_scope,
+        },
+        result_data=response_plan_payload,
+    )
+    record_agent_step(
+        db,
+        run_id=turn_id,
+        step_name="response_planned",
+        agent_name="response_planner",
+        output_data=response_plan_payload,
     )
     orchestration_plan = build_orchestration_plan(
         query=query_understanding,
@@ -1876,8 +2049,9 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     attachment_bundle = prepare_attachments(
         attachments=raw_attachments,
         question=question,
-        llm_router=llm_router,
+        llm_router=model_gateway,
     )
+    agent_state.apply_attachments(attachment_bundle)
     multimodal_payload = getattr(attachment_bundle, "multimodal", {}) or {}
     retrieved_material = (
         _retrieve_selected_material(request, adaptive_context, conversation_context)
@@ -1914,32 +2088,146 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     )
     if attachment_bundle.has_material:
         material_is_supported = True
+    retrieval_gate = evaluate_retrieval_gate(
+        policy=retrieval_policy,
+        retrieved_material=retrieved_material,
+        strict_grounding=strict_grounding,
+        material_supported=material_is_supported,
+        attachment_summary=agent_state.attachment_summary,
+    )
+    material_is_supported = retrieval_gate.material_supported
+    agent_state.apply_retrieval(retrieved_material, retrieval_policy, material_is_supported)
+    agent_state.grounding_status = retrieval_gate.grounding_status
+    agent_state.metadata["retrieval_gate"] = retrieval_gate.to_dict()
+    agent_state.add_message(
+        sender_agent="context_retriever",
+        receiver_agent="lead_coach_orchestrator",
+        message_type="context_result",
+        task="Return the safest available study context for the answer.",
+        evidence={
+            "retrieval_policy": retrieval_policy,
+            "attachments": agent_state.attachment_summary,
+            "retrieval_gate": retrieval_gate.to_dict(),
+        },
+        confidence=0.9 if material_is_supported else 0.2,
+        result=agent_state.retrieved_source_scores,
+    )
+    record_agent_handoff(
+        db,
+        run_id=turn_id,
+        from_agent="lead_coach_orchestrator",
+        to_agent="context_retriever",
+        reason="Retrieve selected material and merge validated upload context when useful.",
+        input_data={"retrieval_policy": retrieval_policy, "scope": selected_scope},
+        result_data=agent_state.retrieved_source_scores,
+    )
+    record_agent_step(
+        db,
+        run_id=turn_id,
+        step_name="context_prepared",
+        agent_name="context_retriever",
+        output_data={
+            "retrieval_policy": retrieval_policy,
+            "material_supported": material_is_supported,
+            "retrieval_gate": retrieval_gate.to_dict(),
+            "attachment_summary": agent_state.attachment_summary,
+            "source": agent_state.retrieved_source_scores,
+        },
+    )
+    lead_decision = build_lead_coach_decision(
+        query=query_understanding,
+        answer_format=answer_format,
+        orchestration_plan=orchestration_plan,
+        retrieval_policy=retrieval_policy,
+        strict_grounding=strict_grounding,
+        material_supported=retrieval_gate.material_supported,
+        attachment_summary=agent_state.attachment_summary,
+        mastery_profile=mastery_profile,
+    )
+    agent_state.metadata["lead_orchestrator"] = lead_decision.to_dict()
+    agent_state.add_message(
+        sender_agent="lead_coach_orchestrator",
+        receiver_agent="lead_coach_orchestrator",
+        message_type="status",
+        task="Lock the agent sequence, safety gates, and student-friendly goal for this turn.",
+        evidence={
+            "retrieval_policy": retrieval_policy,
+            "material_supported": material_is_supported,
+            "selected_tools": orchestration_plan["tools"],
+        },
+        confidence=0.92,
+        result=lead_decision.to_dict(),
+    )
+    record_agent_step(
+        db,
+        run_id=turn_id,
+        step_name="orchestration_planned",
+        agent_name="lead_coach_orchestrator",
+        output_data=lead_decision.to_dict(),
+    )
     tool_outputs: Dict[str, Any] = {}
     if "calculator" in orchestration_plan["tools"]:
-        tool_outputs["calculator"] = coach_tool_registry.run("calculator", question=question)
+        tool_outputs["calculator"] = tool_gateway.run(
+            "calculator",
+            agent_name="tool_gateway",
+            task="Evaluate bounded arithmetic when the student asks a numerical question.",
+            question=question,
+        )
     if "formula_checker" in orchestration_plan["tools"]:
-        tool_outputs["formula_checker"] = coach_tool_registry.run(
+        tool_outputs["formula_checker"] = tool_gateway.run(
             "formula_checker",
+            agent_name="tool_gateway",
+            task="Detect chemistry formulas that require exact formatting.",
             question=question,
             multimodal=multimodal_payload,
         )
     if "practice_generator" in orchestration_plan["tools"]:
-        tool_outputs["practice_generator"] = coach_tool_registry.run(
+        tool_outputs["practice_generator"] = tool_gateway.run(
             "practice_generator",
+            agent_name="tool_gateway",
+            task="Prepare a short adaptive practice instruction.",
             question=question,
             topic=str(selected_scope.get("topic") or ""),
         )
     if "diagram_helper" in orchestration_plan["tools"]:
-        tool_outputs["diagram_helper"] = coach_tool_registry.run(
+        tool_outputs["diagram_helper"] = tool_gateway.run(
             "diagram_helper",
+            agent_name="tool_gateway",
+            task="Recommend a simple labelled learning visual if useful.",
             question=question,
             topic=str(selected_scope.get("topic") or ""),
             multimodal=multimodal_payload,
         )
     if "safety_review" in orchestration_plan["tools"]:
-        tool_outputs["safety_review"] = coach_tool_registry.run("safety_review", question=question)
+        tool_outputs["safety_review"] = tool_gateway.run(
+            "safety_review",
+            agent_name="tool_gateway",
+            task="Apply safe-study handling for harmful or cheating requests.",
+            question=question,
+        )
     for tool_name, output in tool_outputs.items():
         trace.record_tool(tool_name, result=output)
+    agent_state.apply_tools(tool_outputs, orchestration_plan["tools"])
+    if tool_outputs:
+        agent_state.add_message(
+            sender_agent="tool_gateway",
+            receiver_agent="lead_coach_orchestrator",
+            message_type="tool_results",
+            task="Provide deterministic tool outputs for safer tutoring.",
+            evidence={"selected_tools": orchestration_plan["tools"]},
+            confidence=1.0,
+            result=agent_state.tool_outputs,
+        )
+    record_agent_step(
+        db,
+        run_id=turn_id,
+        step_name="tools_selected",
+        agent_name="tool_gateway",
+        output_data={
+            "selected_tools": orchestration_plan["tools"],
+            "executed_tools": list(tool_outputs),
+        },
+    )
     source_bundle = build_source_bundle(
         retrieved_material,
         attachment_bundle,
@@ -1966,14 +2254,18 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             detail="Using the recent lesson thread so the answer continues naturally.",
             turn_id=turn_id,
         )
-    if strict_grounding and not material_is_supported:
-        trace.record_fallback("required_material_not_found", retrieval_policy=retrieval_policy)
+    if not retrieval_gate.can_answer:
+        trace.record_fallback(
+            "required_material_not_found",
+            retrieval_policy=retrieval_policy,
+            required_action=retrieval_gate.required_action,
+        )
 
     learning_blueprint = (
         "- Conversational input detected. Reply naturally and do not continue the previous lesson unless the student asks."
         if lightweight_reply
         else "- No matching ingested study source was found. Return the required material-not-found response without adding outside facts."
-        if strict_grounding and not material_is_supported
+        if not retrieval_gate.can_answer
         else _run_learning_intelligence_agent(
             question=question,
             intent=intent,
@@ -2037,7 +2329,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     if lightweight_reply:
         final_answer = lightweight_reply
         should_review_answer = False
-    elif strict_grounding and not material_is_supported:
+    elif not retrieval_gate.can_answer:
         final_answer = _material_not_found(adaptive_context)
         should_review_answer = False
     else:
@@ -2052,6 +2344,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 recommendation=recommendation,
                 adaptive_context=adaptive_context,
                 learning_blueprint=learning_blueprint,
+                response_plan=response_plan_payload,
             )
         else:
             draft_prompt = _build_study_prompt(
@@ -2065,28 +2358,35 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 retrieved_material=retrieved_material,
                 strict_grounding=strict_grounding,
                 retrieval_policy=retrieval_policy,
+                response_plan=response_plan_payload,
             )
         draft_prompt = f"{draft_prompt}\n\n{orchestration_prompt}"
 
         draft = ""
         try:
-            draft = llm_router.complete(
+            draft = model_gateway.complete(
                 role="tutor",
                 messages=[
                     {"role": "system", "content": draft_prompt},
                     {"role": "user", "content": question},
                 ],
                 complexity=routing_tier,
+                agent_name="tutor_model",
+                task="Draft the core tutor answer from context, tools, and policy.",
+                student_visible=False,
+                safety_tier="draft_answer",
                 temperature=0.35,
                 max_tokens=700,
             )
         except Exception as exc:
             logger.error("[COACH DRAFT] Groq error: %s", exc)
+            agent_state.apply_error(stage="tutor_draft", error=exc)
             trace.record_fallback("tutor_model_failed", error=str(exc)[:240])
             fallback = _material_not_found(adaptive_context) if strict_grounding else (
                 recommendation if intent == "planning" else "I'm having trouble explaining that right now."
             )
             draft = fallback
+        agent_state.apply_answer(draft=draft)
 
         enriched = (
             _build_complete_answer_from_kg(question)
@@ -2096,6 +2396,53 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         final_answer = _apply_deterministic_format(enriched)
         if len(final_answer) < 20:
             final_answer = draft
+    agent_state.apply_answer(final_answer=final_answer, next_best_action=recommendation)
+    agent_state.add_message(
+        sender_agent="tutor_model",
+        receiver_agent="lead_coach_orchestrator",
+        message_type="draft_result",
+        task="Create the student-friendly draft using the selected teaching route.",
+        evidence={
+            "routing_tier": routing_tier,
+            "strict_grounding": strict_grounding,
+            "review_required": should_review_answer,
+            "lightweight_reply": bool(lightweight_reply),
+        },
+        confidence=0.86 if not should_review_answer else 0.74,
+        result={
+            "draft_chars": len(agent_state.tutor_draft or final_answer or ""),
+            "answer_excerpt": final_answer[:500],
+        },
+    )
+    record_agent_handoff(
+        db,
+        run_id=turn_id,
+        from_agent="lead_coach_orchestrator",
+        to_agent="tutor_model",
+        reason="Generate the learner-facing explanation from context, tools, and policy.",
+        input_data={
+            "intent": intent,
+            "answer_format": answer_format,
+            "retrieval_policy": retrieval_policy,
+            "strict_grounding": strict_grounding,
+            "response_plan": response_plan_payload,
+        },
+        result_data={
+            "review_required": should_review_answer,
+            "draft_chars": len(agent_state.tutor_draft or final_answer or ""),
+        },
+    )
+    record_agent_step(
+        db,
+        run_id=turn_id,
+        step_name="answer_drafted",
+        agent_name="tutor_model",
+        output_data={
+            "routing_tier": routing_tier,
+            "review_required": should_review_answer,
+            "answer_chars": len(final_answer or ""),
+        },
+    )
 
     yield _stage_event(
         stage="drafting",
@@ -2140,7 +2487,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     streamed_answer = ""
     if should_review_answer:
         try:
-            review_stream = llm_router.stream(
+            review_stream = model_gateway.stream(
                 role="reviewer",
                 messages=[
                     {
@@ -2154,11 +2501,16 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                             adaptive_context=adaptive_context,
                             learning_blueprint=learning_blueprint,
                             strict_grounding=strict_grounding,
+                            response_plan=response_plan_payload,
                         ) + f"\n\n{orchestration_prompt}",
                     },
                     {"role": "user", "content": "Polish the draft into the final student answer."},
                 ],
                 complexity="fast" if routing_tier == "fast" else "balanced",
+                agent_name="answer_reviewer",
+                task="Stream the reviewed final answer to the student.",
+                student_visible=True,
+                safety_tier="final_answer",
                 temperature=0.18,
                 max_tokens=850,
             )
@@ -2170,15 +2522,61 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 yield _answer_delta_event(delta, turn_id=turn_id)
         except Exception as exc:
             logger.error("[COACH STREAM REVIEW] Groq API error: %s", exc)
+            agent_state.apply_error(stage="reviewer_stream", error=exc)
             trace.record_fallback("reviewer_stream_failed", error=str(exc)[:240])
 
-    if streamed_answer.strip():
+    reviewer_answer = streamed_answer.strip()
+    if reviewer_answer:
         final_answer = _apply_deterministic_format(streamed_answer)
     else:
         final_answer = _apply_deterministic_format(final_answer)
         for delta in _iter_text_chunks(final_answer):
             streamed_answer += delta
             yield _answer_delta_event(delta, turn_id=turn_id)
+    agent_state.apply_answer(final_answer=final_answer, reviewer_notes=reviewer_answer)
+    review_status = "completed" if should_review_answer and reviewer_answer else (
+        "fallback" if should_review_answer else "skipped"
+    )
+    agent_state.add_message(
+        sender_agent="answer_reviewer",
+        receiver_agent="lead_coach_orchestrator",
+        message_type="review_result",
+        task="Polish the draft for clarity, accuracy, tone, and student friendliness.",
+        evidence={
+            "review_required": should_review_answer,
+            "strict_grounding": strict_grounding,
+            "answer_format": answer_format,
+            "response_plan": response_plan_payload,
+        },
+        confidence=0.88 if review_status in {"completed", "skipped"} else 0.58,
+        result={
+            "status": review_status,
+            "review_chars": len(reviewer_answer),
+            "final_answer_chars": len(final_answer or ""),
+        },
+    )
+    record_agent_handoff(
+        db,
+        run_id=turn_id,
+        from_agent="lead_coach_orchestrator",
+        to_agent="answer_reviewer",
+        reason="Check the draft before delivery when the route needs review.",
+        status=review_status,
+        input_data={"review_required": should_review_answer, "draft_chars": len(agent_state.tutor_draft or "")},
+        result_data={"review_chars": len(reviewer_answer), "final_answer_chars": len(final_answer or "")},
+    )
+    record_agent_step(
+        db,
+        run_id=turn_id,
+        step_name="answer_reviewed",
+        agent_name="answer_reviewer",
+        status=review_status,
+        output_data={
+            "review_required": should_review_answer,
+            "review_chars": len(reviewer_answer),
+            "final_answer_chars": len(final_answer or ""),
+        },
+    )
 
     trace.mark_phase("quality")
     quality_report = score_coach_answer(
@@ -2191,8 +2589,10 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     )
     verification = {}
     if "answer_verifier" in orchestration_plan["tools"]:
-        verification = coach_tool_registry.run(
+        verification = tool_gateway.run(
             "answer_verifier",
+            agent_name="quality_verifier",
+            task="Verify answer quality, grounding, and numerical consistency before delivery.",
             question=question,
             answer=final_answer,
             retrieved_context=str((retrieved_material or {}).get("context") or ""),
@@ -2206,11 +2606,20 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             passed=bool(verification.get("passed")),
             issues=list(verification.get("issues") or []),
         )
-    if (
-        strict_grounding
-        and quality_report.hallucination_risk >= 0.65
-    ):
-        trace.record_fallback("quality_guard_replaced_answer", hallucination_risk=quality_report.hallucination_risk)
+    initial_repair_decision = decide_answer_repair(
+        quality=quality_report,
+        verification=verification,
+        retrieval_gate=retrieval_gate,
+        strict_grounding=strict_grounding,
+    )
+    repair_decision = initial_repair_decision
+    if initial_repair_decision.action == "replace_with_material_not_found":
+        trace.record_fallback(
+            "quality_guard_replaced_answer",
+            hallucination_risk=quality_report.hallucination_risk,
+            repair_action=initial_repair_decision.action,
+            repair_reason=initial_repair_decision.reason,
+        )
         final_answer = _material_not_found(adaptive_context)
         quality_report = score_coach_answer(
             question=question,
@@ -2220,6 +2629,75 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             intent=intent,
             answer_format=str(answer_format.get("id") or "concept"),
         )
+        repair_decision = mark_repair_applied(original=initial_repair_decision, quality=quality_report)
+    repair_report = {
+        "initial": initial_repair_decision.to_dict(),
+        "final": repair_decision.to_dict(),
+    }
+    agent_state.apply_answer(final_answer=final_answer)
+    agent_state.apply_quality(quality_report, verification)
+    agent_state.metadata["repair"] = repair_report
+    agent_state.add_message(
+        sender_agent="quality_verifier",
+        receiver_agent="lead_coach_orchestrator",
+        message_type="verification_result",
+        task="Score answer quality, grounding risk, and tool verification before memory updates.",
+        evidence={
+            "strict_grounding": strict_grounding,
+            "retrieval_policy": retrieval_policy,
+            "verifier_tool_used": bool(verification),
+            "repair": repair_report,
+        },
+        confidence=quality_report.score,
+        result={
+            "passed": quality_report.passed,
+            "score": quality_report.score,
+            "hallucination_risk": quality_report.hallucination_risk,
+            "issue_count": len(quality_report.issues or []),
+            "repair_action": repair_decision.action,
+        },
+    )
+    record_agent_handoff(
+        db,
+        run_id=turn_id,
+        from_agent="lead_coach_orchestrator",
+        to_agent="quality_verifier",
+        reason="Verify the answer before saving mastery and delivery metadata.",
+        status="completed" if quality_report.passed else "needs_review",
+        input_data={
+            "strict_grounding": strict_grounding,
+            "retrieval_policy": retrieval_policy,
+            "answer_chars": len(final_answer or ""),
+        },
+        result_data={
+            "passed": quality_report.passed,
+            "score": quality_report.score,
+            "issues": list(quality_report.issues or [])[:8],
+            "repair": repair_report,
+        },
+    )
+    record_agent_step(
+        db,
+        run_id=turn_id,
+        step_name="answer_verified",
+        agent_name="quality_verifier",
+        status="success" if quality_report.passed else "needs_review",
+        output_data={
+            "passed": quality_report.passed,
+            "score": quality_report.score,
+            "hallucination_risk": quality_report.hallucination_risk,
+            "verification": verification,
+            "repair": repair_report,
+        },
+    )
+    record_agent_step(
+        db,
+        run_id=turn_id,
+        step_name="answer_repair_checked",
+        agent_name="quality_verifier",
+        status="success" if repair_decision.action == "deliver" else repair_decision.action,
+        output_data=repair_report,
+    )
     answer_blocks = build_adaptive_answer_blocks(final_answer)
     mastery_signal = build_mastery_signal(
         query=query_understanding,
@@ -2227,6 +2705,37 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         scope=_selected_material_scope(request, adaptive_context),
         quality=quality_report.to_dict(),
         answer_blocks=answer_blocks,
+    )
+    student_memory_update = build_student_memory_update(
+        mastery_signal=mastery_signal,
+        mastery_profile=mastery_profile,
+        repair_report=repair_report,
+        retrieval_gate=retrieval_gate,
+        recommendation=recommendation,
+    )
+    if mastery_signal.get("stored"):
+        mastery_signal["student_memory_update"] = student_memory_update
+    agent_state.apply_memory_and_analytics(
+        mastery_signal=mastery_signal,
+        analytics_snapshot={
+            "progress": progress,
+            "weak_topics": topic_snapshot["weak_topics"],
+            "strong_topics": topic_snapshot["strong_topics"],
+        },
+        recommendation=recommendation,
+    )
+    agent_state.memory_update["student_memory_update"] = student_memory_update
+    record_agent_step(
+        db,
+        run_id=turn_id,
+        step_name="memory_signal_prepared",
+        agent_name="memory_mastery_engine",
+        output_data={
+            "has_mastery_signal": bool(mastery_signal),
+            "student_memory_update": student_memory_update,
+            "recommendation_saved": bool(recommendation),
+            "weak_topic_count": len(topic_snapshot["weak_topics"]),
+        },
     )
     trace.mark_phase("delivery")
 
@@ -2265,14 +2774,52 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "source": str((retrieved_material or {}).get("source") or ""),
             "paragraphs_found": int((retrieved_material or {}).get("paragraphs_found") or 0),
             "supported": material_is_supported,
+            "gate": retrieval_gate.to_dict(),
         },
         plan=coach_plan.to_dict(),
         quality=quality_report.to_dict(),
         trace=trace,
-        model_calls=llm_router.records(),
+        model_calls=model_gateway.records(),
         mastery_signal=mastery_signal,
     )
     observability["latency_ms"] = latency_ms
+    observability["agent_state"] = agent_state.to_trace_dict()
+    observability["lead_orchestrator"] = lead_decision.to_dict()
+    observability["response_plan"] = response_plan_payload
+    observability["repair"] = repair_report
+    observability["student_memory_update"] = student_memory_update
+    gateway_tool_records = tool_gateway.records()
+    observability["tool_gateway"] = gateway_tool_records
+    growth_report = evaluate_turn_growth(observability)
+    observability["growth"] = growth_report
+    runtime_status = "success" if quality_report.passed else "needs_review"
+    attachment_tool_records = [tool for tool in trace.tools if tool.get("name") == "attachment_reader"]
+    record_agent_tool_calls(
+        db,
+        run_id=turn_id,
+        tools=[*gateway_tool_records, *attachment_tool_records],
+        agent_name="tool_gateway",
+    )
+    record_agent_messages(db, run_id=turn_id, messages=agent_state.agent_messages)
+    complete_agent_run(
+        db,
+        state=agent_state,
+        status=runtime_status,
+        latency_ms=latency_ms,
+        metadata={
+            "quality_passed": quality_report.passed,
+            "tool_call_count": len(gateway_tool_records) + len(attachment_tool_records),
+            "agent_message_count": len(agent_state.agent_messages),
+            "runtime_version": "agent_runtime_v1",
+            "response_plan": response_plan_payload,
+        },
+    )
+    observability["agent_runtime"] = {
+        "run_id": turn_id,
+        "status": runtime_status,
+        "tool_call_count": len(gateway_tool_records) + len(attachment_tool_records),
+        "agent_message_count": len(agent_state.agent_messages),
+    }
 
     # ── Base64‑encode the entire answer to protect newlines ─────────────
     yield semantic_event(
@@ -2304,15 +2851,21 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         metadata={
             "intent": intent,
             "answer_format": answer_format,
+            "response_plan": response_plan_payload,
             "query": query_understanding.to_dict(),
             "retrieval_policy": retrieval_policy,
+            "retrieval_gate": retrieval_gate.to_dict(),
             "quality": quality_report.to_dict(),
+            "repair": repair_report,
+            "growth": growth_report,
             "assistance_blocks": assistance_blocks,
             "adaptive_teacher": adaptive_context.get("has_signals", False),
             "learning_blueprint": learning_blueprint,
             "coach_plan": coach_plan.to_dict(),
+            "lead_orchestrator": lead_decision.to_dict(),
             "observability": observability,
             "mastery_signal": mastery_signal,
+            "student_memory_update": student_memory_update,
             "mastery_profile": mastery_profile,
             "orchestration": {
                 "tools": orchestration_plan["tools"],
@@ -2323,6 +2876,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "sources": source_bundle,
             "multimodal": multimodal_payload,
             "verification": verification,
+            "agent_state": agent_state.to_trace_dict(),
             "latency_ms": latency_ms,
         },
     )
@@ -2361,12 +2915,19 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "learning_context": adaptive_context["learning_context"],
             "learning_blueprint": learning_blueprint,
             "coach_plan": coach_plan.to_dict(),
+            "lead_orchestrator": lead_decision.to_dict(),
+            "response_plan": response_plan_payload,
             "retrieval_policy": retrieval_policy,
+            "retrieval_gate": retrieval_gate.to_dict(),
             "mastery_signal": mastery_signal,
+            "student_memory_update": student_memory_update,
             "mastery_profile": mastery_profile,
             "orchestration": orchestration_plan,
             "sources": source_bundle,
             "multimodal": multimodal_payload,
+            "repair": repair_report,
+            "growth": growth_report,
+            "agent_state": agent_state.to_trace_dict(),
         },
     )
     _persist_interaction(
@@ -2389,18 +2950,25 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             "mentor_directive_used": bool(adaptive_context.get("mentor_directive")),
             "learning_blueprint": learning_blueprint,
             "coach_plan": coach_plan.to_dict(),
+            "lead_orchestrator": lead_decision.to_dict(),
+            "response_plan": response_plan_payload,
             "retrieval_policy": retrieval_policy,
+            "retrieval_gate": retrieval_gate.to_dict(),
             "compact_context": compact_context,
             "lesson_memory": lesson_memory,
             "answer_blocks": answer_blocks,
             "quality": quality_report.to_dict(),
+            "repair": repair_report,
+            "growth": growth_report,
             "observability": observability,
             "mastery_signal": mastery_signal,
+            "student_memory_update": student_memory_update,
             "mastery_profile": mastery_profile,
             "orchestration": orchestration_plan,
             "sources": source_bundle,
             "verification": verification,
             "multimodal": multimodal_payload,
+            "agent_state": agent_state.to_trace_dict(),
         },
         quality_score=quality_report.score,
     )
@@ -2431,7 +2999,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         estimated_cost_usd=trace_metrics.get("estimated_cost_usd", 0.0),
         estimated_input_tokens=trace_metrics.get("estimated_input_tokens", 0),
         estimated_output_tokens=trace_metrics.get("estimated_output_tokens", 0),
-        model_calls=llm_router.records(),
+        model_calls=model_gateway.records(),
         mastery_signal=persisted_mastery_signal,
         trace_metrics=trace_metrics,
     )

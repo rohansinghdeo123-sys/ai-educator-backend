@@ -1,9 +1,13 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import relationship
 
 from database import Base
+
+
+def _utcnow_naive():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # =========================================================
@@ -326,3 +330,107 @@ class ModelToolTrace(Base):
     estimated_output_tokens = Column(Integer, default=0)
     estimated_cost_usd = Column(Float, default=0.0)
     metadata_json = Column(JSON, default=dict)
+
+
+# =========================================================
+# AGENT RUNTIME
+# =========================================================
+class AgentRuntimeRun(Base):
+    """
+    Durable execution envelope for one controlled agent workflow.
+    A run can represent a coach turn today and an autonomous mission later.
+    """
+    __tablename__ = "agent_runtime_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String, unique=True, index=True)
+    turn_id = Column(String, nullable=True, index=True)
+    user_id = Column(String, nullable=True, index=True)
+    session_id = Column(String, nullable=True, index=True)
+
+    workflow_name = Column(String, default="study_coach_turn", index=True)
+    lead_agent = Column(String, default="lead_coach_orchestrator", index=True)
+    mode = Column(String, default="coach")
+    intent = Column(String, default="general", index=True)
+    status = Column(String, default="running", index=True)
+
+    started_at = Column(DateTime, default=_utcnow_naive, index=True)
+    completed_at = Column(DateTime, nullable=True)
+    latency_ms = Column(Integer, default=0)
+    confidence_score = Column(Float, default=0.0)
+    grounding_status = Column(String, default="not_required", index=True)
+
+    final_answer_excerpt = Column(Text, default="")
+    state_json = Column(JSON, default=dict)
+    metadata_json = Column(JSON, default=dict)
+
+
+class AgentRuntimeStep(Base):
+    """One ordered backend-controlled step inside an agent runtime run."""
+    __tablename__ = "agent_runtime_steps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String, index=True)
+    step_name = Column(String, index=True)
+    agent_name = Column(String, default="", index=True)
+    status = Column(String, default="success", index=True)
+    step_order = Column(Integer, default=0)
+
+    started_at = Column(DateTime, default=_utcnow_naive, index=True)
+    completed_at = Column(DateTime, nullable=True)
+    latency_ms = Column(Integer, default=0)
+    input_json = Column(JSON, default=dict)
+    output_json = Column(JSON, default=dict)
+    error = Column(Text, default="")
+
+
+class AgentRuntimeMessage(Base):
+    """Structured internal message or task packet between agent roles."""
+    __tablename__ = "agent_runtime_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String, index=True)
+    created_at = Column(DateTime, default=_utcnow_naive, index=True)
+
+    sender_agent = Column(String, index=True)
+    receiver_agent = Column(String, index=True)
+    message_type = Column(String, index=True)
+    task = Column(Text, default="")
+    confidence = Column(Float, default=0.0)
+    required_action = Column(Text, default="")
+    evidence_json = Column(JSON, default=dict)
+    result_json = Column(JSON, default=dict)
+
+
+class AgentRuntimeToolCall(Base):
+    """Durable record for deterministic tools selected during a run."""
+    __tablename__ = "agent_runtime_tool_calls"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String, index=True)
+    tool_name = Column(String, index=True)
+    agent_name = Column(String, default="", index=True)
+    status = Column(String, default="success", index=True)
+
+    started_at = Column(DateTime, default=_utcnow_naive, index=True)
+    completed_at = Column(DateTime, nullable=True)
+    latency_ms = Column(Integer, default=0)
+    input_json = Column(JSON, default=dict)
+    output_json = Column(JSON, default=dict)
+    error = Column(Text, default="")
+
+
+class AgentRuntimeHandoff(Base):
+    """Durable handoff contract between agent roles."""
+    __tablename__ = "agent_runtime_handoffs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String, index=True)
+    created_at = Column(DateTime, default=_utcnow_naive, index=True)
+
+    from_agent = Column(String, index=True)
+    to_agent = Column(String, index=True)
+    reason = Column(Text, default="")
+    status = Column(String, default="requested", index=True)
+    input_json = Column(JSON, default=dict)
+    result_json = Column(JSON, default=dict)

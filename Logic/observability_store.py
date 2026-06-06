@@ -149,6 +149,7 @@ def persist_coach_trace(
                 "fallbacks": trace.get("fallbacks") or [],
                 "memory_layers": trace.get("memory_layers") or [],
                 "mastery_signal": observability.get("mastery_signal") or {},
+                "growth": observability.get("growth") or {},
             },
         )
     )
