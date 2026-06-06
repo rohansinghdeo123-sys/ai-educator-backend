@@ -39,6 +39,9 @@ class ToolRegistry:
             for name, tool in self._tools.items()
         }
 
+    def get(self, name: str) -> ToolDefinition | None:
+        return self._tools.get(name)
+
     def run(self, name: str, **kwargs: Any) -> Any:
         if name not in self._tools:
             raise KeyError(f"Coach tool '{name}' is not registered.")

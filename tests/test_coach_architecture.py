@@ -7,6 +7,20 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from database import Base
+from Logic.agent_runtime import (
+    AgentHandoff,
+    build_initial_agent_state,
+    complete_agent_run,
+    normalize_agent_role,
+    normalize_handoff_status,
+    normalize_message_type,
+    record_agent_handoff,
+    record_agent_messages,
+    record_agent_step,
+    record_agent_tool_calls,
+    runtime_summary,
+    start_agent_run,
+)
 from Logic.coach.evaluation_suite import SCENARIOS, run_offline_coach_evaluation
 from Logic.coach.attachments import prepare_attachments
 from Logic.coach.mastery_engine import build_active_mastery_profile
@@ -14,10 +28,21 @@ from Logic.coach.multimodal_learning import infer_diagram_specs, parse_formula_s
 from Logic.coach.source_metadata import build_source_bundle
 from Logic.coach.specialist_tools import calculator, diagram_helper, formula_checker
 from Logic.coach.unified_orchestrator import build_orchestration_plan
+from Logic.coach.lead_orchestrator import build_lead_coach_decision
+from Logic.coach.retrieval_gate import evaluate_retrieval_gate
+from Logic.coach.growth_loop import evaluate_turn_growth
 from Logic.coach.llm_router import LLMRouter
-from Logic.coach.mastery_store import build_mastery_signal, persist_mastery_signal
+from Logic.coach.model_gateway import ModelGateway
+from Logic.coach.tool_gateway import ToolGateway
+from Logic.coach.mastery_store import build_mastery_signal, build_student_memory_update, persist_mastery_signal
 from Logic.coach.quality_scorer import score_coach_answer
 from Logic.coach.query_understanding import understand_query
+from Logic.coach.response_planner import (
+    ResponsePlannerOutput,
+    build_response_plan,
+    build_response_plan_instruction,
+)
+from Logic.coach.answer_repair import decide_answer_repair, mark_repair_applied
 from Logic.coach.turn_engine import build_adaptive_answer_blocks, parse_semantic_event, semantic_event
 from Logic.analytics_engine import get_user_analytics
 from Logic.agent_event_bus import AgentEvent
@@ -38,6 +63,11 @@ from models import (
     AICoachMemory,
     AICoachInteraction,
     AICoachProfile,
+    AgentRuntimeHandoff,
+    AgentRuntimeMessage,
+    AgentRuntimeRun,
+    AgentRuntimeStep,
+    AgentRuntimeToolCall,
     ModelToolTrace,
     ObservabilityEvent,
     TestHistory,
@@ -120,6 +150,146 @@ class FakeVisionRouter:
 
 
 class CoachArchitectureTests(unittest.TestCase):
+    def _response_plan_for(
+        self,
+        prompt,
+        *,
+        declared_intent="general",
+        has_history=False,
+        scope=None,
+        attachments=(),
+        adaptive_context=None,
+        mode="coach",
+    ):
+        query = understand_query(prompt, declared_intent=declared_intent, has_history=has_history)
+        answer_format = {
+            "id": query.answer_format,
+            "label": query.answer_format.replace("_", " ").title(),
+            "sections": [],
+            "rules": [],
+        }
+        return build_response_plan(
+            question=prompt,
+            query=query,
+            answer_format=answer_format,
+            mode=mode,
+            retrieval_policy=query.retrieval_policy,
+            selected_scope=scope or {},
+            attachments=attachments,
+            adaptive_context=adaptive_context or {},
+            conversation_context={"is_follow_up": query.is_follow_up},
+        )
+
+    def test_response_planner_dynamic_student_answer_styles(self):
+        short = self._response_plan_for("Photosynthesis means?")
+        self.assertEqual(short.answer_length, "short")
+        self.assertEqual(short.format_style, "plain")
+        self.assertFalse(short.include_examples)
+
+        medium = self._response_plan_for("What is photosynthesis?")
+        self.assertEqual(medium.answer_length, "medium")
+        self.assertTrue(medium.include_examples)
+
+        deep = self._response_plan_for("Explain photosynthesis deeply.")
+        self.assertIn(deep.answer_length, {"detailed", "long"})
+        self.assertEqual(deep.tone, "deep_teaching")
+        self.assertTrue(deep.include_summary)
+
+        exam = self._response_plan_for("Give 5 marks answer on photosynthesis.")
+        self.assertEqual(exam.format_style, "exam_answer")
+        self.assertEqual(exam.tone, "exam_focused")
+        self.assertEqual(exam.mode, "exam")
+
+        mcq = self._response_plan_for(
+            "Give MCQs from this chapter",
+            scope={"chapter": "Photosynthesis", "section_id": "photosynthesis"},
+        )
+        self.assertEqual(mcq.format_style, "quiz")
+        self.assertEqual(mcq.mode, "practice")
+        self.assertTrue(mcq.use_rag)
+        self.assertTrue(mcq.grounding_required)
+
+        source_only = self._response_plan_for("Explain photosynthesis from my notes only")
+        self.assertTrue(source_only.grounding_required)
+        self.assertTrue(source_only.use_rag)
+
+        simpler_follow_up = self._response_plan_for("I did not understand", has_history=True)
+        self.assertEqual(simpler_follow_up.tone, "simple")
+        self.assertEqual(simpler_follow_up.student_level, "beginner")
+        self.assertIn("easier words", simpler_follow_up.special_instruction)
+
+        code = self._response_plan_for("Explain this Python code line by line")
+        self.assertEqual(code.mode, "coding_help")
+        self.assertTrue(code.include_code)
+        self.assertIn(code.format_style, {"numbered_steps", "code"})
+
+        image = self._response_plan_for(
+            "Solve this image question",
+            attachments=[{"name": "question.png", "mime_type": "image/png"}],
+        )
+        self.assertEqual(image.mode, "upload_explanation")
+        self.assertEqual(image.format_style, "numbered_steps")
+        self.assertTrue(image.grounding_required)
+
+        numerical = self._response_plan_for("Calculate density if mass is 20 g and volume is 5 cm3")
+        self.assertEqual(numerical.format_style, "numbered_steps")
+        self.assertTrue(numerical.include_formula)
+
+        answer_only = self._response_plan_for("Only final value")
+        self.assertEqual(answer_only.answer_length, "one_line")
+        self.assertFalse(answer_only.ask_follow_up)
+
+        hinglish = self._response_plan_for("Explain photosynthesis in Hinglish")
+        self.assertIn("Hinglish", hinglish.special_instruction)
+
+    def test_response_planner_handles_common_student_edge_cases(self):
+        compare = self._response_plan_for("Compare mitosis and meiosis")
+        self.assertEqual(compare.format_style, "table")
+
+        no_table = self._response_plan_for("Compare mitosis and meiosis, no table")
+        self.assertEqual(no_table.format_style, "bullets")
+
+        derivation = self._response_plan_for("Derive the formula for kinetic energy")
+        self.assertEqual(derivation.format_style, "derivation")
+        self.assertTrue(derivation.include_formula)
+
+        formula_only = self._response_plan_for("No derivation, just formula")
+        self.assertEqual(formula_only.answer_length, "short")
+        self.assertEqual(formula_only.format_style, "plain")
+        self.assertTrue(formula_only.include_formula)
+        self.assertFalse(formula_only.include_examples)
+
+        one_line = self._response_plan_for("Newton's first law one line")
+        self.assertEqual(one_line.answer_length, "one_line")
+
+        hint = self._response_plan_for("Give hint only")
+        self.assertEqual(hint.answer_length, "short")
+        self.assertIn("hint only", hint.special_instruction)
+
+        formula_list = self._response_plan_for("Give formula list for motion")
+        self.assertTrue(formula_list.include_formula)
+        self.assertEqual(formula_list.mode, "revision")
+
+        selected_revision = self._response_plan_for(
+            "Give revision notes",
+            scope={"chapter": "Hydrocarbons", "topic": "Alkanes"},
+        )
+        self.assertTrue(selected_revision.use_rag)
+        self.assertTrue(selected_revision.grounding_required)
+
+    def test_response_planner_instruction_exposes_strict_contract(self):
+        plan = ResponsePlannerOutput(
+            answer_length="short",
+            format_style="plain",
+            include_examples=False,
+            ask_follow_up=False,
+            special_instruction="Return definition only.",
+        )
+        instruction = build_response_plan_instruction(plan)
+        self.assertIn("answer_length: short", instruction)
+        self.assertIn("format_style: plain", instruction)
+        self.assertIn("Do not add examples", instruction)
+
     def test_session_summary_includes_replay_contract(self):
         test = SimpleNamespace(
             id=42,
@@ -216,6 +386,31 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertTrue(report["passed"], report)
         self.assertGreaterEqual(len(SCENARIOS), 150)
 
+    def test_growth_loop_scores_stable_and_repair_turns(self):
+        stable = evaluate_turn_growth({
+            "quality": {"score": 0.9},
+            "retrieval": {"gate": {"grounding_status": "grounded"}},
+            "repair": {"final": {"action": "deliver", "repair_applied": False}},
+            "model_calls": [{"status": "success"}],
+            "tool_gateway": [{"status": "success"}],
+            "student_memory_update": {"support_style": "steady_guided"},
+        })
+        self.assertEqual(stable["readiness"], "excellent")
+        self.assertIn("stable baseline", stable["recommendations"][0])
+
+        repair = evaluate_turn_growth({
+            "quality": {"score": 0.62},
+            "retrieval": {"gate": {"grounding_status": "missing_required_source"}},
+            "repair": {"final": {"action": "deliver", "repair_applied": True}},
+            "model_calls": [{"status": "error"}, {"status": "success"}],
+            "tool_gateway": [{"status": "error"}],
+            "student_memory_update": {"support_style": "simplify_and_check"},
+        })
+        self.assertIn(repair["readiness"], {"watch", "repair"})
+        self.assertGreaterEqual(len(repair["recommendations"]), 3)
+        self.assertEqual(repair["signals"]["model_errors"], 1)
+        self.assertEqual(repair["signals"]["tool_errors"], 1)
+
     def test_conversational_thanks_does_not_reopen_lesson(self):
         query = understand_query("Thank you", has_history=True)
         self.assertEqual(query.intent, "conversation")
@@ -246,6 +441,50 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertTrue(casual.passed, casual.to_dict())
         self.assertGreaterEqual(unsupported.hallucination_risk, 0.65)
 
+    def test_answer_repair_decision_replaces_only_when_required(self):
+        unsupported = score_coach_answer(
+            question="Explain alkanes from my notes",
+            answer="Alkanes are saturated hydrocarbons.",
+            strict_grounding=True,
+            intent="definition",
+            answer_format="definition",
+        )
+        missing_gate = evaluate_retrieval_gate(
+            policy="required",
+            retrieved_material={},
+            strict_grounding=True,
+            material_supported=False,
+        )
+        replace = decide_answer_repair(
+            quality=unsupported,
+            verification={"passed": False, "issues": ["unsupported_without_retrieval"]},
+            retrieval_gate=missing_gate,
+            strict_grounding=True,
+        )
+        self.assertEqual(replace.action, "replace_with_material_not_found")
+        self.assertEqual(replace.required_action, "request_or_select_study_material")
+
+        repaired_quality = score_coach_answer(
+            question="Explain alkanes from my notes",
+            answer="I could not find this in your study material. Please upload or select the correct chapter/data.",
+            strict_grounding=True,
+            intent="definition",
+            answer_format="definition",
+        )
+        applied = mark_repair_applied(original=replace, quality=repaired_quality)
+        self.assertTrue(applied.repair_applied)
+        self.assertEqual(applied.action, "deliver")
+
+        good = score_coach_answer(
+            question="Define matter",
+            answer="Matter is anything that has mass and occupies space.",
+            strict_grounding=False,
+            intent="definition",
+            answer_format="definition",
+        )
+        deliver = decide_answer_repair(quality=good, verification={"passed": True}, strict_grounding=False)
+        self.assertEqual(deliver.action, "deliver")
+
     def test_adaptive_answer_blocks_and_semantic_event(self):
         answer = "Core Idea:\nMatter has mass.\n\nExample:\n- Water occupies space.\n\nQuick Check:\n- Does air occupy space?"
         blocks = build_adaptive_answer_blocks(answer)
@@ -253,6 +492,228 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertEqual(event["event"], "answer.completed")
         self.assertTrue(any(block["kind"] == "example" for block in blocks))
         self.assertTrue(any(block["kind"] == "checkpoint" for block in blocks))
+
+    def test_agent_state_tracks_safe_shared_turn_contract(self):
+        request = SimpleNamespace(
+            raw_message="Explain alkanes from my notes only",
+            original_message="Explain alkanes from my notes only",
+        )
+        query = understand_query("Explain alkanes from my notes only")
+        state = build_initial_agent_state(
+            request=request,
+            turn_id="turn_state",
+            user_id="student_state",
+            session_id="coach-student_state-conv",
+            question="Explain alkanes from my notes only",
+            mode="coach",
+            query=query,
+            answer_format={"id": "definition"},
+            adaptive_context={
+                "student_state": {"emotional_state": "confused", "level": "beginner"},
+                "adaptive_strategy": {"answer_style": "simple"},
+                "learning_context": {},
+            },
+        )
+        state.apply_conversation_context({
+            "is_follow_up": True,
+            "last_student_question": "What are hydrocarbons?",
+            "recent_thread": "Tutor: " + ("Alkanes are saturated hydrocarbons. " * 80),
+            "durable_memory": "Student prefers simple examples.",
+        })
+        state.apply_scope({"topic": "alkanes", "section_id": "alkanes"})
+        state.apply_retrieval(
+            {
+                "context": "Alkanes are saturated hydrocarbons. " * 100,
+                "section_id": "alkanes",
+                "source": "markdown",
+                "paragraphs_found": 4,
+                "keywords_used": ["alkane", "formula"],
+            },
+            "required",
+            True,
+        )
+        state.apply_attachments(SimpleNamespace(
+            image_count=1,
+            document_count=1,
+            warnings=["Image extraction is model-assisted"],
+            has_material=True,
+            vision_summary="Visible formula CH4 and handwritten note.",
+            multimodal={
+                "confidence": 0.84,
+                "math_lines": ["F = ma"],
+                "formulas": [{"raw": "CH4"}],
+                "diagram_specs": [{"diagram_type": "chemistry_structure"}],
+            },
+        ))
+        state.apply_tools(
+            {"formula_checker": {"used": True, "formulas": ["CH4"], "directive": "Keep chemistry exact."}},
+            ["formula_checker", "answer_verifier"],
+        )
+        state.apply_answer(
+            draft="Alkanes are saturated hydrocarbons.",
+            final_answer="Alkanes are saturated hydrocarbons with single bonds.",
+            next_best_action="Try one easy alkane question.",
+        )
+        quality = score_coach_answer(
+            question="Explain alkanes from my notes only",
+            answer="Alkanes are saturated hydrocarbons with single bonds.",
+            retrieved_context="Alkanes are saturated hydrocarbons with single covalent bonds.",
+            strict_grounding=True,
+            intent="definition",
+            answer_format="definition",
+        )
+        state.apply_quality(quality, {"passed": True})
+        trace = state.to_trace_dict()
+
+        self.assertEqual(trace["detected_intent"], "concept")
+        self.assertEqual(trace["retrieval_policy"], "required")
+        self.assertEqual(trace["grounding_status"], "grounded")
+        self.assertEqual(trace["detected_topic"], "alkanes")
+        self.assertEqual(trace["attachment_summary"]["multimodal"]["formulas"], 1)
+        self.assertIn("retrieved_context_excerpt", trace)
+        self.assertNotIn("retrieved_context", trace)
+        self.assertNotIn("final_answer", trace)
+        self.assertLessEqual(len(trace["conversation_history"]["recent_thread_excerpt"]), 903)
+        self.assertTrue(trace["agent_messages"])
+
+    def test_agent_contract_normalizes_messages_and_handoffs(self):
+        self.assertEqual(normalize_agent_role("Lead Coach Orchestrator"), "lead_coach_orchestrator")
+        self.assertEqual(normalize_agent_role("???"), "unknown_agent")
+        self.assertEqual(normalize_message_type("Verification Result"), "verification_result")
+        self.assertEqual(normalize_message_type("made up event"), "status")
+        self.assertEqual(normalize_handoff_status("needs-review"), "needs_review")
+
+        request = SimpleNamespace(raw_message="Explain matter", original_message="Explain matter")
+        state = build_initial_agent_state(
+            request=request,
+            turn_id="turn_contract",
+            user_id="student_contract",
+            session_id="coach-student_contract-conv",
+            question="Explain matter",
+            mode="coach",
+            query=understand_query("Explain matter"),
+            answer_format={"id": "definition"},
+            adaptive_context={"student_state": {}, "adaptive_strategy": {}, "learning_context": {}},
+        )
+        state.add_message(
+            sender_agent="Lead Coach Orchestrator",
+            receiver_agent="not a real agent",
+            message_type="Strange Custom Event",
+            task="x" * 700,
+            evidence=["bad"],
+            confidence=3.7,
+            result="bad",
+        )
+        message = state.agent_messages[-1].to_dict()
+        self.assertEqual(message["sender_agent"], "lead_coach_orchestrator")
+        self.assertEqual(message["receiver_agent"], "unknown_agent")
+        self.assertEqual(message["message_type"], "status")
+        self.assertEqual(message["confidence"], 1.0)
+        self.assertEqual(message["evidence"], {})
+        self.assertEqual(message["result"], {})
+        self.assertLessEqual(len(message["task"]), 503)
+
+        handoff = AgentHandoff(
+            from_agent="Lead Coach Orchestrator",
+            to_agent="Tutor Model",
+            reason="Send draft task",
+            status="DONE",
+            input_payload="bad",
+            result_payload={"accepted": True},
+            confidence=-4,
+        ).to_dict()
+        self.assertEqual(handoff["from_agent"], "lead_coach_orchestrator")
+        self.assertEqual(handoff["to_agent"], "tutor_model")
+        self.assertEqual(handoff["status"], "requested")
+        self.assertEqual(handoff["input_payload"], {})
+        self.assertEqual(handoff["result_payload"], {"accepted": True})
+        self.assertEqual(handoff["confidence"], 0.0)
+
+    def test_agent_runtime_store_persists_controlled_run_history(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+
+        request = SimpleNamespace(raw_message="Explain matter", original_message="Explain matter")
+        query = understand_query("Explain matter")
+        state = build_initial_agent_state(
+            request=request,
+            turn_id="turn_runtime",
+            user_id="student_runtime",
+            session_id="coach-student_runtime-conv",
+            question="Explain matter",
+            mode="coach",
+            query=query,
+            answer_format={"id": "definition"},
+            adaptive_context={"student_state": {}, "adaptive_strategy": {}, "learning_context": {}},
+        )
+        state.add_message(
+            sender_agent="intent_profiler",
+            receiver_agent="lead_coach_orchestrator",
+            message_type="profile_result",
+            task="Classify the student request.",
+            confidence=0.82,
+            result={"intent": query.intent, "retrieval_policy": query.retrieval_policy},
+        )
+
+        run = start_agent_run(db, state=state, metadata={"endpoint": "test"})
+        self.assertIsNotNone(run)
+        record_agent_step(
+            db,
+            run_id=state.turn_id,
+            step_name="intent_profiled",
+            agent_name="intent_profiler",
+            output_data={"intent": query.intent},
+        )
+        record_agent_handoff(
+            db,
+            run_id=state.turn_id,
+            from_agent="lead_coach_orchestrator",
+            to_agent="intent_profiler",
+            reason="Classify the request.",
+            result_data={"intent": query.intent},
+        )
+        record_agent_tool_calls(
+            db,
+            run_id=state.turn_id,
+            tools=[
+                {"name": "knowledge_search", "paragraphs_found": 2, "source": "notes"},
+                {"name": "answer_verifier", "result": {"passed": True, "issues": []}},
+            ],
+            agent_name="tool_gateway",
+        )
+        state.apply_answer(
+            draft="Matter has mass and occupies space.",
+            final_answer="Matter is anything that has mass and occupies space.",
+        )
+        quality = score_coach_answer(
+            question="Explain matter",
+            answer=state.final_answer,
+            strict_grounding=False,
+            intent=query.intent,
+            answer_format="definition",
+        )
+        state.apply_quality(quality, {"passed": True})
+        stored_messages = record_agent_messages(db, run_id=state.turn_id, messages=state.agent_messages)
+        complete_agent_run(db, state=state, status="success", latency_ms=321)
+
+        summary = runtime_summary(db, state.turn_id)
+        self.assertEqual(summary["status"], "success")
+        self.assertEqual(summary["steps"], 1)
+        self.assertEqual(summary["messages"], stored_messages)
+        self.assertEqual(summary["tool_calls"], 2)
+        self.assertEqual(summary["handoffs"], 1)
+        self.assertEqual(db.query(AgentRuntimeRun).count(), 1)
+        self.assertEqual(db.query(AgentRuntimeStep).first().step_order, 1)
+        self.assertEqual(db.query(AgentRuntimeMessage).count(), stored_messages)
+        self.assertEqual(db.query(AgentRuntimeHandoff).count(), 1)
+        search_call = db.query(AgentRuntimeToolCall).filter(AgentRuntimeToolCall.tool_name == "knowledge_search").one()
+        self.assertEqual(search_call.output_json["paragraphs_found"], 2)
+        completed = db.query(AgentRuntimeRun).filter(AgentRuntimeRun.run_id == state.turn_id).one()
+        self.assertIn("final_answer", completed.state_json)
+        self.assertEqual(completed.latency_ms, 321)
+        db.close()
 
     def test_router_uses_fallback_and_records_route(self):
         router = LLMRouter()
@@ -296,6 +757,44 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertEqual(records[1]["provider"], "openrouter")
         self.assertEqual(records[1]["status"], "success")
         self.assertTrue(records[1]["fallback"])
+
+    def test_model_gateway_enriches_fallback_records_with_agent_task_metadata(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "COACH_PROVIDER_ORDER": "groq,openrouter",
+                "COACH_LLM_MAX_ATTEMPTS": "2",
+                "COACH_BUDGET_ROUTING": "false",
+                "OPENROUTER_API_KEY": "test-key",
+                "OPENROUTER_TUTOR_MODEL": "openrouter/test-tutor",
+            },
+            clear=False,
+        ):
+            router = LLMRouter()
+            router._provider_clients["groq"] = ProviderClient(AlwaysFailCompletions())
+            router._provider_clients["openrouter"] = ProviderClient(StaticCompletions("Gateway recovered"))
+            gateway = ModelGateway(router)
+            gateway.begin_turn("turn_gateway")
+
+            answer = gateway.complete(
+                "tutor",
+                [{"role": "user", "content": "Explain inertia"}],
+                agent_name="Tutor Model",
+                task="Draft a student-friendly explanation.",
+                student_visible=False,
+                max_tokens=120,
+            )
+            records = gateway.records()
+
+        self.assertEqual(answer, "Gateway recovered")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["status"], "error")
+        self.assertEqual(records[1]["status"], "success")
+        self.assertEqual(records[0]["gateway_agent"], "tutor_model")
+        self.assertEqual(records[1]["gateway_agent"], "tutor_model")
+        self.assertEqual(records[0]["gateway_task"], "Draft a student-friendly explanation.")
+        self.assertEqual(records[0]["gateway_call_id"], records[1]["gateway_call_id"])
+        self.assertFalse(records[1]["student_visible"])
 
     def test_router_stream_fails_over_across_providers(self):
         stream = StaticStreamCompletions(["Better", " answer"])
@@ -408,6 +907,43 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertIn("socratic_tutor", homework["tools"])
         self.assertNotIn("socratic_tutor", direct["tools"])
 
+    def test_lead_coach_orchestrator_declares_agent_sequence_and_safety_gates(self):
+        query = understand_query("Explain alkanes from my notes only")
+        plan = build_orchestration_plan(query, "Explain alkanes from my notes only")
+        decision = build_lead_coach_decision(
+            query=query,
+            answer_format={"id": "concept", "label": "Concept Builder"},
+            orchestration_plan=plan,
+            retrieval_policy=query.retrieval_policy,
+            strict_grounding=query.requires_grounding,
+            material_supported=False,
+            attachment_summary={"has_material": False},
+            mastery_profile={"route": "simplify_and_reinforce"},
+        )
+
+        self.assertEqual(decision.primary_agent, "lead_coach_orchestrator")
+        self.assertIn("context_retriever", decision.agent_sequence)
+        self.assertIn("tool_gateway", decision.agent_sequence)
+        self.assertIn("quality_verifier", decision.agent_sequence)
+        self.assertIn("memory_mastery_engine", decision.agent_sequence)
+        self.assertIn("strict_grounding", decision.safety_gates)
+        self.assertIn("required_material_missing", decision.safety_gates)
+        self.assertIn("answer_verifier", decision.safety_gates)
+        self.assertIn("student_friendly_format", decision.safety_gates)
+
+        casual_query = understand_query("thanks")
+        casual_plan = build_orchestration_plan(casual_query, "thanks")
+        casual_decision = build_lead_coach_decision(
+            query=casual_query,
+            answer_format={"id": "conversation", "label": "Conversation"},
+            orchestration_plan=casual_plan,
+            retrieval_policy="none",
+            strict_grounding=False,
+            material_supported=True,
+        )
+        self.assertNotIn("context_retriever", casual_decision.agent_sequence)
+        self.assertNotIn("quality_verifier", casual_decision.agent_sequence)
+
     def test_text_attachment_becomes_source_context(self):
         payload = "data:text/plain;base64,TWF0dGVyIGhhcyBtYXNzIGFuZCBvY2N1cGllcyBzcGFjZS4="
         bundle = prepare_attachments([{"name": "notes.txt", "mime_type": "text/plain", "data_url": payload}], "Define matter")
@@ -435,6 +971,39 @@ class CoachArchitectureTests(unittest.TestCase):
         unrelated = build_active_mastery_profile([memory], {"topic": "fractions"})
         self.assertEqual(unrelated["route"], "baseline")
 
+    def test_student_memory_update_combines_mastery_repair_and_retrieval(self):
+        mastery_signal = {
+            "stored": True,
+            "topic": "alkanes",
+            "needs_support": True,
+            "confidence": 42,
+            "quality_score": 0.58,
+        }
+        repair_report = {
+            "initial": {"action": "replace_with_material_not_found"},
+            "final": {"action": "deliver", "repair_applied": True},
+        }
+        retrieval_gate = evaluate_retrieval_gate(
+            policy="required",
+            retrieved_material={},
+            strict_grounding=True,
+            material_supported=False,
+        )
+
+        update = build_student_memory_update(
+            mastery_signal=mastery_signal,
+            mastery_profile={"route": "simplify_and_reinforce"},
+            repair_report=repair_report,
+            retrieval_gate=retrieval_gate,
+            recommendation="Revise alkanes with one example.",
+        )
+
+        self.assertTrue(update["stored"])
+        self.assertEqual(update["support_style"], "simplify_and_check")
+        self.assertIn("answer_needed_repair", update["guardrails"])
+        self.assertIn("needs_source_selection", update["guardrails"])
+        self.assertEqual(update["mastery_route"], "simplify_and_reinforce")
+
     def test_specialist_calculator_and_formula_checker_are_bounded(self):
         calculation = calculator("Calculate 20 / 5")
         formulas = formula_checker("Explain CH4 and C2H6. Carbon remains a normal word.")
@@ -443,6 +1012,35 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertEqual(formulas["formulas"], ["CH4", "C2H6"])
         self.assertEqual(formulas["formatted"][0]["display"], "CH₄")
         self.assertFalse(unsafe["used"])
+
+    def test_tool_gateway_records_success_and_safe_failure(self):
+        gateway = ToolGateway()
+        gateway.begin_turn("turn_tools")
+
+        calculation = gateway.run(
+            "calculator",
+            agent_name="Tool Gateway",
+            task="Calculate bounded arithmetic.",
+            question="Calculate 20 / 5",
+        )
+        missing = gateway.run(
+            "missing_tool",
+            agent_name="Tool Gateway",
+            task="Try an unavailable optional tool.",
+        )
+        records = gateway.records()
+
+        self.assertEqual(calculation["result"], 4.0)
+        self.assertTrue(missing["tool_failed"])
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["name"], "calculator")
+        self.assertEqual(records[0]["agent_name"], "tool_gateway")
+        self.assertEqual(records[0]["gateway_task"], "Calculate bounded arithmetic.")
+        self.assertEqual(records[0]["status"], "success")
+        self.assertEqual(records[1]["status"], "error")
+        self.assertTrue(records[1]["result"]["tool_failed"])
+        with self.assertRaises(KeyError):
+            gateway.run("missing_tool", fail_open=False)
 
     def test_multimodal_image_extracts_ocr_math_formulas_and_diagram_specs(self):
         one_pixel_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
@@ -487,6 +1085,46 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertEqual(notes["answer_basis"], "notes")
         self.assertEqual(notes["indicator"], "Based on your notes")
         self.assertEqual(notes["citations"][0]["kind"], "notes")
+
+    def test_retrieval_gate_controls_required_optional_and_hybrid_sources(self):
+        missing = evaluate_retrieval_gate(
+            policy="required",
+            retrieved_material={"context": "", "error": "No source"},
+            strict_grounding=True,
+            material_supported=False,
+            attachment_summary={"has_material": False},
+        )
+        self.assertFalse(missing.can_answer)
+        self.assertEqual(missing.grounding_status, "missing_required_source")
+        self.assertEqual(missing.required_action, "request_or_select_study_material")
+
+        optional = evaluate_retrieval_gate(
+            policy="optional",
+            retrieved_material=None,
+            strict_grounding=False,
+            material_supported=False,
+        )
+        self.assertTrue(optional.can_answer)
+        self.assertEqual(optional.grounding_status, "optional_no_source")
+
+        hybrid = evaluate_retrieval_gate(
+            policy="required",
+            retrieved_material={
+                "context": "Matter has mass.",
+                "source": "chapter_notes",
+                "section_id": "matter",
+                "paragraphs_found": 2,
+            },
+            strict_grounding=True,
+            material_supported=True,
+            attachment_summary={"has_material": True, "documents": 1, "images": 1},
+        )
+        self.assertTrue(hybrid.can_answer)
+        self.assertEqual(hybrid.grounding_status, "grounded")
+        self.assertIn("platform_notes", hybrid.source_mix)
+        self.assertIn("uploaded_document", hybrid.source_mix)
+        self.assertIn("uploaded_image", hybrid.source_mix)
+        self.assertIn("hybrid", hybrid.source_mix)
 
     def test_multimodal_formula_parser_and_diagram_helper_are_student_safe(self):
         formulas = parse_formula_signals("Can carbon form CH4? Use v^2 = u^2 + 2as. Class remains text.")

@@ -94,6 +94,50 @@ def build_mastery_signal(
     }
 
 
+def build_student_memory_update(
+    *,
+    mastery_signal: Dict[str, Any],
+    mastery_profile: Dict[str, Any],
+    repair_report: Dict[str, Any],
+    retrieval_gate: Any,
+    recommendation: str = "",
+) -> Dict[str, Any]:
+    """Create a student-friendly memory update for the next coach turn."""
+    if not mastery_signal.get("stored"):
+        return {"stored": False, "reason": mastery_signal.get("reason", "not_stored")}
+
+    route = str((mastery_profile or {}).get("route") or "baseline")
+    final_repair = dict((repair_report or {}).get("final") or {})
+    initial_repair = dict((repair_report or {}).get("initial") or {})
+    grounding_status = str(getattr(retrieval_gate, "grounding_status", "") or "")
+    guardrails: List[str] = []
+    if initial_repair.get("action") != "deliver" or final_repair.get("repair_applied"):
+        guardrails.append("answer_needed_repair")
+    if grounding_status == "missing_required_source":
+        guardrails.append("needs_source_selection")
+    if mastery_signal.get("needs_support"):
+        support_style = "simplify_and_check"
+    elif route == "increase_difficulty":
+        support_style = "challenge_gently"
+    else:
+        support_style = "steady_guided"
+
+    next_review_action = recommendation or (mastery_profile or {}).get("directive") or "Continue with one short check."
+    if (mastery_profile or {}).get("revision_due"):
+        next_review_action = f"Review {mastery_signal.get('topic', 'this concept')} before moving ahead."
+
+    return {
+        "stored": True,
+        "topic": mastery_signal.get("topic", "open_concept"),
+        "support_style": support_style,
+        "next_review_action": str(next_review_action)[:320],
+        "guardrails": guardrails,
+        "confidence": mastery_signal.get("confidence", 0),
+        "quality_score": mastery_signal.get("quality_score", 0),
+        "mastery_route": route,
+    }
+
+
 def persist_mastery_signal(db, coach: AICoachProfile, signal: Dict[str, Any]) -> Dict[str, Any]:
     """Upsert one compact concept memory so repeated chats strengthen one learner record."""
     if not signal.get("stored"):
