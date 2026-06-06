@@ -21,6 +21,7 @@ class QueryUnderstanding:
     topic_shift: bool = False
     confidence: float = 0.72
     teaching_strategy: str = ""
+    scenario_profile: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -28,6 +28,8 @@ def _scenario_corpus() -> List[RoutingScenario]:
     rows = [
         RoutingScenario("greeting", "Hi", "conversation"),
         RoutingScenario("gratitude", "Thank you", "conversation", has_history=True),
+        RoutingScenario("social_closure", "Okay thanks, you are the best and I understood the concept easily", "conversation", has_history=True),
+        RoutingScenario("thanks_but_followup", "Thanks but explain it again", "clarification", has_history=True, expected_follow_up=True),
         RoutingScenario("confusion", "I am confused. Explain it again simply", "clarification", has_history=True, expected_follow_up=True),
         RoutingScenario("follow_up", "Why is that?", "concept", has_history=True, expected_follow_up=True),
         RoutingScenario("formula_route", "Explain the formula C2H6 for alkanes", "numerical", expected_tools=("formula_checker",)),
@@ -48,7 +50,7 @@ def _scenario_corpus() -> List[RoutingScenario]:
             RoutingScenario(f"planning_{index}", f"Make a study plan for {topic}", "planning"),
             RoutingScenario(f"grounded_{index}", f"Explain {topic} from my notes only", "concept", expected_retrieval_policy="required", expected_tools=("knowledge_search",)),
             RoutingScenario(f"recap_{index}", f"Give me a chapter recap of {topic}", "concept", expected_retrieval_policy="optional", expected_tools=("knowledge_search",)),
-            RoutingScenario(f"follow_up_{index}", "Explain it again simply", "concept", has_history=True, expected_follow_up=True),
+            RoutingScenario(f"follow_up_{index}", "Explain it again simply", "clarification", has_history=True, expected_follow_up=True),
             RoutingScenario(f"wrong_assumption_{index}", f"I think {topic} is always the same. Is that correct?", "concept"),
             RoutingScenario(f"mixed_language_{index}", f"{topic} simple words me samjhao", "concept"),
             RoutingScenario(f"image_question_{index}", f"Read this screenshot and explain {topic}", "concept", expected_tools=("attachment_reader", "diagram_helper"), attachments=({"name": f"{topic}.png", "mime_type": "image/png"},)),

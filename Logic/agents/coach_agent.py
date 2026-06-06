@@ -46,6 +46,8 @@ from Logic.coach import (
     evaluate_turn_growth,
     evaluate_retrieval_gate,
     format_orchestration_prompt,
+    build_conversation_response,
+    build_scenario_intent_profile,
     model_gateway,
     mark_repair_applied,
     parse_semantic_event,
@@ -701,93 +703,13 @@ def _is_definition_question(question: str) -> bool:
     return any(kw in q for kw in definition_keywords)
 
 
-def _normalized_short_message(question: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^\w\s']", " ", (question or "").lower())).strip()
-
-
 def _build_lightweight_conversation_reply(
     question: str,
     conversation_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    q = _normalized_short_message(question)
-    if not q or len(q) > 80:
-        return None
-
-    thanks = {
-        "thanks",
-        "thank you",
-        "thankyou",
-        "thx",
-        "ty",
-        "thanks a lot",
-        "thank you so much",
-        "thanks sir",
-        "thanks mam",
-        "thanks ma'am",
-    }
-    acknowledgements = {
-        "ok",
-        "okay",
-        "okk",
-        "got it",
-        "understood",
-        "clear",
-        "done",
-        "nice",
-        "great",
-        "cool",
-        "perfect",
-    }
-    greetings = {
-        "hi",
-        "hello",
-        "hey",
-        "good morning",
-        "good afternoon",
-        "good evening",
-    }
-    tokens = set(q.split())
-
-    if q in thanks or (
-        len(tokens) <= 5 and ("thanks" in tokens or q.startswith("thank you"))
-    ):
-        return "You're welcome. Ask me the next doubt whenever you're ready."
-
-    if q in acknowledgements or (
-        tokens
-        and len(tokens) <= 4
-        and tokens.issubset(
-            {
-                "ok",
-                "okay",
-                "okk",
-                "got",
-                "it",
-                "understood",
-                "clear",
-                "done",
-                "nice",
-                "great",
-                "cool",
-                "perfect",
-            }
-        )
-    ):
-        return "Good. Send the next question when you're ready, or ask me to test you on the last concept."
-
-    if q in greetings:
-        return "Hi, I am ready. Ask me any subject, topic, doubt, or pasted question."
-
-    if q in {"yes", "yeah", "yep"}:
-        recent_thread = str((conversation_context or {}).get("recent_thread", "")).lower()
-        if any(keyword in recent_thread for keyword in ("practice question", "quick check", "test you", "try one")):
-            return "Yes, let's do it. Send your answer to the last check question, or say 'ask me one' and I will give you a fresh practice question."
-        return "Okay. Tell me what you want to do next."
-
-    if q in {"no", "nope", "not now"}:
-        return "No problem. Ask the next doubt whenever you want to continue."
-
-    return None
+    has_history = bool((conversation_context or {}).get("recent_thread"))
+    profile = build_scenario_intent_profile(question, has_history=has_history)
+    return build_conversation_response(profile)
 
 
 ANSWER_FORMATS: Dict[str, Dict[str, Any]] = {
@@ -2397,11 +2319,16 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         if len(final_answer) < 20:
             final_answer = draft
     agent_state.apply_answer(final_answer=final_answer, next_best_action=recommendation)
+    answer_agent_name = "conversation_responder" if lightweight_reply else "tutor_model"
     agent_state.add_message(
-        sender_agent="tutor_model",
+        sender_agent=answer_agent_name,
         receiver_agent="lead_coach_orchestrator",
-        message_type="draft_result",
-        task="Create the student-friendly draft using the selected teaching route.",
+        message_type="conversation_result" if lightweight_reply else "draft_result",
+        task=(
+            "Return a short natural conversation reply without reopening the lesson."
+            if lightweight_reply
+            else "Create the student-friendly draft using the selected teaching route."
+        ),
         evidence={
             "routing_tier": routing_tier,
             "strict_grounding": strict_grounding,
@@ -2418,8 +2345,12 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         db,
         run_id=turn_id,
         from_agent="lead_coach_orchestrator",
-        to_agent="tutor_model",
-        reason="Generate the learner-facing explanation from context, tools, and policy.",
+        to_agent=answer_agent_name,
+        reason=(
+            "Answer a conversational acknowledgement without invoking the tutor route."
+            if lightweight_reply
+            else "Generate the learner-facing explanation from context, tools, and policy."
+        ),
         input_data={
             "intent": intent,
             "answer_format": answer_format,
@@ -2435,8 +2366,8 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     record_agent_step(
         db,
         run_id=turn_id,
-        step_name="answer_drafted",
-        agent_name="tutor_model",
+        step_name="conversation_answered" if lightweight_reply else "answer_drafted",
+        agent_name=answer_agent_name,
         output_data={
             "routing_tier": routing_tier,
             "review_required": should_review_answer,
@@ -2891,13 +2822,14 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     coach.next_best_action = recommendation
     coach.last_interaction_at = datetime.utcnow()
     coach.updated_at = datetime.utcnow()
-    _update_learning_journey_summary(
-        coach=coach,
-        question=question,
-        answer_format=answer_format,
-        topic_snapshot=topic_snapshot,
-        is_follow_up=bool(conversation_context.get("is_follow_up")),
-    )
+    if intent != "conversation":
+        _update_learning_journey_summary(
+            coach=coach,
+            question=question,
+            answer_format=answer_format,
+            topic_snapshot=topic_snapshot,
+            is_follow_up=bool(conversation_context.get("is_follow_up")),
+        )
 
     _persist_interaction(
         db=db,

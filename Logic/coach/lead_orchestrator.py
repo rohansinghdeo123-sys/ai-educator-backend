@@ -53,6 +53,27 @@ def build_lead_coach_decision(
     _append(agents, "lead_coach_orchestrator")
     _append(agents, "intent_profiler")
 
+    if getattr(query, "is_conversational", False):
+        _append(agents, "conversation_responder")
+        if mastery_profile.get("route") not in {None, "", "baseline"} or getattr(query, "needs_memory", False):
+            _append(agents, "memory_mastery_engine")
+        return LeadCoachDecision(
+            primary_agent="lead_coach_orchestrator",
+            agent_sequence=agents,
+            tools=[],
+            safety_gates=[],
+            statuses=[],
+            student_goal="Give a short natural conversation reply without reopening the previous lesson.",
+            route_reason=(
+                f"Scenario profile routed intent '{getattr(query, 'intent', 'conversation')}' "
+                "to the conversation responder."
+            ),
+            retrieval_policy="none",
+            answer_format="conversation",
+            socratic=False,
+            direct_answer=False,
+        )
+
     if retrieval_policy != "none" or "knowledge_search" in tools or attachment_summary.get("has_material"):
         _append(agents, "context_retriever")
     if any(tool not in {"knowledge_search", "attachment_reader", "answer_verifier"} for tool in tools):

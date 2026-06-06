@@ -37,13 +37,24 @@ from Logic.coach.tool_gateway import ToolGateway
 from Logic.coach.mastery_store import build_mastery_signal, build_student_memory_update, persist_mastery_signal
 from Logic.coach.quality_scorer import score_coach_answer
 from Logic.coach.query_understanding import understand_query
+from Logic.coach.intent_scenarios import (
+    build_conversation_response,
+    build_scenario_intent_profile,
+    rank_intent_scenarios,
+)
 from Logic.coach.response_planner import (
     ResponsePlannerOutput,
     build_response_plan,
     build_response_plan_instruction,
 )
 from Logic.coach.answer_repair import decide_answer_repair, mark_repair_applied
-from Logic.coach.turn_engine import build_adaptive_answer_blocks, parse_semantic_event, semantic_event
+from Logic.coach.turn_engine import (
+    build_adaptive_answer_blocks,
+    parse_semantic_event,
+    resolve_hybrid_query,
+    semantic_event,
+)
+from Logic.agents.coach_agent import coach_agent_stream
 from Logic.analytics_engine import get_user_analytics
 from Logic.agent_event_bus import AgentEvent
 from main import (
@@ -289,6 +300,155 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertIn("answer_length: short", instruction)
         self.assertIn("format_style: plain", instruction)
         self.assertIn("Do not add examples", instruction)
+
+    def test_scenario_bank_routes_social_closure_to_conversation_responder(self):
+        message = "Okay thanks, you are the best and I understood the concept easily"
+        profile = build_scenario_intent_profile(message, has_history=True)
+        self.assertEqual(profile.primary_intent, "social_closure")
+        self.assertEqual(profile.dialogue_act, "gratitude_acknowledgement")
+        self.assertFalse(profile.requires_tutor_answer)
+        self.assertEqual(profile.expected_route, "conversation_responder")
+        self.assertGreaterEqual(profile.confidence, 0.85)
+
+        reply = build_conversation_response(profile)
+        self.assertIsNotNone(reply)
+        self.assertIn("welcome", reply.lower())
+
+        query = understand_query(message, has_history=True)
+        self.assertEqual(query.intent, "conversation")
+        self.assertEqual(query.answer_format, "conversation")
+        self.assertTrue(query.is_conversational)
+        self.assertFalse(query.is_follow_up)
+        self.assertFalse(query.needs_retrieval)
+        self.assertFalse(query.needs_quality_review)
+        self.assertEqual(query.reasoning_mode, "conversation")
+        self.assertEqual(query.scenario_profile["primary_intent"], "social_closure")
+
+        orchestration = build_orchestration_plan(query, message)
+        self.assertEqual(orchestration["tools"], [])
+        self.assertFalse(orchestration["socratic"])
+
+        decision = build_lead_coach_decision(
+            query=query,
+            answer_format={"id": "conversation", "label": "Conversation"},
+            orchestration_plan=orchestration,
+            retrieval_policy=query.retrieval_policy,
+            strict_grounding=False,
+            material_supported=True,
+        )
+        self.assertIn("conversation_responder", decision.agent_sequence)
+        self.assertNotIn("tutor_model", decision.agent_sequence)
+        self.assertNotIn("answer_reviewer", decision.agent_sequence)
+        self.assertNotIn("quality_verifier", decision.agent_sequence)
+
+        response_plan = build_response_plan(
+            question=message,
+            query=query,
+            answer_format={"id": "conversation", "label": "Conversation"},
+            retrieval_policy=query.retrieval_policy,
+            conversation_context={"is_follow_up": query.is_follow_up},
+        )
+        self.assertEqual(response_plan.answer_length, "short")
+        self.assertEqual(response_plan.format_style, "plain")
+        self.assertFalse(response_plan.ask_follow_up)
+
+    def test_scenario_bank_preserves_real_follow_up_after_thanks(self):
+        message = "Thanks but explain it again"
+        profile = build_scenario_intent_profile(message, has_history=True)
+        self.assertTrue(profile.requires_tutor_answer)
+        self.assertEqual(profile.primary_intent, "clarification")
+
+        query = understand_query(message, has_history=True)
+        self.assertEqual(query.intent, "clarification")
+        self.assertEqual(query.answer_format, "stuck")
+        self.assertFalse(query.is_conversational)
+        self.assertTrue(query.is_follow_up)
+        self.assertTrue(query.needs_quality_review)
+
+    def test_scenario_bank_protects_conversation_route_from_llm_override(self):
+        message = "Okay thanks, you are the best and I understood the concept easily"
+        calls = []
+
+        def bad_classifier(_messages):
+            calls.append("called")
+            return '{"intent":"concept","answer_format":"concept","is_follow_up":true,"retrieval_policy":"none"}'
+
+        query = resolve_hybrid_query(message, has_history=True, classifier=bad_classifier)
+        self.assertEqual(query.intent, "conversation")
+        self.assertTrue(query.is_conversational)
+        self.assertEqual(calls, [])
+
+    def test_intent_scenario_bank_retrieves_learning_and_social_counterexamples(self):
+        social = rank_intent_scenarios("I understood everything thanks", limit=3)
+        self.assertTrue(social)
+        self.assertFalse(social[0].scenario.requires_tutor_answer)
+
+        learning = rank_intent_scenarios("Thanks but give me one more example", limit=3)
+        self.assertTrue(learning)
+        self.assertTrue(learning[0].scenario.requires_tutor_answer)
+
+    def test_stream_social_closure_bypasses_tutor_after_learning_turn(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        uid = "student_social_stream"
+        session_id = f"coach-{uid}-conv"
+        coach = AICoachProfile(coach_id="coach_social_stream", user_id=uid, coach_name="Aria")
+        db.add(coach)
+        db.add_all([
+            AICoachInteraction(
+                coach_id=coach.coach_id,
+                user_id=uid,
+                role="user",
+                message="What is photosynthesis?",
+                intent="definition",
+                mode="coach",
+                metadata_json={"session_id": session_id},
+            ),
+            AICoachInteraction(
+                coach_id=coach.coach_id,
+                user_id=uid,
+                role="assistant",
+                message="Photosynthesis is the process by which plants make food.",
+                intent="definition",
+                mode="coach",
+                metadata_json={"session_id": session_id},
+            ),
+        ])
+        db.commit()
+
+        request = SimpleNamespace(
+            user_id=uid,
+            session_id=session_id,
+            question="Okay thanks, you are the best and I understood the concept easily",
+            intent="study_advice",
+            mode="coach",
+            attachments=[],
+        )
+        completed = {}
+        stream = coach_agent_stream(request, db=db)
+        try:
+            for frame in stream:
+                event = parse_semantic_event(frame)
+                if event.get("event") == "answer.completed":
+                    completed = event
+        finally:
+            stream.close()
+
+        self.assertTrue(completed)
+        answer = completed["answer"]
+        metadata = completed["metadata"]
+        self.assertIn("welcome", answer.lower())
+        self.assertNotIn("photosynthesis is the process", answer.lower())
+        self.assertEqual(metadata["intent"], "conversation")
+        self.assertEqual(metadata["query"]["scenario_profile"]["primary_intent"], "social_closure")
+        sequence = metadata["lead_orchestrator"]["agent_sequence"]
+        self.assertIn("conversation_responder", sequence)
+        self.assertNotIn("tutor_model", sequence)
+        self.assertNotIn("answer_reviewer", sequence)
+        db.close()
+        engine.dispose()
 
     def test_session_summary_includes_replay_contract(self):
         test = SimpleNamespace(

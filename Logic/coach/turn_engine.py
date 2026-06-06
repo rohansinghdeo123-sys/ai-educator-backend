@@ -145,8 +145,21 @@ Rules:
     if teaching_strategy:
         query.teaching_strategy = teaching_strategy[:240]
 
+    if query.intent == "conversation" or query.answer_format == "conversation":
+        query.intent = "conversation"
+        query.answer_format = "conversation"
+        query.is_conversational = True
+        query.is_follow_up = False
+        query.retrieval_policy = "none"
+        query.needs_retrieval = False
+        query.requires_grounding = False
+        query.requested_tools = []
+        query.needs_quality_review = False
+
     query.reasoning_mode = (
-        "source_grounded"
+        "conversation"
+        if query.is_conversational
+        else "source_grounded"
         if query.requires_grounding
         else "contextual_reasoning"
         if query.is_follow_up

@@ -9,6 +9,12 @@ from .model_gateway import ModelGateway, model_gateway
 from .mastery_store import build_mastery_signal, build_student_memory_update, persist_mastery_signal
 from .mastery_engine import build_active_mastery_profile
 from .growth_loop import GrowthEvaluation, evaluate_turn_growth
+from .intent_scenarios import (
+    ScenarioIntentProfile,
+    build_conversation_response,
+    build_scenario_intent_profile,
+    rank_intent_scenarios,
+)
 from .observability import coach_observability
 from .quality_scorer import score_coach_answer
 from .query_understanding import understand_query
@@ -49,6 +55,10 @@ __all__ = [
     "format_orchestration_prompt",
     "GrowthEvaluation",
     "evaluate_turn_growth",
+    "ScenarioIntentProfile",
+    "build_conversation_response",
+    "build_scenario_intent_profile",
+    "rank_intent_scenarios",
     "grounded_retriever",
     "RetrievalGateDecision",
     "evaluate_retrieval_gate",
