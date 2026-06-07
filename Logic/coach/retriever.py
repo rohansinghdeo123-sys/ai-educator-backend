@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict
 
 from Logic.knowledge_graph import knowledge_graph
+from Logic.content_pipeline import search_approved_content
 from Logic.tools.knowledge_search import SECTION_FILE_MAP, search_knowledge_base
 
 from .models import RetrievalResult
@@ -70,6 +71,33 @@ class GroundedRetriever:
         return candidates
 
     def _retrieve_section(self, section_id: str, question: str, scope: Dict[str, Any]) -> RetrievalResult:
+        try:
+            approved = search_approved_content(
+                section_id=section_id,
+                question=question or section_id,
+                scope=scope,
+                max_chars=coach_settings.max_retrieval_chars,
+            )
+            approved_context = str(approved.get("context") or "").strip()
+            if approved_context:
+                return RetrievalResult(
+                    context=approved_context,
+                    section_id=str(approved.get("section_id") or section_id),
+                    source=str(approved.get("source") or "approved_content_pipeline"),
+                    paragraphs_found=int(approved.get("paragraphs_found") or 0),
+                    keywords_used=list(approved.get("keywords_used") or []),
+                    scope={
+                        "subject": _scope_value(scope, "subject"),
+                        "chapter": _scope_value(scope, "chapter"),
+                        "topic": _scope_value(scope, "topic"),
+                        "section_id": section_id,
+                        "source_pages": list(approved.get("source_pages") or []),
+                    },
+                    supported=True,
+                )
+        except Exception:
+            pass
+
         result = search_knowledge_base(
             section_id=section_id,
             question=question or section_id,

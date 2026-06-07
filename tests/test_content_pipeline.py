@@ -1,0 +1,175 @@
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from database import Base
+from Logic.content_pipeline import (
+    build_coverage_report,
+    chunk_pages,
+    infer_metadata_from_pdf_path,
+    search_approved_content,
+    validate_concept_payloads,
+    approve_chapter,
+)
+from models import ContentChapter, ContentChunk, ContentConcept
+
+
+class ContentPipelineTests(unittest.TestCase):
+    def _session_factory(self):
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        return sessionmaker(bind=engine)
+
+    def test_infer_metadata_from_expected_ncert_path(self):
+        root = Path("C:/repo/backend/data/raw/ncert")
+        pdf = root / "class_11" / "chemistry" / "chapter_01_some_basic_concepts_of_chemistry.pdf"
+
+        metadata = infer_metadata_from_pdf_path(pdf, root)
+
+        self.assertEqual(metadata["board"], "NCERT")
+        self.assertEqual(metadata["class_level"], "11")
+        self.assertEqual(metadata["subject"], "Chemistry")
+        self.assertEqual(metadata["chapter_number"], 1)
+        self.assertEqual(metadata["chapter_name"], "Some Basic Concepts Of Chemistry")
+        self.assertIn("class_11", metadata["slug"])
+
+    def test_chunk_pages_and_coverage_report(self):
+        pages = [
+            {
+                "page_number": 1,
+                "text": "Photosynthesis is the process used by green plants. It needs sunlight and chlorophyll.",
+                "char_count": 84,
+                "extraction_quality": 0.8,
+            },
+            {
+                "page_number": 2,
+                "text": "The process produces glucose and oxygen. Chlorophyll captures light energy.",
+                "char_count": 74,
+                "extraction_quality": 0.7,
+            },
+        ]
+        chunks = chunk_pages(pages, max_chars=120, min_chars=10)
+
+        report = build_coverage_report(
+            pages,
+            [
+                {
+                    "source_pages": [1, 2],
+                }
+            ],
+            chunks,
+        )
+
+        self.assertGreaterEqual(len(chunks), 1)
+        self.assertEqual(report["coverage_score"], 1.0)
+        self.assertTrue(report["ready_for_approval"])
+
+    def test_validate_concepts_flags_missing_and_out_of_range_sources(self):
+        payload = [
+            {
+                "concept_id": "photosynthesis",
+                "title": "Photosynthesis",
+                "definition": "Green plants make food using sunlight.",
+                "source_pages": [1, 9],
+            },
+            {
+                "concept_id": "empty-source",
+                "title": "Empty Source",
+                "definition": "A concept without page evidence.",
+                "source_pages": [],
+            },
+        ]
+
+        concepts, issues = validate_concept_payloads(payload, available_pages=[1, 2])
+
+        self.assertEqual(len(concepts), 2)
+        issue_names = {name for issue in issues for name in issue.get("issues", [])}
+        self.assertIn("source_page_out_of_range", issue_names)
+        self.assertIn("missing_source_pages", issue_names)
+
+    def test_approval_requires_validated_concepts(self):
+        SessionTesting = self._session_factory()
+        db = SessionTesting()
+        try:
+            chapter = ContentChapter(
+                slug="ncert_class_11_chemistry_chapter_1",
+                status="indexed",
+                validation_report={"ready_for_approval": True},
+                concept_count=0,
+            )
+            db.add(chapter)
+            db.commit()
+
+            with self.assertRaisesRegex(ValueError, "no validated concepts"):
+                approve_chapter(db, chapter.id, approved_by="tester")
+        finally:
+            db.close()
+
+    def test_search_approved_content_ignores_unapproved_chapters(self):
+        SessionTesting = self._session_factory()
+        db = SessionTesting()
+        try:
+            approved = ContentChapter(
+                board="NCERT",
+                class_level="10",
+                subject="Science",
+                chapter_name="Life Processes",
+                slug="ncert_class_10_science_life_processes",
+                status="approved",
+            )
+            draft = ContentChapter(
+                board="NCERT",
+                class_level="10",
+                subject="Science",
+                chapter_name="Draft Chapter",
+                slug="draft_chapter",
+                status="validated",
+            )
+            db.add_all([approved, draft])
+            db.flush()
+            db.add(
+                ContentConcept(
+                    chapter_id=approved.id,
+                    concept_id="photosynthesis",
+                    title="Photosynthesis",
+                    definition="Photosynthesis lets green plants prepare food using light.",
+                    core_explanation="Plants convert light energy into chemical energy.",
+                    source_pages=[3],
+                )
+            )
+            db.add(
+                ContentChunk(
+                    chapter_id=draft.id,
+                    chunk_id="draft_chunk",
+                    text="Draft-only photosynthesis text should not be returned.",
+                    page_start=1,
+                    page_end=1,
+                    lexical_terms=["photosynthesis"],
+                )
+            )
+            db.commit()
+
+            with patch("Logic.content_pipeline.SessionLocal", SessionTesting):
+                result = search_approved_content(
+                    "photosynthesis",
+                    "photosynthesis means",
+                    scope={"subject": "Science", "chapter": "Life Processes"},
+                )
+
+            self.assertEqual(result["source"], "approved_content_pipeline")
+            self.assertIn("green plants prepare food", result["context"])
+            self.assertNotIn("Draft-only", result["context"])
+        finally:
+            db.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

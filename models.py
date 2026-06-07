@@ -347,6 +347,144 @@ class DailyQuotaUsage(Base):
 
 
 # =========================================================
+# PRODUCTION CONTENT PIPELINE
+# =========================================================
+class ContentChapter(Base):
+    """
+    Registry row for one approved/draft study source chapter.
+    Raw PDFs remain the source of truth; concepts/chunks are derived layers.
+    """
+    __tablename__ = "content_chapters"
+
+    id = Column(Integer, primary_key=True, index=True)
+    board = Column(String, default="NCERT", index=True)
+    class_level = Column(String, default="", index=True)
+    subject = Column(String, default="", index=True)
+    book_name = Column(String, default="")
+    chapter_number = Column(Integer, nullable=True, index=True)
+    chapter_name = Column(String, default="", index=True)
+    slug = Column(String, unique=True, index=True)
+
+    pdf_path = Column(Text, default="")
+    source_hash = Column(String, default="", index=True)
+    status = Column(String, default="uploaded", index=True)
+    version = Column(String, default="v1")
+
+    page_count = Column(Integer, default=0)
+    extracted_page_count = Column(Integer, default=0)
+    chunk_count = Column(Integer, default=0)
+    concept_count = Column(Integer, default=0)
+    coverage_score = Column(Float, default=0.0)
+    extraction_quality = Column(Float, default=0.0)
+    validation_report = Column(JSON, default=dict)
+
+    approved_by = Column(String, nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_utcnow_naive)
+    updated_at = Column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)
+
+    pages = relationship(
+        "ContentPage",
+        back_populates="chapter",
+        cascade="all, delete-orphan",
+    )
+    concepts = relationship(
+        "ContentConcept",
+        back_populates="chapter",
+        cascade="all, delete-orphan",
+    )
+    chunks = relationship(
+        "ContentChunk",
+        back_populates="chapter",
+        cascade="all, delete-orphan",
+    )
+
+
+class ContentPage(Base):
+    """Page-level extracted text with source page mapping."""
+    __tablename__ = "content_pages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    chapter_id = Column(Integer, ForeignKey("content_chapters.id"), index=True)
+    page_number = Column(Integer, index=True)
+    text = Column(Text, default="")
+    char_count = Column(Integer, default=0)
+    extraction_quality = Column(Float, default=0.0)
+    metadata_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_utcnow_naive)
+
+    chapter = relationship("ContentChapter", back_populates="pages")
+
+
+class ContentConcept(Base):
+    """Structured teaching layer generated from approved source text."""
+    __tablename__ = "content_concepts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    chapter_id = Column(Integer, ForeignKey("content_chapters.id"), index=True)
+    concept_id = Column(String, index=True)
+    title = Column(String, default="", index=True)
+    definition = Column(Text, default="")
+    core_explanation = Column(Text, default="")
+    key_points = Column(JSON, default=list)
+    examples = Column(JSON, default=list)
+    formulas = Column(JSON, default=list)
+    properties = Column(JSON, default=list)
+    applications = Column(JSON, default=list)
+    common_mistakes = Column(JSON, default=list)
+    prerequisites = Column(JSON, default=list)
+    related_concepts = Column(JSON, default=list)
+    learning_objectives = Column(JSON, default=list)
+    source_pages = Column(JSON, default=list)
+    difficulty_level = Column(Integer, default=1)
+    blooms_taxonomy = Column(String, default="")
+    typical_exam_weightage = Column(String, default="")
+    importance_level = Column(String, default="")
+    raw_json = Column(JSON, default=dict)
+    validation_issues = Column(JSON, default=list)
+    created_at = Column(DateTime, default=_utcnow_naive)
+    updated_at = Column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)
+
+    chapter = relationship("ContentChapter", back_populates="concepts")
+
+
+class ContentChunk(Base):
+    """Searchable RAG chunk derived from extracted source text."""
+    __tablename__ = "content_chunks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    chapter_id = Column(Integer, ForeignKey("content_chapters.id"), index=True)
+    chunk_id = Column(String, unique=True, index=True)
+    text = Column(Text, default="")
+    page_start = Column(Integer, nullable=True, index=True)
+    page_end = Column(Integer, nullable=True, index=True)
+    section_title = Column(String, default="", index=True)
+    token_estimate = Column(Integer, default=0)
+    lexical_terms = Column(JSON, default=list)
+    embedding = Column(JSON, nullable=True)
+    metadata_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_utcnow_naive)
+
+    chapter = relationship("ContentChapter", back_populates="chunks")
+
+
+class ContentIngestionJob(Base):
+    """Auditable ingestion/generation/validation job log."""
+    __tablename__ = "content_ingestion_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(String, unique=True, index=True)
+    job_type = Column(String, default="ingest", index=True)
+    status = Column(String, default="queued", index=True)
+    source_path = Column(Text, default="")
+    summary = Column(JSON, default=dict)
+    error = Column(Text, default="")
+    created_at = Column(DateTime, default=_utcnow_naive)
+    updated_at = Column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)
+
+
+# =========================================================
 # AGENT RUNTIME
 # =========================================================
 class AgentRuntimeRun(Base):
