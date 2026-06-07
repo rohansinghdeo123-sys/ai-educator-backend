@@ -58,10 +58,13 @@ from Logic.agents.coach_agent import coach_agent_stream
 from Logic.analytics_engine import get_user_analytics
 from Logic.agent_event_bus import AgentEvent
 from main import (
+    GenerateMCQRequest,
+    SectionAIRequest,
     _conversation_rows_for_user,
     _group_conversation_rows,
     _serialize_coach_conversation,
     format_test_session,
+    require_owned_study_session,
     session_id_belongs_to_user,
 )
 from Logic.observability_store import (
@@ -495,6 +498,38 @@ class CoachArchitectureTests(unittest.TestCase):
         self.assertTrue(session_id_belongs_to_user(f"exam-{uid}-alkanes-123", uid))
         self.assertTrue(session_id_belongs_to_user(f"probable-{uid}-alkanes-123", uid))
         self.assertFalse(session_id_belongs_to_user("coach-other-conv_a", uid))
+
+    def test_legacy_study_session_guard_blocks_cross_user_sessions(self):
+        uid = "student123"
+
+        self.assertEqual(
+            require_owned_study_session(f"revision-{uid}-alkanes-summary", {"uid": uid}),
+            uid,
+        )
+        self.assertEqual(
+            require_owned_study_session("exam-other-alkanes-123", {"uid": uid, "admin": True}),
+            uid,
+        )
+        with self.assertRaises(Exception) as raised:
+            require_owned_study_session("exam-other-alkanes-123", {"uid": uid})
+        self.assertEqual(getattr(raised.exception, "status_code", None), 403)
+
+    def test_legacy_study_requests_validate_student_payload_size(self):
+        with self.assertRaises(Exception):
+            SectionAIRequest(question="", section_id="alkanes", session_id="revision-student123-alkanes-summary")
+        with self.assertRaises(Exception):
+            GenerateMCQRequest(topic="alkanes", session_id="exam-student123-alkanes-1", count=20)
+
+    def test_stream_wrapper_returns_controlled_error_event_on_unhandled_failure(self):
+        request = SimpleNamespace(user_id="student123", session_id="coach-student123-conv_a", question="Hello")
+        with patch("Logic.agents.coach_agent._coach_agent_stream_impl", side_effect=RuntimeError("boom")):
+            frames = list(coach_agent_stream(request, db=None))
+
+        parsed = [parse_semantic_event(frame) for frame in frames]
+        events = [event.get("event") for event in parsed if event]
+        self.assertIn("turn.error", events)
+        self.assertIn("answer.completed", events)
+        self.assertEqual(frames[-1], "data: [DONE]\n\n")
 
     def test_persisted_coach_interactions_serialize_as_conversation(self):
         engine = create_engine("sqlite:///:memory:")
