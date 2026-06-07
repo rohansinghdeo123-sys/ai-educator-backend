@@ -6,6 +6,7 @@ import logging
 from typing import List, Tuple
 
 from Logic.knowledge_graph import knowledge_graph  # <-- NEW
+from Logic.content_pipeline import search_approved_content
 
 logger = logging.getLogger("ai_educator.tools.knowledge_search")
 
@@ -192,6 +193,17 @@ def search_knowledge_base(
     """
     section_id = re.sub(r"[^a-z0-9]+", "_", (section_id or "").strip().lower()).strip("_")
     section_id = SECTION_ALIASES.get(section_id, section_id)
+
+    try:
+        approved_result = search_approved_content(
+            section_id=section_id,
+            question=question,
+            max_chars=max_chars,
+        )
+        if str(approved_result.get("context") or "").strip():
+            return approved_result
+    except Exception as exc:
+        logger.warning("Approved content pipeline search failed: %s", exc)
 
     # ── Step 1: Try markdown file map ──────────────────────────────────
     if section_id in SECTION_FILE_MAP:

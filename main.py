@@ -77,6 +77,17 @@ from Logic.section_doubt import (
     section_doubt,
 )
 from Logic.knowledge_graph import knowledge_graph
+from Logic.content_pipeline import (
+    RAW_NCERT_DIR,
+    approve_chapter,
+    chapter_report,
+    generate_concepts_for_chapter,
+    import_concepts_for_chapter,
+    ingest_pdf_folder,
+    list_chapters as list_content_chapters,
+    publish_chapter,
+    serialize_chapter,
+)
 from Logic.tools.artifact_generator import (
     ARTIFACT_DATA_NOT_AVAILABLE,
     available_artifact_sections,
@@ -650,6 +661,21 @@ class AgentMessageRequest(BaseModel):
     session_id: str = "admin"
     mode: Optional[str] = None
     system_message: Optional[str] = None
+
+
+class ContentIngestFolderRequest(BaseModel):
+    root_path: Optional[str] = Field(default=None, max_length=600)
+    replace_existing_extraction: bool = True
+
+
+class ContentConceptImportRequest(BaseModel):
+    concepts: Any
+    replace_existing: bool = True
+
+
+class ContentGenerateConceptsRequest(BaseModel):
+    replace_existing: bool = True
+    max_batch_chars: int = Field(default=9000, ge=2500, le=16000)
 
 
 class GenerateMCQRequest(BaseModel):
@@ -1637,6 +1663,145 @@ def admin_me(current_admin: Dict[str, Any] = Depends(require_admin)):
         "role": "admin",
         "verified": True,
     }
+
+
+@app.get("/admin/content/folder-contract")
+def admin_content_folder_contract(_current_admin: Dict[str, Any] = Depends(require_admin)):
+    RAW_NCERT_DIR.mkdir(parents=True, exist_ok=True)
+    return {
+        "default_root": str(RAW_NCERT_DIR),
+        "expected_structure": [
+            "backend/data/raw/ncert/class_10/science/chapter_01_chemical_reactions.pdf",
+            "backend/data/raw/ncert/class_11/chemistry/chapter_01_some_basic_concepts_of_chemistry.pdf",
+            "backend/data/raw/ncert/class_12/physics/chapter_02_electrostatic_potential.pdf",
+        ],
+        "source_of_truth": "NCERT PDF text",
+        "approval_rule": "Only approved or published chapters are used by Study Lab retrieval.",
+        "statuses": [
+            "uploaded",
+            "indexed",
+            "json_generated",
+            "validated",
+            "needs_review",
+            "approved",
+            "published",
+            "failed",
+        ],
+    }
+
+
+@app.post("/admin/content/ingest-folder")
+def admin_content_ingest_folder(
+    payload: ContentIngestFolderRequest,
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    try:
+        return ingest_pdf_folder(
+            db,
+            root_path=payload.root_path,
+            replace=payload.replace_existing_extraction,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/admin/content/chapters")
+def admin_content_chapters(
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    return {"chapters": list_content_chapters(db, status=status_filter)}
+
+
+@app.get("/admin/content/report/{chapter_id}")
+def admin_content_report(
+    chapter_id: int,
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    try:
+        return chapter_report(db, chapter_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/admin/content/import-concepts/{chapter_id}")
+def admin_content_import_concepts(
+    chapter_id: int,
+    payload: ContentConceptImportRequest,
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    try:
+        chapter = import_concepts_for_chapter(
+            db,
+            chapter_id,
+            payload.concepts,
+            replace=payload.replace_existing,
+        )
+        db.commit()
+        return serialize_chapter(chapter)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/admin/content/generate-json/{chapter_id}")
+def admin_content_generate_json(
+    chapter_id: int,
+    payload: ContentGenerateConceptsRequest,
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    try:
+        chapter = generate_concepts_for_chapter(
+            db,
+            chapter_id,
+            replace=payload.replace_existing,
+            max_batch_chars=payload.max_batch_chars,
+        )
+        db.commit()
+        return serialize_chapter(chapter)
+    except RuntimeError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (ValueError, json.JSONDecodeError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/admin/content/approve/{chapter_id}")
+def admin_content_approve(
+    chapter_id: int,
+    db: Session = Depends(get_db),
+    current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    try:
+        chapter = approve_chapter(db, chapter_id, approved_by=str(current_admin.get("uid") or "admin"))
+        db.commit()
+        return serialize_chapter(chapter)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/admin/content/publish/{chapter_id}")
+def admin_content_publish(
+    chapter_id: int,
+    db: Session = Depends(get_db),
+    current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    try:
+        chapter = publish_chapter(db, chapter_id, published_by=str(current_admin.get("uid") or "admin"))
+        db.commit()
+        return serialize_chapter(chapter)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/admin/agents")
