@@ -71,6 +71,7 @@ from models import (
     AICoachInteraction,
     AICoachMemory,
     AICoachProfile,
+    AgentRuntimeRun,
     TestHistory,
     TopicPerformance,
     UserProgress,
@@ -1558,6 +1559,57 @@ def _apply_deterministic_format(text: str) -> str:
     return final if len(final) >= 20 else text
 
 
+def _first_sentences(text: str, limit: int = 2) -> str:
+    sentences = re.split(r"(?<=[.!?])\s+", " ".join(str(text or "").split()))
+    selected = [sentence.strip() for sentence in sentences if sentence.strip()][:limit]
+    return " ".join(selected).strip()
+
+
+def _remove_trailing_follow_up(answer: str) -> str:
+    lines = str(answer or "").rstrip().splitlines()
+    prompt_markers = (
+        "would you like",
+        "do you want",
+        "want me to",
+        "shall i",
+        "should i",
+        "can i help",
+        "try one",
+        "practice one",
+    )
+    while lines:
+        candidate = lines[-1].strip()
+        normalized = candidate.lower()
+        if candidate.endswith("?") and any(marker in normalized for marker in prompt_markers):
+            lines.pop()
+            continue
+        break
+    return "\n".join(lines).strip()
+
+
+def _enforce_response_plan_constraints(answer: str, response_plan: Dict[str, Any]) -> str:
+    final = str(answer or "").strip()
+    if not final:
+        return final
+
+    plan = response_plan if isinstance(response_plan, dict) else {}
+    if plan.get("ask_follow_up") is False:
+        final = _remove_trailing_follow_up(final)
+
+    answer_length = str(plan.get("answer_length") or "").strip().lower()
+    if answer_length == "one_line":
+        candidates = [line.strip(" -•\t") for line in final.splitlines() if line.strip()]
+        if len(candidates) > 1 and candidates[0].endswith(":"):
+            candidates = candidates[1:]
+        final = candidates[0] if candidates else _first_sentences(final, limit=1)
+    elif answer_length == "short" and len(final.split()) > 90:
+        shortened = _first_sentences(final, limit=2)
+        if shortened:
+            final = shortened
+
+    return final.strip() or answer
+
+
 def _persist_interaction(
     db,
     coach: AICoachProfile,
@@ -1730,7 +1782,90 @@ def _answer_delta_event(delta: str, turn_id: str = "") -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _mark_stream_runtime_failed(db, turn_id: str, exc: Exception) -> None:
+    if db is None or not turn_id:
+        return
+    try:
+        run = db.query(AgentRuntimeRun).filter(AgentRuntimeRun.run_id == turn_id).first()
+        if run is not None:
+            metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
+            run.status = "failed"
+            run.completed_at = datetime.utcnow()
+            run.metadata_json = {**metadata, "stream_error": str(exc)[:500]}
+            db.commit()
+    except Exception as persist_exc:
+        db.rollback()
+        logger.warning("Could not mark stream runtime failed: %s", persist_exc)
+
+    try:
+        record_agent_step(
+            db,
+            run_id=turn_id,
+            step_name="stream_failed",
+            agent_name="lead_coach_orchestrator",
+            status="failed",
+            output_data={"error": str(exc)[:500]},
+            error=exc,
+        )
+    except Exception as step_exc:
+        logger.warning("Could not record stream failure step: %s", step_exc)
+
+
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
+    turn_id = ""
+    session_id = getattr(request, "session_id", "")
+    completed_sent = False
+    done_sent = False
+    try:
+        for frame in _coach_agent_stream_impl(request, db=db):
+            event = parse_semantic_event(frame)
+            if event:
+                turn_id = str(event.get("turn_id") or turn_id or "")
+                session_id = str(event.get("session_id") or session_id or "")
+                completed_sent = completed_sent or event.get("event") == "answer.completed"
+            done_sent = done_sent or frame.strip() == "data: [DONE]"
+            yield frame
+    except GeneratorExit:
+        raise
+    except Exception as exc:
+        logger.exception("[COACH STREAM] Unhandled stream failure")
+        _mark_stream_runtime_failed(db, turn_id, exc)
+        if done_sent:
+            return
+
+        safe_answer = "The tutor could not complete that response right now. Please try again."
+        yield semantic_event(
+            "turn.error",
+            turn_id=turn_id,
+            session_id=session_id,
+            error="coach_stream_failed",
+            detail=str(exc)[:240],
+        )
+        yield _stage_event(
+            stage="delivering",
+            status="failed",
+            agent="Coach",
+            title="Response interrupted",
+            detail="The tutor could not complete this turn.",
+            turn_id=turn_id,
+        )
+        if not completed_sent:
+            for delta in _iter_text_chunks(safe_answer):
+                yield _answer_delta_event(delta, turn_id=turn_id)
+            yield semantic_event(
+                "answer.completed",
+                turn_id=turn_id,
+                answer=safe_answer,
+                blocks=build_adaptive_answer_blocks(safe_answer),
+                sources={"grounded": False, "indicator": "Tutor error", "citations": []},
+                metadata={"status": "failed", "error": "coach_stream_failed"},
+            )
+            encoded = base64.b64encode(safe_answer.encode("utf-8")).decode("ascii")
+            yield f"data: {encoded}\n\n"
+        yield "data: [DONE]\n\n"
+
+
+def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
     if db is None:
         yield "data: Coach needs database access to personalize advice.\n\n"
         return
@@ -2415,7 +2550,7 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         turn_id=turn_id,
     )
 
-    streamed_answer = ""
+    reviewed_answer_buffer = ""
     if should_review_answer:
         try:
             review_stream = model_gateway.stream(
@@ -2449,21 +2584,18 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
                 delta = getattr(chunk.choices[0].delta, "content", None) or ""
                 if not delta:
                     continue
-                streamed_answer += delta
-                yield _answer_delta_event(delta, turn_id=turn_id)
+                reviewed_answer_buffer += delta
         except Exception as exc:
             logger.error("[COACH STREAM REVIEW] Groq API error: %s", exc)
             agent_state.apply_error(stage="reviewer_stream", error=exc)
             trace.record_fallback("reviewer_stream_failed", error=str(exc)[:240])
 
-    reviewer_answer = streamed_answer.strip()
+    reviewer_answer = reviewed_answer_buffer.strip()
     if reviewer_answer:
-        final_answer = _apply_deterministic_format(streamed_answer)
+        final_answer = _apply_deterministic_format(reviewed_answer_buffer)
     else:
         final_answer = _apply_deterministic_format(final_answer)
-        for delta in _iter_text_chunks(final_answer):
-            streamed_answer += delta
-            yield _answer_delta_event(delta, turn_id=turn_id)
+    final_answer = _enforce_response_plan_constraints(final_answer, response_plan_payload)
     agent_state.apply_answer(final_answer=final_answer, reviewer_notes=reviewer_answer)
     review_status = "completed" if should_review_answer and reviewer_answer else (
         "fallback" if should_review_answer else "skipped"
@@ -2669,6 +2801,9 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         },
     )
     trace.mark_phase("delivery")
+
+    for delta in _iter_text_chunks(final_answer):
+        yield _answer_delta_event(delta, turn_id=turn_id)
 
     yield _stage_event(
         stage="formatting",

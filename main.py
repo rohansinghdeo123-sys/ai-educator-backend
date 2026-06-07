@@ -33,6 +33,7 @@ from models import (
     AICoachMemory,
     AICoachProfile,
     Base,
+    DailyQuotaUsage,
     SessionDetail,
     TestHistory,
     UserProgress,
@@ -520,9 +521,60 @@ def session_id_belongs_to_user(session_id: str, user_id: str) -> bool:
     return session in owned_exact or any(session.startswith(prefix) for prefix in owned_prefixes)
 
 
+def require_owned_study_session(session_id: str, decoded_token: Dict[str, Any]) -> str:
+    user_id = require_authenticated_user_id(decoded_token)
+    if is_backend_admin(decoded_token):
+        return user_id
+    if session_id_belongs_to_user(session_id, user_id):
+        return user_id
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Not allowed for this study session",
+    )
+
+
+def consume_persistent_daily_quota(user_id: str, quota_name: str, limit: int) -> tuple[bool, int]:
+    if limit <= 0:
+        return True, 0
+
+    quota_date = date.today()
+    user_hash = sha256(str(user_id).encode("utf-8")).hexdigest()[:16]
+    quota_key = f"{quota_date.isoformat()}:{quota_name}:{user_hash}"
+    db = SessionLocal()
+    try:
+        usage = db.query(DailyQuotaUsage).filter(DailyQuotaUsage.quota_key == quota_key).first()
+        if usage is None:
+            usage = DailyQuotaUsage(
+                quota_key=quota_key,
+                user_hash=user_hash,
+                quota_name=quota_name,
+                quota_date=quota_date,
+                count=1,
+            )
+            db.add(usage)
+            db.commit()
+            return True, 1
+
+        current = int(usage.count or 0)
+        if current >= limit:
+            return False, current
+
+        usage.count = current + 1
+        usage.updated_at = datetime.utcnow()
+        db.commit()
+        return True, usage.count
+    except Exception as exc:
+        db.rollback()
+        logger.warning("QUOTA: Persistent quota unavailable, using in-memory fallback: %s", exc)
+        return daily_quotas.consume(user_id, quota_name, limit)
+    finally:
+        db.close()
+
+
 def enforce_user_quota(user_id: str, quota_name: str) -> None:
     limit = QUOTA_LIMITS.get(quota_name, AI_DAILY_QUOTA_PER_USER)
-    allowed, used = daily_quotas.consume(user_id, quota_name, limit)
+    allowed, used = consume_persistent_daily_quota(user_id, quota_name, limit)
     if allowed:
         return
     raise HTTPException(
@@ -558,19 +610,19 @@ except Exception as e:
 
 # ================= REQUEST MODELS =================
 class SectionAIRequest(BaseModel):
-    question: str
-    section_id: str
-    session_id: str
-    mode: str = "revision"
-    difficulty: str = "medium"
-    subject: Optional[str] = None
-    chapter: Optional[str] = None
-    topic: Optional[str] = None
-    system_guardrail: Optional[str] = None
+    question: str = Field(min_length=1, max_length=2500)
+    section_id: str = Field(min_length=1, max_length=160)
+    session_id: str = Field(min_length=1, max_length=220)
+    mode: str = Field(default="revision", max_length=40)
+    difficulty: str = Field(default="medium", max_length=40)
+    subject: Optional[str] = Field(default=None, max_length=120)
+    chapter: Optional[str] = Field(default=None, max_length=180)
+    topic: Optional[str] = Field(default=None, max_length=180)
+    system_guardrail: Optional[str] = Field(default=None, max_length=8000)
     strict_grounding: bool = False
     retrieval_required: bool = False
     fallback_to_general_knowledge: bool = True
-    required_not_found_response: Optional[str] = None
+    required_not_found_response: Optional[str] = Field(default=None, max_length=500)
 
 
 class ResetRequest(BaseModel):
@@ -601,49 +653,49 @@ class AgentMessageRequest(BaseModel):
 
 
 class GenerateMCQRequest(BaseModel):
-    topic: str
-    section_id: Optional[str] = None
-    session_id: str = "exam-session"
-    difficulty: str = "medium"
+    topic: str = Field(min_length=1, max_length=180)
+    section_id: Optional[str] = Field(default=None, max_length=160)
+    session_id: str = Field(default="exam-session", min_length=1, max_length=220)
+    difficulty: str = Field(default="medium", max_length=40)
     count: int = Field(default=5, ge=1, le=10)
-    subject: Optional[str] = None
-    chapter: Optional[str] = None
-    system_guardrail: Optional[str] = None
+    subject: Optional[str] = Field(default=None, max_length=120)
+    chapter: Optional[str] = Field(default=None, max_length=180)
+    system_guardrail: Optional[str] = Field(default=None, max_length=8000)
     strict_grounding: bool = False
     retrieval_required: bool = False
     fallback_to_general_knowledge: bool = True
-    required_not_found_response: Optional[str] = None
+    required_not_found_response: Optional[str] = Field(default=None, max_length=500)
     include_source: bool = False
     require_four_options: bool = True
     require_explanation: bool = True
 
 
 class GenerateProbableRequest(BaseModel):
-    topic: str
-    section_id: Optional[str] = None
-    session_id: str = "probable-session"
-    difficulty: str = "medium"
-    subject: Optional[str] = None
-    chapter: Optional[str] = None
-    system_guardrail: Optional[str] = None
+    topic: str = Field(min_length=1, max_length=180)
+    section_id: Optional[str] = Field(default=None, max_length=160)
+    session_id: str = Field(default="probable-session", min_length=1, max_length=220)
+    difficulty: str = Field(default="medium", max_length=40)
+    subject: Optional[str] = Field(default=None, max_length=120)
+    chapter: Optional[str] = Field(default=None, max_length=180)
+    system_guardrail: Optional[str] = Field(default=None, max_length=8000)
     strict_grounding: bool = False
     retrieval_required: bool = False
     fallback_to_general_knowledge: bool = True
-    required_not_found_response: Optional[str] = None
+    required_not_found_response: Optional[str] = Field(default=None, max_length=500)
     include_source: bool = False
 
 
 class ArtifactGenerateRequest(BaseModel):
-    section_id: str
-    topic: Optional[str] = None
-    artifact_type: str = "auto"
-    subject: Optional[str] = None
-    chapter: Optional[str] = None
-    system_guardrail: Optional[str] = None
+    section_id: str = Field(min_length=1, max_length=160)
+    topic: Optional[str] = Field(default=None, max_length=180)
+    artifact_type: str = Field(default="auto", max_length=50)
+    subject: Optional[str] = Field(default=None, max_length=120)
+    chapter: Optional[str] = Field(default=None, max_length=180)
+    system_guardrail: Optional[str] = Field(default=None, max_length=8000)
     strict_grounding: bool = False
     retrieval_required: bool = False
     fallback_to_general_knowledge: bool = True
-    required_not_found_response: Optional[str] = None
+    required_not_found_response: Optional[str] = Field(default=None, max_length=500)
 
 
 class SubmitSessionRequest(BaseModel):
@@ -1083,7 +1135,8 @@ def section_ai(
     request: SectionAIRequest,
     current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
-    enforce_user_quota(require_authenticated_user_id(current_user), "coach")
+    user_id = require_owned_study_session(request.session_id, current_user)
+    enforce_user_quota(user_id, "coach")
     section_id = normalize_topic(request.section_id)
     answer = section_doubt(
         question=request.question,
@@ -1105,7 +1158,8 @@ def generate_mcqs(
     request: GenerateMCQRequest,
     current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
-    enforce_user_quota(require_authenticated_user_id(current_user), "exam")
+    user_id = require_owned_study_session(request.session_id, current_user)
+    enforce_user_quota(user_id, "exam")
     section_id = normalize_topic(request.section_id or request.topic)
 
     return generate_structured_mcqs(
@@ -1125,7 +1179,8 @@ def generate_probable_questions(
     request: GenerateProbableRequest,
     current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
-    enforce_user_quota(require_authenticated_user_id(current_user), "exam")
+    user_id = require_owned_study_session(request.session_id, current_user)
+    enforce_user_quota(user_id, "exam")
     section_id = normalize_topic(request.section_id or request.topic)
 
     return generate_structured_probable_questions(
@@ -1144,7 +1199,8 @@ def generate_artifacts(
     request: ArtifactGenerateRequest,
     current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
-    enforce_user_quota(require_authenticated_user_id(current_user), "artifact")
+    user_id = require_authenticated_user_id(current_user)
+    enforce_user_quota(user_id, "artifact")
     section_id = re.sub(
         r"[^a-z0-9]+",
         "_",
@@ -1175,7 +1231,8 @@ def agent_endpoint(
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
-    enforce_user_quota(require_authenticated_user_id(current_user), "agent")
+    user_id = require_owned_study_session(request.session_id, current_user)
+    enforce_user_quota(user_id, "agent")
     return route_to_agent(request, db=db)
 
 

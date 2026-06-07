@@ -332,6 +332,20 @@ class ModelToolTrace(Base):
     metadata_json = Column(JSON, default=dict)
 
 
+class DailyQuotaUsage(Base):
+    """Persistent per-user daily usage counters for AI routes."""
+    __tablename__ = "daily_quota_usage"
+
+    id = Column(Integer, primary_key=True, index=True)
+    quota_key = Column(String, unique=True, index=True, nullable=False)
+    user_hash = Column(String, nullable=False, index=True)
+    quota_name = Column(String, nullable=False, index=True)
+    quota_date = Column(Date, nullable=False, index=True)
+    count = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # =========================================================
 # AGENT RUNTIME
 # =========================================================
