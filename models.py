@@ -485,6 +485,26 @@ class ContentIngestionJob(Base):
 
 
 # =========================================================
+# ADMIN AUDIT
+# =========================================================
+class AdminAuditLog(Base):
+    """Founder/admin action audit trail for protected console operations."""
+    __tablename__ = "admin_audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    created_at = Column(DateTime, default=_utcnow_naive, index=True)
+    actor_uid = Column(String, default="", index=True)
+    actor_email = Column(String, default="", index=True)
+    action = Column(String, default="", index=True)
+    target_type = Column(String, default="", index=True)
+    target_id = Column(String, default="", index=True)
+    status = Column(String, default="success", index=True)
+    ip_address = Column(String, default="")
+    user_agent = Column(Text, default="")
+    metadata_json = Column(JSON, default=dict)
+
+
+# =========================================================
 # AGENT RUNTIME
 # =========================================================
 class AgentRuntimeRun(Base):
