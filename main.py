@@ -36,6 +36,7 @@ from models import (
     AICoachProfile,
     Base,
     ContentChapter,
+    ContentChunk,
     ContentIngestionJob,
     DailyQuotaUsage,
     ModelToolTrace,
@@ -2530,6 +2531,343 @@ def _student_payload(row: UserProgress) -> Dict[str, Any]:
     }
 
 
+ADMIN_AGENT_DEFINITIONS = [
+    {
+        "agent_id": "orchestrator",
+        "display_name": "Supervisor Orchestrator",
+        "role": "Routes tasks, policies, traces, and handoffs.",
+        "keywords": ["orchestrator", "router", "route", "gateway", "handoff"],
+    },
+    {
+        "agent_id": "tutor",
+        "display_name": "Subject Tutor",
+        "role": "Answers doubts with grounded study context.",
+        "keywords": ["tutor", "answer", "explain", "study", "doubt", "coach"],
+    },
+    {
+        "agent_id": "revision",
+        "display_name": "Revision Specialist",
+        "role": "Generates notes, recall, summaries, and quick review.",
+        "keywords": ["revision", "revise", "summary", "notes", "recall"],
+    },
+    {
+        "agent_id": "exam",
+        "display_name": "Exam Generator",
+        "role": "Builds MCQs, tests, probable questions, and scoring.",
+        "keywords": ["exam", "mcq", "test", "quiz", "question"],
+    },
+    {
+        "agent_id": "planner",
+        "display_name": "Study Planner",
+        "role": "Chooses next best action from progress and weak topics.",
+        "keywords": ["planner", "plan", "mission", "path", "next"],
+    },
+    {
+        "agent_id": "coach",
+        "display_name": "Personal AI Coach",
+        "role": "Maintains continuity, memory, motivation, and progress.",
+        "keywords": ["coach", "memory", "profile", "daily", "motivation"],
+    },
+]
+
+
+def _agent_definition(agent_id: str) -> Dict[str, Any]:
+    return next((item for item in ADMIN_AGENT_DEFINITIONS if item["agent_id"] == agent_id), {
+        "agent_id": agent_id,
+        "display_name": agent_id.replace("_", " ").title(),
+        "role": "Observed runtime agent.",
+        "keywords": [agent_id],
+    })
+
+
+def _agent_match_text(row: Any) -> str:
+    metadata = _safe_json_dict(getattr(row, "metadata_json", {}) or getattr(row, "data_json", {}) or {})
+    try:
+        metadata_text = json.dumps(metadata, default=str)
+    except TypeError:
+        metadata_text = str(metadata)
+    pieces = [
+        getattr(row, "agent_id", ""),
+        getattr(row, "event_type", ""),
+        getattr(row, "summary", ""),
+        getattr(row, "name", ""),
+        getattr(row, "trace_type", ""),
+        getattr(row, "provider", ""),
+        getattr(row, "model", ""),
+        metadata_text,
+    ]
+    return " ".join(str(piece or "") for piece in pieces).lower()
+
+
+def _matches_agent(row: Any, agent_id: str) -> bool:
+    text_value = _agent_match_text(row)
+    definition = _agent_definition(agent_id)
+    return any(str(keyword).lower() in text_value for keyword in definition.get("keywords", [agent_id]))
+
+
+def _safe_created_at(row: Any) -> Optional[datetime]:
+    value = getattr(row, "created_at", None) or getattr(row, "timestamp", None)
+    return value if isinstance(value, datetime) else None
+
+
+def _average(values: List[float]) -> Optional[float]:
+    clean = [value for value in values if value is not None]
+    return round(sum(clean) / len(clean), 3) if clean else None
+
+
+def _quality_scores_from_traces(rows: List[ModelToolTrace]) -> List[float]:
+    scores: List[float] = []
+    for row in rows:
+        metadata = _safe_json_dict(row.metadata_json)
+        quality = _safe_json_dict(metadata.get("quality"))
+        score = quality.get("score") or quality.get("overall_score")
+        if score is None and "passed" in quality:
+            score = 1.0 if quality.get("passed") else 0.0
+        if score is not None:
+            numeric = _admin_float(score)
+            scores.append(numeric if numeric <= 1 else numeric / 100)
+    return scores
+
+
+def _agent_source_usage(rows: List[ModelToolTrace]) -> List[Dict[str, Any]]:
+    usage: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        metadata = _safe_json_dict(row.metadata_json)
+        retrieval = _safe_json_dict(metadata.get("retrieval"))
+        source = (
+            retrieval.get("source")
+            or retrieval.get("section_id")
+            or metadata.get("source")
+            or metadata.get("section_id")
+            or "runtime_trace"
+        )
+        key = str(source)
+        if key not in usage:
+            usage[key] = {"source": key, "chunks": 0, "rows": 0}
+        usage[key]["rows"] += 1
+        usage[key]["chunks"] += _admin_int(retrieval.get("paragraphs_found") or retrieval.get("chunks") or 0)
+    return sorted(usage.values(), key=lambda item: (item["chunks"], item["rows"]), reverse=True)[:6]
+
+
+def _agent_learning_signal(quality_delta: Optional[float], latency_delta_ms: Optional[float], errors: int, runs_24h: int) -> str:
+    if runs_24h == 0:
+        return "needs_data"
+    if errors > 0 and quality_delta is not None and quality_delta < -0.02:
+        return "regressing"
+    if quality_delta is not None and quality_delta > 0.02:
+        return "improving"
+    if latency_delta_ms is not None and latency_delta_ms < -250:
+        return "faster"
+    return "stable"
+
+
+def build_admin_agent_intelligence(db: Session, agent_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    now = datetime.utcnow()
+    cutoff_24h = now - timedelta(hours=24)
+    previous_cutoff = now - timedelta(hours=48)
+    trace_rows = db.query(ModelToolTrace).order_by(ModelToolTrace.created_at.desc(), ModelToolTrace.id.desc()).limit(3500).all()
+    event_rows = db.query(ObservabilityEvent).order_by(ObservabilityEvent.created_at.desc(), ObservabilityEvent.id.desc()).limit(3500).all()
+    interaction_rows = db.query(AICoachInteraction).order_by(AICoachInteraction.created_at.desc(), AICoachInteraction.id.desc()).limit(2000).all()
+
+    bus_agents = {str(row.get("agent_id") or row.get("id") or ""): row for row in agent_rows if isinstance(row, dict)}
+    agent_ids = list(dict.fromkeys([item["agent_id"] for item in ADMIN_AGENT_DEFINITIONS] + list(bus_agents.keys())))
+    enriched: List[Dict[str, Any]] = []
+
+    for agent_id in agent_ids:
+        if not agent_id:
+            continue
+        definition = _agent_definition(agent_id)
+        bus_agent = bus_agents.get(agent_id, {})
+        matched_traces = [row for row in trace_rows if _matches_agent(row, agent_id)]
+        matched_events = [row for row in event_rows if _matches_agent(row, agent_id)]
+        current_traces = [row for row in matched_traces if (_safe_created_at(row) or now) >= cutoff_24h]
+        previous_traces = [
+            row for row in matched_traces
+            if previous_cutoff <= (_safe_created_at(row) or now) < cutoff_24h
+        ]
+        current_events = [row for row in matched_events if (_safe_created_at(row) or now) >= cutoff_24h]
+        previous_events = [
+            row for row in matched_events
+            if previous_cutoff <= (_safe_created_at(row) or now) < cutoff_24h
+        ]
+        success_rows = [row for row in matched_traces if str(row.status or "").lower() in {"success", "skipped"}]
+        error_rows = [row for row in matched_traces if str(row.status or "").lower() not in {"success", "skipped"}]
+        latency_values = [_admin_float(row.latency_ms) for row in matched_traces if row.latency_ms is not None]
+        current_latency = _average([_admin_float(row.latency_ms) for row in current_traces if row.latency_ms is not None])
+        previous_latency = _average([_admin_float(row.latency_ms) for row in previous_traces if row.latency_ms is not None])
+        quality_current = _average(_quality_scores_from_traces(current_traces))
+        quality_previous = _average(_quality_scores_from_traces(previous_traces))
+
+        if agent_id in {"coach", "tutor"} and quality_current is None:
+            current_quality_rows = [
+                float(row.quality_score or 0)
+                for row in interaction_rows
+                if row.created_at and row.created_at >= cutoff_24h and row.quality_score is not None and float(row.quality_score or 0) > 0
+            ]
+            quality_current = _average(current_quality_rows)
+        if agent_id in {"coach", "tutor"} and quality_previous is None:
+            previous_quality_rows = [
+                float(row.quality_score or 0)
+                for row in interaction_rows
+                if row.created_at and previous_cutoff <= row.created_at < cutoff_24h and row.quality_score is not None and float(row.quality_score or 0) > 0
+            ]
+            quality_previous = _average(previous_quality_rows)
+
+        quality_delta = round(quality_current - quality_previous, 3) if quality_current is not None and quality_previous is not None else None
+        latency_delta = round(current_latency - previous_latency, 1) if current_latency is not None and previous_latency is not None else None
+        total_requests = max(_admin_int(bus_agent.get("total_requests")), len(matched_traces) + len(matched_events))
+        total_errors = max(_admin_int(bus_agent.get("total_errors")), len(error_rows))
+        success_rate = round((len(success_rows) / len(matched_traces)) * 100, 1) if matched_traces else _admin_float(bus_agent.get("success_rate"))
+        avg_latency = round(sum(latency_values) / len(latency_values), 1) if latency_values else _admin_float(bus_agent.get("avg_latency_ms"))
+        last_activity = max(
+            [item for item in [_safe_created_at(row) for row in matched_traces + matched_events] if item],
+            default=None,
+        )
+        input_tokens = sum(_admin_int(row.estimated_input_tokens) for row in matched_traces)
+        output_tokens = sum(_admin_int(row.estimated_output_tokens) for row in matched_traces)
+        estimated_cost = round(sum(_admin_float(row.estimated_cost_usd) for row in matched_traces), 8)
+        sessions = {row.session_id for row in matched_traces if row.session_id}
+        model_calls = len([row for row in matched_traces if row.trace_type == "model"])
+        tool_calls = len([row for row in matched_traces if row.trace_type == "tool"])
+        turn_calls = len([row for row in matched_traces if row.trace_type == "turn"])
+        memory_rows = 0
+        if agent_id == "coach":
+            memory_rows = _safe_count(db.query(AICoachMemory)) + _safe_count(db.query(AgentChatMemory))
+
+        enriched.append({
+            **bus_agent,
+            "agent_id": agent_id,
+            "display_name": str(bus_agent.get("display_name") or bus_agent.get("name") or definition["display_name"]),
+            "role": str(bus_agent.get("role") or definition["role"]),
+            "status": str(bus_agent.get("status") or ("observing" if total_requests else "not_reporting")),
+            "health": str(bus_agent.get("health") or ("healthy" if total_errors == 0 and total_requests else "idle")),
+            "current_task": str(bus_agent.get("current_task") or "Watching traces, data usage, model calls, and quality drift."),
+            "last_activity": _admin_iso(last_activity) if last_activity else str(bus_agent.get("last_activity") or ""),
+            "total_requests": total_requests,
+            "total_errors": total_errors,
+            "total_success": max(_admin_int(bus_agent.get("total_success")), len(success_rows)),
+            "avg_latency_ms": avg_latency,
+            "last_quality_score": quality_current if quality_current is not None else _admin_float(bus_agent.get("last_quality_score")),
+            "success_rate": success_rate,
+            "data_intake": {
+                "trace_rows": len(matched_traces),
+                "event_rows": len(matched_events),
+                "new_trace_rows_24h": len(current_traces),
+                "previous_trace_rows_24h": len(previous_traces),
+                "new_event_rows_24h": len(current_events),
+                "previous_event_rows_24h": len(previous_events),
+                "model_calls": model_calls,
+                "tool_calls": tool_calls,
+                "turns": turn_calls,
+                "sessions": len(sessions),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "estimated_cost_usd": estimated_cost,
+                "memory_rows": memory_rows,
+                "sources": _agent_source_usage(matched_traces),
+            },
+            "evolution": {
+                "version": str(bus_agent.get("version") or f"observed-v{1 + min(8, total_requests // 250)}"),
+                "runs_total": len(matched_traces),
+                "runs_24h": len(current_traces),
+                "runs_previous_24h": len(previous_traces),
+                "events_24h": len(current_events),
+                "quality_score_current": quality_current,
+                "quality_score_previous": quality_previous,
+                "quality_delta": quality_delta,
+                "latency_current_ms": current_latency,
+                "latency_previous_ms": previous_latency,
+                "latency_delta_ms": latency_delta,
+                "success_rate": success_rate,
+                "learning_signal": _agent_learning_signal(quality_delta, latency_delta, len(error_rows), len(current_traces)),
+                "trained_on_samples": len(matched_traces) + len(matched_events) + memory_rows,
+                "new_data_rows": len(current_traces) + len(current_events),
+                "historical_data_rows": max(0, len(matched_traces) + len(matched_events) - len(current_traces) - len(current_events)),
+            },
+        })
+
+    return enriched
+
+
+def build_admin_data_intake(
+    db: Session,
+    *,
+    data_registry: Dict[str, Any],
+    model_registry: Dict[str, Any],
+    chapters: List[ContentChapter],
+    recent_content_jobs: List[ContentIngestionJob],
+) -> Dict[str, Any]:
+    now = datetime.utcnow()
+    cutoff_24h = now - timedelta(hours=24)
+    cutoff_7d = now - timedelta(days=7)
+    total_traces = _safe_count(db.query(ModelToolTrace))
+    traces_24h = _safe_count(db.query(ModelToolTrace).filter(ModelToolTrace.created_at >= cutoff_24h))
+    traces_7d = _safe_count(db.query(ModelToolTrace).filter(ModelToolTrace.created_at >= cutoff_7d))
+    total_events = _safe_count(db.query(ObservabilityEvent))
+    events_24h = _safe_count(db.query(ObservabilityEvent).filter(ObservabilityEvent.created_at >= cutoff_24h))
+    events_7d = _safe_count(db.query(ObservabilityEvent).filter(ObservabilityEvent.created_at >= cutoff_7d))
+    total_chunks = _safe_count(db.query(ContentChunk))
+    summary = data_registry.get("summary", {})
+    current_model = model_registry.get("current", {})
+    total_input_tokens = int(_safe_scalar(db.query(func.sum(ModelToolTrace.estimated_input_tokens)).scalar()))
+    total_output_tokens = int(_safe_scalar(db.query(func.sum(ModelToolTrace.estimated_output_tokens)).scalar()))
+    total_cost = round(_safe_scalar(db.query(func.sum(ModelToolTrace.estimated_cost_usd)).scalar()), 8)
+    latest_trace = db.query(ModelToolTrace).order_by(ModelToolTrace.created_at.desc(), ModelToolTrace.id.desc()).first()
+    latest_event = db.query(ObservabilityEvent).order_by(ObservabilityEvent.created_at.desc(), ObservabilityEvent.id.desc()).first()
+
+    return {
+        "generated_at": now.isoformat(),
+        "totals": {
+            "study_materials": _admin_int(summary.get("study_materials")),
+            "study_material_bytes": _admin_int(summary.get("total_file_size_bytes")),
+            "study_material_label": summary.get("total_file_size_label") or "0 B",
+            "content_chapters": len(chapters),
+            "approved_chapters": len([chapter for chapter in chapters if chapter.status in {"approved", "published"}]),
+            "content_chunks": total_chunks or _admin_int(summary.get("chunks")),
+            "topics": _admin_int(summary.get("topics")),
+            "trace_rows": total_traces,
+            "event_rows": total_events,
+            "model_calls": _safe_count(db.query(ModelToolTrace).filter(ModelToolTrace.trace_type == "model")),
+            "tool_calls": _safe_count(db.query(ModelToolTrace).filter(ModelToolTrace.trace_type == "tool")),
+            "turns": _safe_count(db.query(ModelToolTrace).filter(ModelToolTrace.trace_type == "turn")),
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
+            "estimated_cost_usd": total_cost,
+            "model_versions": len(model_registry.get("versions", [])),
+            "training_samples": _admin_int(current_model.get("samples")) or total_traces,
+        },
+        "freshness": {
+            "traces_24h": traces_24h,
+            "traces_7d": traces_7d,
+            "events_24h": events_24h,
+            "events_7d": events_7d,
+            "historical_traces": max(0, total_traces - traces_24h),
+            "historical_events": max(0, total_events - events_24h),
+            "latest_trace_at": _admin_iso(latest_trace.created_at) if latest_trace else None,
+            "latest_event_at": _admin_iso(latest_event.created_at) if latest_event else None,
+            "last_indexed_time": summary.get("last_indexed_time"),
+        },
+        "pipeline": {
+            **data_registry.get("progress", {}),
+            "rag_index_version": hashlib_data_version(),
+            "prompt_version": current_model.get("prompt_version"),
+            "agent_workflow_version": current_model.get("agent_workflow_version"),
+        },
+        "source_coverage": data_registry.get("source_coverage", []),
+        "recent_jobs": [
+            {
+                "job_id": job.job_id,
+                "job_type": job.job_type,
+                "status": job.status,
+                "source_path": job.source_path,
+                "created_at": job.created_at.isoformat() if job.created_at else "",
+                "summary": job.summary or {},
+            }
+            for job in recent_content_jobs
+        ],
+    }
+
+
 def build_admin_console_payload(db: Session) -> Dict[str, Any]:
     today_start = _start_of_today()
     cutoff_24h = datetime.utcnow() - timedelta(hours=24)
@@ -2605,7 +2943,16 @@ def build_admin_console_payload(db: Session) -> Dict[str, Any]:
 
     system_stats = event_bus.get_system_stats()
     observability = get_observability_summary(db)
-    agent_rows = event_bus.get_all_agents()
+    data_registry = build_admin_data_registry(db)
+    model_registry = build_admin_model_registry(db)
+    agent_rows = build_admin_agent_intelligence(db, event_bus.get_all_agents())
+    data_intake = build_admin_data_intake(
+        db,
+        data_registry=data_registry,
+        model_registry=model_registry,
+        chapters=chapters,
+        recent_content_jobs=recent_content_jobs,
+    )
 
     recent_traces = db.query(ModelToolTrace).order_by(ModelToolTrace.created_at.desc(), ModelToolTrace.id.desc()).limit(80).all()
     recent_students = db.query(UserProgress).order_by(UserProgress.last_active_date.desc(), UserProgress.xp.desc()).limit(20).all()
@@ -2694,6 +3041,9 @@ def build_admin_console_payload(db: Session) -> Dict[str, Any]:
         "traces": [_trace_payload(row) for row in recent_traces],
         "events": recent_events,
         "audit": [_serialize_audit_log(row) for row in recent_audits],
+        "data_intake": data_intake,
+        "data_registry": data_registry,
+        "model_registry": model_registry,
     }
 
 
