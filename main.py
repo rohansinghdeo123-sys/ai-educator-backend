@@ -23,16 +23,17 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, status, Requ
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, inspect, text
+from sqlalchemy import distinct, func, inspect, text
 from sqlalchemy.orm import Session
 
 from database import SessionLocal, check_db_health, engine
 from models import (
+    AdminAuditLog,
+    AgentChatMemory,
     AICoachDailySignal,
     AICoachInteraction,
     AICoachMemory,
     AICoachProfile,
-    AdminAuditLog,
     Base,
     ContentChapter,
     ContentIngestionJob,
@@ -41,6 +42,7 @@ from models import (
     ObservabilityEvent,
     SessionDetail,
     TestHistory,
+    TopicPerformance,
     UserProgress,
 )
 from schemas import (
@@ -98,6 +100,7 @@ from Logic.tools.artifact_generator import (
     available_artifact_sections,
     generate_study_artifacts,
 )
+from Logic.coach.settings import coach_settings
 
 # ── Groq client for casual CEO chats ──
 import groq
@@ -709,6 +712,14 @@ class AdminAuditRequest(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class AdminActionRequest(BaseModel):
+    action: str
+    target_type: str = ""
+    target_id: str = ""
+    confirmed: bool = False
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
 class GenerateMCQRequest(BaseModel):
     topic: str = Field(min_length=1, max_length=180)
     section_id: Optional[str] = Field(default=None, max_length=160)
@@ -930,6 +941,744 @@ def format_test_session(test: TestHistory) -> Dict[str, Any]:
         "has_replay": bool(replay_question_count),
         "replay_question_count": replay_question_count,
         "replay_data": replay_data or {},
+    }
+
+
+ADMIN_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+SUPPORTED_ADMIN_ACTIONS = {
+    "clear_temp_cache",
+    "export_data_report",
+    "refresh_snapshot",
+}
+CONFIRMED_ADMIN_ACTIONS = {
+    "clear_temp_cache",
+    "clear_temp_chat_state",
+    "disable_user",
+    "promote_model_version",
+    "refresh_vector_index",
+    "reindex_material",
+    "reset_user_session",
+}
+
+
+def _admin_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _admin_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _admin_iso(value: Any) -> Optional[str]:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _safe_json_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _query_count(query: Any) -> int:
+    try:
+        return _admin_int(query.count())
+    except Exception:
+        logger.exception("Admin count query failed")
+        return 0
+
+
+def _sum_scalar(db: Session, model: Any, column: Any, *filters: Any) -> float:
+    try:
+        query = db.query(func.sum(column))
+        for item in filters:
+            query = query.filter(item)
+        return _admin_float(query.scalar())
+    except Exception:
+        logger.exception("Admin sum query failed for %s", model)
+        return 0.0
+
+
+def _admin_identity(current_admin: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "uid": str(current_admin.get("uid") or ""),
+        "email": str(current_admin.get("email") or ""),
+        "phone": str(current_admin.get("phone_number") or ""),
+    }
+
+
+def record_admin_audit(
+    db: Session,
+    current_admin: Dict[str, Any],
+    *,
+    action: str,
+    target_type: str = "",
+    target_id: str = "",
+    status_value: str = "success",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    identity = _admin_identity(current_admin)
+    try:
+        db.add(
+            AdminAuditLog(
+                actor_uid=identity["uid"],
+                actor_email=identity["email"],
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                status=status_value,
+                metadata_json=metadata or {},
+            )
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.warning("Could not persist admin audit log for %s: %s", action, exc)
+
+
+def _format_bytes(value: int) -> str:
+    size = float(max(0, value))
+    for suffix in ("B", "KB", "MB", "GB"):
+        if size < 1024 or suffix == "GB":
+            return f"{size:.1f} {suffix}" if suffix != "B" else f"{int(size)} B"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def _paragraph_chunks(text_value: str) -> List[str]:
+    return [
+        item.strip()
+        for item in re.split(r"\n\s*\n+", text_value or "")
+        if item.strip()
+    ]
+
+
+def _iter_data_files() -> List[Dict[str, Any]]:
+    files: List[Dict[str, Any]] = []
+    if not os.path.isdir(ADMIN_DATA_DIR):
+        return files
+
+    for root, _dirs, names in os.walk(ADMIN_DATA_DIR):
+        for name in names:
+            path = os.path.join(root, name)
+            rel_path = os.path.relpath(path, ADMIN_DATA_DIR).replace("\\", "/")
+            try:
+                stat = os.stat(path)
+                with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                    content = handle.read()
+                chunks = _paragraph_chunks(content)
+                concepts = 0
+                if name.lower().endswith(".json"):
+                    try:
+                        parsed = json.loads(content)
+                        if isinstance(parsed, list):
+                            concepts = len(parsed)
+                    except json.JSONDecodeError:
+                        pass
+                files.append(
+                    {
+                        "path": rel_path,
+                        "bytes": int(stat.st_size),
+                        "text_chars": len(content),
+                        "chunks": concepts or len(chunks),
+                        "low_quality_chunks": sum(1 for item in chunks if len(item) < 40),
+                        "concepts": concepts,
+                        "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                        "status": "ready",
+                    }
+                )
+            except Exception as exc:
+                files.append(
+                    {
+                        "path": rel_path,
+                        "bytes": 0,
+                        "text_chars": 0,
+                        "chunks": 0,
+                        "low_quality_chunks": 0,
+                        "concepts": 0,
+                        "modified_at": None,
+                        "status": "failed",
+                        "error": str(exc)[:240],
+                    }
+                )
+    return sorted(files, key=lambda item: item["path"])
+
+
+def _recent_turn_traces(db: Session, limit: int = 500) -> List[ModelToolTrace]:
+    return (
+        db.query(ModelToolTrace)
+        .filter(ModelToolTrace.trace_type == "turn")
+        .order_by(ModelToolTrace.created_at.desc(), ModelToolTrace.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+def _trace_quality_summary(db: Session) -> Dict[str, Any]:
+    turns = _recent_turn_traces(db)
+    if not turns:
+        return {
+            "samples": 0,
+            "quality_score": None,
+            "grounded_answer_rate": None,
+            "retrieval_success_rate": None,
+        }
+
+    quality_values: List[float] = []
+    grounded_total = 0
+    grounded_success = 0
+    retrieval_total = 0
+    retrieval_success = 0
+
+    for row in turns:
+        metadata = _safe_json_dict(row.metadata_json)
+        quality = _safe_json_dict(metadata.get("quality"))
+        retrieval = _safe_json_dict(metadata.get("retrieval"))
+
+        score = quality.get("score") or quality.get("overall_score")
+        if score is None and "passed" in quality:
+            score = 100 if quality.get("passed") else 0
+        if score is not None:
+            quality_values.append(_admin_float(score))
+
+        if retrieval.get("policy") or retrieval.get("source") or retrieval.get("section_id"):
+            retrieval_total += 1
+            if _admin_int(retrieval.get("paragraphs_found")) > 0 or retrieval.get("supported") is True:
+                retrieval_success += 1
+
+        if quality or retrieval:
+            grounded_total += 1
+            if quality.get("passed", True) and (
+                not retrieval or _admin_int(retrieval.get("paragraphs_found")) > 0 or retrieval.get("supported") is True
+            ):
+                grounded_success += 1
+
+    return {
+        "samples": len(turns),
+        "quality_score": round(sum(quality_values) / len(quality_values), 1) if quality_values else None,
+        "grounded_answer_rate": round((grounded_success / grounded_total) * 100, 1) if grounded_total else None,
+        "retrieval_success_rate": round((retrieval_success / retrieval_total) * 100, 1) if retrieval_total else None,
+    }
+
+
+def build_admin_data_registry(db: Session) -> Dict[str, Any]:
+    files = _iter_data_files()
+    total_bytes = sum(_admin_int(item.get("bytes")) for item in files)
+    total_text_chars = sum(_admin_int(item.get("text_chars")) for item in files)
+    total_chunks = sum(_admin_int(item.get("chunks")) for item in files)
+    total_concepts = sum(_admin_int(item.get("concepts")) for item in files)
+    failed_files = [item for item in files if item.get("status") == "failed"]
+    low_quality_chunks = sum(_admin_int(item.get("low_quality_chunks")) for item in files)
+    modified_times = [
+        str(item.get("modified_at"))
+        for item in files
+        if item.get("modified_at")
+    ]
+    quality = _trace_quality_summary(db)
+
+    source_coverage: Dict[str, int] = defaultdict(int)
+    for item in files:
+        parts = str(item.get("path") or "").split("/")
+        subject = parts[0] if parts else "data"
+        source_coverage[subject] += _admin_int(item.get("chunks"))
+
+    extraction_percent = 100 if files and not failed_files else 0 if not files else round(((len(files) - len(failed_files)) / len(files)) * 100, 1)
+    chunking_percent = 100 if total_chunks > 0 else 0
+
+    return {
+        "summary": {
+            "study_materials": len(files),
+            "total_file_size_bytes": total_bytes,
+            "total_file_size_label": _format_bytes(total_bytes),
+            "total_extracted_text_chars": total_text_chars,
+            "chapters": len(knowledge_graph.list_chapters()),
+            "topics": total_concepts or len(available_artifact_sections()),
+            "chunks": total_chunks,
+            "embeddings": 0,
+            "vector_index_size_bytes": 0,
+            "vector_index_size_label": "0 B",
+            "last_indexed_time": max(modified_times) if modified_times else None,
+            "failed_files": len(failed_files),
+            "low_quality_chunks": low_quality_chunks,
+        },
+        "progress": {
+            "extraction_complete": extraction_percent,
+            "chunking_complete": chunking_percent,
+            "embedding_complete": None,
+            "index_health": None,
+            "retrieval_success": quality["retrieval_success_rate"],
+        },
+        "source_coverage": [
+            {"source": key, "chunks": value}
+            for key, value in sorted(source_coverage.items(), key=lambda item: item[0])
+        ],
+        "files": files,
+        "failed_files": failed_files,
+        "vector_index": {
+            "available": False,
+            "status": "not_configured",
+            "todo": "Connect a vector index service before reporting embeddings or index size.",
+        },
+        "notes": [
+            "File sizes, text sizes, chunks, chapters, and topics are computed from backend data files.",
+            "Embeddings and vector index size are intentionally not estimated because no vector index backend is present in this repository.",
+        ],
+    }
+
+
+def _format_trace_row(row: ModelToolTrace) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "created_at": _admin_iso(row.created_at),
+        "user_id": row.user_id or "",
+        "session_id": row.session_id or "",
+        "turn_id": row.turn_id or "",
+        "trace_type": row.trace_type or "",
+        "name": row.name or "",
+        "provider": row.provider or "",
+        "model": row.model or "",
+        "status": row.status or "unknown",
+        "latency_ms": _admin_int(row.latency_ms),
+        "estimated_input_tokens": _admin_int(row.estimated_input_tokens),
+        "estimated_output_tokens": _admin_int(row.estimated_output_tokens),
+        "estimated_cost_usd": round(_admin_float(row.estimated_cost_usd), 8),
+        "metadata": row.metadata_json or {},
+    }
+
+
+def _timeline_for_trace_group(rows: List[ModelToolTrace]) -> List[Dict[str, Any]]:
+    ordered = sorted(rows, key=lambda item: item.created_at or datetime.utcnow())
+    timeline: List[Dict[str, Any]] = []
+    turn_row = next((row for row in ordered if row.trace_type == "turn"), None)
+    turn_metadata = _safe_json_dict(turn_row.metadata_json if turn_row else {})
+    query = _safe_json_dict(turn_metadata.get("query"))
+    retrieval = _safe_json_dict(turn_metadata.get("retrieval"))
+    quality = _safe_json_dict(turn_metadata.get("quality"))
+
+    if query:
+        timeline.append(
+            {
+                "step": "user_query",
+                "label": "User query",
+                "status": "success",
+                "detail": query.get("normalized") or query.get("question") or query.get("intent") or "Query captured",
+            }
+        )
+    if query.get("intent"):
+        timeline.append(
+            {
+                "step": "intent_detection",
+                "label": "Intent detection",
+                "status": "success",
+                "detail": str(query.get("intent")),
+            }
+        )
+    if retrieval:
+        paragraphs = _admin_int(retrieval.get("paragraphs_found"))
+        timeline.append(
+            {
+                "step": "retrieval",
+                "label": "Retrieval",
+                "status": "success" if paragraphs > 0 else "empty",
+                "detail": f"{paragraphs} chunks from {retrieval.get('source') or 'study data'}",
+            }
+        )
+        timeline.append(
+            {
+                "step": "source_check",
+                "label": "Source check",
+                "status": "success" if retrieval.get("supported", paragraphs > 0) else "warning",
+                "detail": retrieval.get("section_id") or retrieval.get("policy") or "Grounding checked",
+            }
+        )
+
+    for row in ordered:
+        if row.trace_type == "model":
+            timeline.append(
+                {
+                    "step": "model_call",
+                    "label": row.name or "Model call",
+                    "status": row.status or "unknown",
+                    "detail": row.model or row.provider or "Model not recorded",
+                    "latency_ms": _admin_int(row.latency_ms),
+                }
+            )
+        elif row.trace_type == "tool":
+            timeline.append(
+                {
+                    "step": "tool_call",
+                    "label": row.name or "Tool call",
+                    "status": row.status or "unknown",
+                    "detail": str(_safe_json_dict(row.metadata_json).get("summary") or "Tool executed"),
+                    "latency_ms": _admin_int(row.latency_ms),
+                }
+            )
+
+    if quality:
+        timeline.append(
+            {
+                "step": "quality_validation",
+                "label": "Quality validation",
+                "status": "success" if quality.get("passed", True) else "needs_review",
+                "detail": ", ".join(str(item) for item in quality.get("issues", [])[:2]) or "Quality checked",
+            }
+        )
+
+    if turn_row:
+        timeline.append(
+            {
+                "step": "final_answer",
+                "label": "Final answer",
+                "status": turn_row.status or "unknown",
+                "detail": f"{_admin_int(turn_row.latency_ms)} ms end-to-end",
+                "latency_ms": _admin_int(turn_row.latency_ms),
+            }
+        )
+
+    return timeline
+
+
+def build_admin_traces(
+    db: Session,
+    *,
+    limit: int = 40,
+    trace_type: Optional[str] = None,
+    status_filter: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    query = db.query(ModelToolTrace)
+    if trace_type:
+        query = query.filter(ModelToolTrace.trace_type == trace_type)
+    if status_filter:
+        query = query.filter(ModelToolTrace.status == status_filter)
+    if user_id:
+        query = query.filter(ModelToolTrace.user_id == user_id)
+
+    rows = (
+        query.order_by(ModelToolTrace.created_at.desc(), ModelToolTrace.id.desc())
+        .limit(limit)
+        .all()
+    )
+    grouped: Dict[str, List[ModelToolTrace]] = defaultdict(list)
+    for row in rows:
+        grouped[row.turn_id or f"{row.trace_type}-{row.id}"].append(row)
+
+    return {
+        "rows": [_format_trace_row(row) for row in rows],
+        "runs": [
+            {
+                "turn_id": turn_id,
+                "created_at": _admin_iso(max((row.created_at for row in group if row.created_at), default=None)),
+                "status": next((row.status for row in group if row.trace_type == "turn"), group[0].status if group else "unknown"),
+                "user_id": next((row.user_id for row in group if row.user_id), ""),
+                "session_id": next((row.session_id for row in group if row.session_id), ""),
+                "total_latency_ms": sum(_admin_int(row.latency_ms) for row in group if row.trace_type != "route"),
+                "estimated_cost_usd": round(sum(_admin_float(row.estimated_cost_usd) for row in group), 8),
+                "models": sorted({row.model for row in group if row.model}),
+                "timeline": _timeline_for_trace_group(group),
+                "rows": [_format_trace_row(row) for row in sorted(group, key=lambda item: item.created_at or datetime.utcnow())],
+            }
+            for turn_id, group in grouped.items()
+        ],
+        "summary": get_observability_summary(db),
+    }
+
+
+def build_admin_model_registry(db: Session) -> Dict[str, Any]:
+    quality = _trace_quality_summary(db)
+    model_rows = (
+        db.query(
+            ModelToolTrace.provider,
+            ModelToolTrace.model,
+            func.count(ModelToolTrace.id),
+            func.avg(ModelToolTrace.latency_ms),
+            func.sum(ModelToolTrace.estimated_cost_usd),
+        )
+        .filter(ModelToolTrace.trace_type == "model")
+        .group_by(ModelToolTrace.provider, ModelToolTrace.model)
+        .all()
+    )
+    versions = [
+        {
+            "version": f"{provider or 'provider'}:{model or 'model'}",
+            "provider": provider or "",
+            "model": model or "",
+            "samples": _admin_int(samples),
+            "avg_latency_ms": round(_admin_float(avg_latency), 1),
+            "estimated_cost_usd": round(_admin_float(cost), 8),
+            "status": "observed",
+            "quality_score": quality["quality_score"],
+        }
+        for provider, model, samples, avg_latency, cost in model_rows
+    ]
+
+    live_model = coach_settings.tutor_model or coach_settings.fast_model
+    live_provider = coach_settings.provider
+    for item in versions:
+        if item["model"] == live_model or (not item["model"] and item["provider"] == live_provider):
+            item["status"] = "live"
+
+    return {
+        "current": {
+            "llm_provider": live_provider,
+            "llm_model": live_model,
+            "fast_model": coach_settings.fast_model,
+            "review_model": coach_settings.review_model,
+            "embedding_model": os.getenv("EMBEDDING_MODEL") or None,
+            "rag_index_version": hashlib_data_version(),
+            "prompt_version": os.getenv("PROMPT_VERSION", "agentic-control-plane-v1"),
+            "agent_workflow_version": os.getenv("AGENT_WORKFLOW_VERSION", "agentic-control-plane-v1"),
+            "deployment_version": os.getenv("RENDER_GIT_COMMIT", "2.5.0-production-guardrails"),
+            "quality_score": quality["quality_score"],
+            "latency_ms": get_observability_summary(db).get("avg_model_latency_ms"),
+            "failure_rate": model_failure_rate(db),
+            "grounded_answer_rate": quality["grounded_answer_rate"],
+            "samples": quality["samples"],
+        },
+        "versions": versions,
+        "unsupported_actions": [
+            "promote_model_version requires a deployment/version management backend before it can be enabled.",
+        ],
+    }
+
+
+def hashlib_data_version() -> str:
+    digest = sha256()
+    for item in _iter_data_files():
+        digest.update(str(item.get("path", "")).encode("utf-8"))
+        digest.update(str(item.get("bytes", "")).encode("utf-8"))
+        digest.update(str(item.get("modified_at", "")).encode("utf-8"))
+    return f"data-{digest.hexdigest()[:12]}"
+
+
+def model_failure_rate(db: Session) -> Optional[float]:
+    total = _query_count(db.query(ModelToolTrace).filter(ModelToolTrace.trace_type == "model"))
+    if not total:
+        return None
+    failures = _query_count(
+        db.query(ModelToolTrace).filter(
+            ModelToolTrace.trace_type == "model",
+            ModelToolTrace.status.notin_(["success", "skipped"]),
+        )
+    )
+    return round((failures / total) * 100, 1)
+
+
+def build_admin_overview(db: Session) -> Dict[str, Any]:
+    now = datetime.utcnow()
+    today = date.today()
+    today_start = datetime.combine(today, datetime.min.time())
+    quality = _trace_quality_summary(db)
+    data_registry = build_admin_data_registry(db)
+
+    progress_users = db.query(UserProgress).all()
+    user_ids = {user.user_id for user in progress_users if user.user_id}
+    for (user_id_value,) in db.query(distinct(TestHistory.user_id)).all():
+        if user_id_value:
+            user_ids.add(user_id_value)
+    for (user_id_value,) in db.query(distinct(AICoachProfile.user_id)).all():
+        if user_id_value:
+            user_ids.add(user_id_value)
+
+    total_questions = sum(_admin_int(user.total_questions) for user in progress_users)
+    total_correct = sum(_admin_int(user.total_correct) for user in progress_users)
+    total_tests = sum(_admin_int(user.total_tests) for user in progress_users)
+
+    active_today_ids = {
+        user.user_id
+        for user in progress_users
+        if user.user_id and user.last_active_date == today
+    }
+    active_today_ids.update(
+        user_id
+        for (user_id,) in db.query(distinct(TestHistory.user_id)).filter(TestHistory.date == today).all()
+        if user_id
+    )
+    active_today_ids.update(
+        user_id
+        for (user_id,) in db.query(distinct(AICoachInteraction.user_id))
+        .filter(AICoachInteraction.created_at >= today_start)
+        .all()
+        if user_id
+    )
+
+    active_sessions = _query_count(
+        db.query(distinct(ModelToolTrace.session_id)).filter(
+            ModelToolTrace.created_at >= now - timedelta(hours=1),
+            ModelToolTrace.session_id.isnot(None),
+            ModelToolTrace.session_id != "",
+        )
+    )
+    if active_sessions == 0:
+        active_sessions = _query_count(
+            db.query(distinct(AgentChatMemory.session_id)).filter(
+                AgentChatMemory.timestamp >= now - timedelta(hours=1),
+                AgentChatMemory.session_id.isnot(None),
+                AgentChatMemory.session_id != "",
+            )
+        )
+
+    observed = get_observability_summary(db)
+    failed_requests = _query_count(
+        db.query(ObservabilityEvent).filter(ObservabilityEvent.severity.in_(["error", "critical"]))
+    )
+    total_cost = _sum_scalar(db, ModelToolTrace, ModelToolTrace.estimated_cost_usd)
+    total_input_tokens = _sum_scalar(db, ModelToolTrace, ModelToolTrace.estimated_input_tokens)
+    total_output_tokens = _sum_scalar(db, ModelToolTrace, ModelToolTrace.estimated_output_tokens)
+
+    return {
+        "generated_at": datetime.utcnow().isoformat(),
+        "users": {
+            "total": len(user_ids),
+            "active_today": len(active_today_ids),
+            "active_sessions": active_sessions,
+        },
+        "learning": {
+            "questions_asked": _query_count(db.query(AICoachInteraction).filter(AICoachInteraction.role == "user")),
+            "revision_generations": _query_count(
+                db.query(ObservabilityEvent).filter(
+                    ObservabilityEvent.agent_id == "revision",
+                    ObservabilityEvent.event_type == "task_complete",
+                )
+            ),
+            "exam_generations": _query_count(
+                db.query(ObservabilityEvent).filter(
+                    ObservabilityEvent.agent_id == "exam",
+                    ObservabilityEvent.event_type == "task_complete",
+                )
+            ),
+            "mcqs_generated": _query_count(
+                db.query(ObservabilityEvent).filter(
+                    ObservabilityEvent.agent_id == "exam",
+                    ObservabilityEvent.summary.ilike("%mcq%"),
+                )
+            ),
+            "mcqs_attempted": total_questions,
+            "exam_attempts": total_tests,
+            "avg_accuracy": round((total_correct / total_questions) * 100, 1) if total_questions else None,
+            "grounded_answer_rate": quality["grounded_answer_rate"],
+        },
+        "operations": {
+            "failed_requests": failed_requests,
+            "avg_latency_ms": observed.get("avg_turn_latency_ms") or observed.get("avg_model_latency_ms"),
+            "model_calls": observed.get("model_calls"),
+            "tool_calls": observed.get("tool_calls"),
+            "turns": observed.get("turns"),
+            "estimated_input_tokens": _admin_int(total_input_tokens),
+            "estimated_output_tokens": _admin_int(total_output_tokens),
+            "estimated_cost_usd": round(_admin_float(total_cost), 8),
+        },
+        "data": {
+            "total_study_data_indexed_bytes": data_registry["summary"]["total_file_size_bytes"],
+            "total_study_data_indexed_label": data_registry["summary"]["total_file_size_label"],
+            "total_chunks": data_registry["summary"]["chunks"],
+            "total_embeddings": data_registry["summary"]["embeddings"],
+            "last_data_sync": data_registry["summary"]["last_indexed_time"],
+            "last_index_build": None,
+            "vector_index_status": data_registry["vector_index"]["status"],
+        },
+        "no_data": {
+            "has_users": bool(user_ids),
+            "has_traces": bool(quality["samples"]),
+            "has_vector_index": False,
+        },
+    }
+
+
+def build_admin_students(db: Session, limit: int = 50) -> Dict[str, Any]:
+    users = (
+        db.query(UserProgress)
+        .order_by(func.coalesce(UserProgress.last_active_date, date(1970, 1, 1)).desc(), UserProgress.xp.desc())
+        .limit(limit)
+        .all()
+    )
+    rows: List[Dict[str, Any]] = []
+    for user in users:
+        sessions = (
+            db.query(TestHistory)
+            .filter(TestHistory.user_id == user.user_id)
+            .order_by(TestHistory.id.desc())
+            .limit(5)
+            .all()
+        )
+        weak_topics = (
+            db.query(TopicPerformance)
+            .filter(TopicPerformance.user_id == user.user_id, TopicPerformance.weak == True)  # noqa: E712
+            .order_by(TopicPerformance.last_practiced.desc())
+            .limit(5)
+            .all()
+        )
+        recent_question = (
+            db.query(AICoachInteraction)
+            .filter(AICoachInteraction.user_id == user.user_id, AICoachInteraction.role == "user")
+            .order_by(AICoachInteraction.created_at.desc())
+            .first()
+        )
+        rows.append(
+            {
+                "user_id": user.user_id,
+                "sessions": _query_count(db.query(TestHistory).filter(TestHistory.user_id == user.user_id)),
+                "recent_sessions": [format_test_session(session) for session in sessions],
+                "recent_question": recent_question.message[:220] if recent_question and recent_question.message else "",
+                "topics_studied": sorted({session.topic for session in sessions if session.topic}),
+                "exam_attempts": _admin_int(user.total_tests),
+                "accuracy": round(float(user.accuracy), 1),
+                "weak_topics": [
+                    {
+                        "topic": item.topic,
+                        "accuracy": round(float(item.accuracy), 1),
+                        "attempts": _admin_int(item.attempts),
+                    }
+                    for item in weak_topics
+                ],
+                "xp": _admin_int(user.xp),
+                "streak": _admin_int(user.streak),
+                "last_activity": user.last_active_date.isoformat() if user.last_active_date else None,
+            }
+        )
+
+    return {"students": rows, "total": _query_count(db.query(UserProgress))}
+
+
+def build_admin_system_health(db: Session) -> Dict[str, Any]:
+    started = time.perf_counter()
+    database_ok = check_db_health()
+    db_latency_ms = round((time.perf_counter() - started) * 1000, 1)
+    data_dir_ok = os.path.isdir(ADMIN_DATA_DIR)
+    llm_configured = bool(os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY"))
+
+    return {
+        "generated_at": datetime.utcnow().isoformat(),
+        "services": [
+            {"name": "Backend", "status": "live", "detail": "FastAPI process responded"},
+            {"name": "Database", "status": "ready" if database_ok else "error", "latency_ms": db_latency_ms},
+            {"name": "Auth", "status": "ready" if FIREBASE_ADMIN_READY else "degraded", "detail": FIREBASE_ADMIN_ERROR or "Firebase Admin ready"},
+            {"name": "LLM provider", "status": "configured" if llm_configured else "missing_config", "detail": coach_settings.provider},
+            {"name": "Embedding provider", "status": "not_configured", "detail": "No embedding provider endpoint is configured"},
+            {"name": "Vector index/RAG", "status": "source_only", "detail": "Retriever uses platform source files; no vector index is connected"},
+            {"name": "Storage", "status": "ready" if data_dir_ok else "error", "detail": ADMIN_DATA_DIR},
+            {"name": "Knowledge graph", "status": "ready" if knowledge_graph.list_chapters() else "empty", "detail": f"{len(knowledge_graph.concepts)} concepts loaded"},
+        ],
+        "environment": {
+            "version": "2.5.0-production-guardrails",
+            "python_env": os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "local",
+            "rate_limits": RATE_LIMIT_ENABLED,
+            "cors_origins_configured": len(ALLOWED_ORIGINS),
+        },
+        "metrics": {
+            "avg_api_latency_ms": get_observability_summary(db).get("avg_turn_latency_ms"),
+            "error_rate": model_failure_rate(db),
+            "queue_jobs": None,
+        },
     }
 
 
@@ -1706,6 +2455,8 @@ def _serialize_audit_log(row: AdminAuditLog) -> Dict[str, Any]:
         "created_at": row.created_at.isoformat() if row.created_at else "",
         "actor_uid": row.actor_uid or "",
         "actor_email": row.actor_email or "",
+        "admin_uid": row.actor_uid or "",
+        "admin_email": row.actor_email or "",
         "action": row.action or "",
         "target_type": row.target_type or "",
         "target_id": row.target_id or "",
@@ -1959,7 +2710,17 @@ def artifact_catalog():
 # ADMIN PANEL API - FIREBASE TOKEN + ROLE PROTECTED
 # =====================================================
 @app.get("/admin/me")
-def admin_me(current_admin: Dict[str, Any] = Depends(require_admin)):
+def admin_me(
+    db: Session = Depends(get_db),
+    current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    record_admin_audit(
+        db,
+        current_admin,
+        action="admin_login",
+        status_value="success",
+        metadata={"source": "admin_console"},
+    )
     return {
         "uid": current_admin.get("uid"),
         "email": current_admin.get("email"),
@@ -1967,7 +2728,6 @@ def admin_me(current_admin: Dict[str, Any] = Depends(require_admin)):
         "role": "admin",
         "verified": True,
     }
-
 
 @app.get("/admin/console")
 def admin_console(
@@ -2195,11 +2955,48 @@ def admin_content_publish(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/admin/overview")
+def admin_overview(
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    return build_admin_overview(db)
+
+
 @app.get("/admin/agents")
-def admin_get_agents(_current_admin: Dict[str, Any] = Depends(require_admin)):
+def admin_get_agents(
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    traces = build_admin_traces(db, limit=120)
+    recent_by_agent: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for event in get_recent_observability_events(db, limit=200):
+        recent_by_agent[str(event.get("agent_id") or "unknown")].append(event)
+
+    agents = []
+    for agent in event_bus.get_all_agents():
+        agent_id = str(agent.get("agent_id") or "")
+        events_for_agent = recent_by_agent.get(agent_id, [])[:8]
+        agent["recent_events"] = events_for_agent
+        agent["recent_runs"] = [
+            run
+            for run in traces["runs"]
+            if any(agent_id in str(row.get("name") or "") for row in run.get("rows", []))
+        ][:5]
+        agent["data_source"] = (
+            next((event.get("data", {}).get("source") for event in events_for_agent if isinstance(event.get("data"), dict) and event.get("data", {}).get("source")), "")
+            or "event_bus"
+        )
+        agent["estimated_cost_usd"] = round(
+            sum(_admin_float(run.get("estimated_cost_usd")) for run in agent["recent_runs"]),
+            8,
+        )
+        agents.append(agent)
+
     return {
-        "agents": event_bus.get_all_agents(),
+        "agents": agents,
         "system": event_bus.get_system_stats(),
+        "observability": get_observability_summary(db),
     }
 
 
@@ -2222,6 +3019,167 @@ def admin_get_agent(
         return {"error": f"Agent '{agent_id}' not found"}
 
     return agent
+
+
+@app.get("/admin/traces")
+def admin_get_traces(
+    limit: int = Query(default=80, ge=1, le=300),
+    trace_type: Optional[str] = Query(default=None),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    user_id: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    return build_admin_traces(
+        db,
+        limit=limit,
+        trace_type=trace_type,
+        status_filter=status_filter,
+        user_id=user_id,
+    )
+
+
+@app.get("/admin/data-registry")
+def admin_data_registry(
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    return build_admin_data_registry(db)
+
+
+@app.get("/admin/model-registry")
+def admin_model_registry(
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    return build_admin_model_registry(db)
+
+
+@app.get("/admin/students")
+def admin_students(
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    return build_admin_students(db, limit=limit)
+
+
+@app.get("/admin/system-health")
+def admin_system_health(
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    return build_admin_system_health(db)
+
+
+@app.get("/admin/audit-logs")
+def admin_audit_logs(
+    limit: int = Query(default=80, ge=1, le=300),
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    rows = (
+        db.query(AdminAuditLog)
+        .order_by(AdminAuditLog.created_at.desc(), AdminAuditLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "logs": [
+            {
+                "id": row.id,
+                "created_at": _admin_iso(row.created_at),
+                "actor_uid": row.actor_uid or "",
+                "actor_email": row.actor_email or "",
+                "admin_uid": row.actor_uid or "",
+                "admin_email": row.actor_email or "",
+                "action": row.action or "",
+                "target_type": row.target_type or "",
+                "target_id": row.target_id or "",
+                "status": row.status or "",
+                "metadata": row.metadata_json or {},
+            }
+            for row in rows
+        ],
+    }
+
+
+@app.post("/admin/action")
+def admin_action(
+    request: AdminActionRequest,
+    db: Session = Depends(get_db),
+    current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    normalized_action = normalize_topic(request.action)
+    if normalized_action in CONFIRMED_ADMIN_ACTIONS and not request.confirmed:
+        record_admin_audit(
+            db,
+            current_admin,
+            action=normalized_action,
+            target_type=request.target_type,
+            target_id=request.target_id,
+            status_value="blocked_confirmation_required",
+            metadata={"payload": request.payload},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Confirmation is required for this admin action.",
+        )
+
+    if normalized_action == "export_data_report":
+        record_admin_audit(
+            db,
+            current_admin,
+            action=normalized_action,
+            target_type=request.target_type,
+            target_id=request.target_id,
+            status_value="success",
+            metadata={"payload": request.payload},
+        )
+        return {
+            "status": "success",
+            "message": "Data report generated from current backend state.",
+            "report": {
+                "overview": build_admin_overview(db),
+                "data_registry": build_admin_data_registry(db),
+                "model_registry": build_admin_model_registry(db),
+                "system_health": build_admin_system_health(db),
+            },
+        }
+
+    if normalized_action == "clear_temp_cache":
+        record_admin_audit(
+            db,
+            current_admin,
+            action=normalized_action,
+            target_type=request.target_type or "backend",
+            target_id=request.target_id,
+            status_value="success",
+            metadata={"payload": request.payload, "note": "No durable study/user data was deleted."},
+        )
+        return {
+            "status": "success",
+            "message": "Temporary cache clear recorded. No durable study/user data was deleted.",
+        }
+
+    status_value = "unsupported"
+    record_admin_audit(
+        db,
+        current_admin,
+        action=normalized_action,
+        target_type=request.target_type,
+        target_id=request.target_id,
+        status_value=status_value,
+        metadata={
+            "payload": request.payload,
+            "todo": "Backend workflow not implemented yet; action intentionally not executed.",
+        },
+    )
+    return {
+        "status": status_value,
+        "message": "This action is not wired to a safe backend workflow yet.",
+        "todo": "Implement the backend worker or service connector before enabling execution.",
+    }
 
 
 @app.get("/admin/events")
@@ -2304,10 +3262,11 @@ def admin_send_command(
     _record_admin_audit(
         db,
         current_admin=current_admin,
-        action="agent_command",
+        action=f"agent_{request.command}",
         target_type="agent",
         target_id=request.agent_id,
-        metadata={"command": request.command},
+        status_value="success" if result.get("success") else "failed",
+        metadata={"payload": request.payload, "result": result},
         request=http_request,
     )
     return result
@@ -2323,6 +3282,15 @@ def admin_send_message(
     db: Session = Depends(get_db),
     current_admin: Dict[str, Any] = Depends(require_admin),
 ):
+    record_admin_audit(
+        db,
+        current_admin,
+        action="agent_message",
+        target_type="agent",
+        target_id=request.agent_id,
+        status_value="requested",
+        metadata={"mode": request.mode or "study", "session_id": request.session_id},
+    )
     if request.mode == "casual":
         agent_stats = event_bus.get_agent(request.agent_id) or {}
         recent_events = event_bus.get_recent_events(
