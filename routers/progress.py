@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.security import (
@@ -182,27 +182,36 @@ def save_test(
 @router.get("/sessions/{user_id}")
 def get_sessions(
     user_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
     require_same_user_or_admin(user_id, current_user)
 
+    base = db.query(TestHistory).filter(TestHistory.user_id == user_id)
+    total = base.count()
     tests = (
-        db.query(TestHistory)
-        .filter(TestHistory.user_id == user_id)
-        .order_by(TestHistory.id.desc())
+        base.order_by(TestHistory.id.desc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
 
     return {
         "user_id": user_id,
         "sessions": [format_test_session(test) for test in tests],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
     }
 
 
 @router.get("/test-history/{user_id}", response_model=List[TestHistoryResponse])
 def get_test_history(
     user_id: str,
+    limit: int = Query(default=500, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
@@ -212,6 +221,8 @@ def get_test_history(
         db.query(TestHistory)
         .filter(TestHistory.user_id == user_id)
         .order_by(TestHistory.date.asc(), TestHistory.id.asc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
 
