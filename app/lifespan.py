@@ -69,8 +69,15 @@ def _load_knowledge_graph() -> None:
 @asynccontextmanager
 async def lifespan(app):
     # ── startup ──────────────────────────────────────────────────────────
-    Base.metadata.create_all(bind=engine)
-    _ensure_session_telemetry_columns()
+    # In production Alembic is the single schema authority (run `alembic
+    # upgrade head` on deploy); create_all is a dev/test convenience only.
+    app_env = (os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or os.getenv("ENV") or "").lower()
+    default_auto = "false" if app_env in {"prod", "production", "staging"} else "true"
+    if os.getenv("AUTO_CREATE_TABLES", default_auto).strip().lower() in {"1", "true", "yes", "on"}:
+        Base.metadata.create_all(bind=engine)
+        _ensure_session_telemetry_columns()
+    else:
+        logger.info("AUTO_CREATE_TABLES disabled; relying on Alembic migrations.")
     event_bus.set_sink(persist_event_from_bus)
     security.initialize_firebase_admin()
     _load_knowledge_graph()
