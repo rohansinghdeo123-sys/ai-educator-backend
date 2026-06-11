@@ -68,6 +68,11 @@ class ContentGenerateConceptsRequest(BaseModel):
     run_in_background: bool = True
 
 
+class ContentEmbedRequest(BaseModel):
+    chapter_id: Optional[int] = Field(default=None, ge=1)
+    run_in_background: bool = True
+
+
 class AdminAuditRequest(BaseModel):
     action: str = Field(min_length=2, max_length=120)
     target_type: str = Field(default="console", max_length=80)

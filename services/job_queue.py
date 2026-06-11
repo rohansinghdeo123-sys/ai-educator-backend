@@ -210,6 +210,17 @@ def _handle_generate_concepts(db: Session, job: ContentIngestionJob) -> Dict[str
     return {"chapter": serialize_chapter(chapter)}
 
 
+def _handle_embed_chunks(db: Session, job: ContentIngestionJob) -> Dict[str, Any]:
+    from Logic.content_pipeline import embed_missing_chunks
+
+    request = (job.summary or {}).get("request") or {}
+    chapter_id = request.get("chapter_id")
+    result = embed_missing_chunks(db, chapter_id=int(chapter_id) if chapter_id else None)
+    db.commit()
+    return {"embedding": result}
+
+
 job_queue = DbJobQueue()
 job_queue.register("ingest_folder", _handle_ingest_folder)
 job_queue.register("generate_concepts", _handle_generate_concepts)
+job_queue.register("embed_chunks", _handle_embed_chunks)

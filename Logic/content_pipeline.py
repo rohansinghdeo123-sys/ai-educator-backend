@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import uuid
 from datetime import datetime
@@ -19,6 +20,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
+from Logic import embeddings as embeddings_service
 from models import (
     ContentChapter,
     ContentChunk,
@@ -408,9 +410,29 @@ def ingest_pdf_file(
     db.flush()
 
     chunks = chunk_pages(pages)
+    chunk_vectors: List[Optional[List[float]]] = [None] * len(chunks)
+    if chunks and embeddings_service.embeddings_enabled():
+        try:
+            chunk_vectors = embeddings_service.embed_texts([chunk["text"] for chunk in chunks])
+        except Exception:
+            logger.exception(
+                "Chunk embedding failed during ingest; storing chunks without embeddings | chapter=%s",
+                chapter.slug,
+            )
+            chunk_vectors = [None] * len(chunks)
     for index, chunk in enumerate(chunks, start=1):
         chunk_id = f"{chapter.slug}_chunk_{index:04d}"
         chunk["chunk_id"] = chunk_id
+        vector = chunk_vectors[index - 1]
+        metadata = {
+            "board": chapter.board,
+            "class": chapter.class_level,
+            "subject": chapter.subject,
+            "chapter": chapter.chapter_name,
+            "source": "pdf",
+        }
+        if vector:
+            metadata["embedding_model"] = embeddings_service.embedding_model()
         db.add(
             ContentChunk(
                 chapter_id=chapter.id,
@@ -421,13 +443,8 @@ def ingest_pdf_file(
                 section_title=chunk["section_title"],
                 token_estimate=chunk["token_estimate"],
                 lexical_terms=chunk["lexical_terms"],
-                metadata_json={
-                    "board": chapter.board,
-                    "class": chapter.class_level,
-                    "subject": chapter.subject,
-                    "chapter": chapter.chapter_name,
-                    "source": "pdf",
-                },
+                embedding=vector,
+                metadata_json=metadata,
             )
         )
 
@@ -674,6 +691,34 @@ def publish_chapter(db: Session, chapter_id: int, *, published_by: str = "") -> 
     return chapter
 
 
+def embed_missing_chunks(db: Session, *, chapter_id: Optional[int] = None) -> Dict[str, Any]:
+    """Backfill embeddings for chunks ingested before embeddings were configured."""
+    query = db.query(ContentChunk).filter(ContentChunk.embedding.is_(None))
+    if chapter_id is not None:
+        query = query.filter(ContentChunk.chapter_id == chapter_id)
+    rows = query.order_by(ContentChunk.id).all()
+
+    if not embeddings_service.embeddings_enabled():
+        return {
+            "enabled": False,
+            "embedded": 0,
+            "missing": len(rows),
+            "message": "Embeddings are not configured. Set EMBEDDINGS_API_KEY (or OPENAI_API_KEY).",
+        }
+    if not rows:
+        return {"enabled": True, "embedded": 0, "missing": 0, "model": embeddings_service.embedding_model()}
+
+    vectors = embeddings_service.embed_texts([row.text or " " for row in rows])
+    model_name = embeddings_service.embedding_model()
+    for row, vector in zip(rows, vectors):
+        row.embedding = vector
+        metadata = dict(row.metadata_json or {})
+        metadata["embedding_model"] = model_name
+        row.metadata_json = metadata
+    db.flush()
+    return {"enabled": True, "embedded": len(rows), "missing": 0, "model": model_name}
+
+
 def serialize_chapter(chapter: ContentChapter) -> Dict[str, Any]:
     return {
         "id": chapter.id,
@@ -775,6 +820,16 @@ def _score_text(text: str, terms: Sequence[str]) -> int:
     return sum(normalized.count(term) for term in terms)
 
 
+def _min_semantic_similarity() -> float:
+    try:
+        return float(os.getenv("EMBEDDINGS_MIN_SIMILARITY", "0.25"))
+    except ValueError:
+        return 0.25
+
+
+_RRF_K = 60.0
+
+
 def search_approved_content(
     section_id: str,
     question: str,
@@ -783,6 +838,15 @@ def search_approved_content(
     max_chars: int = 5000,
     limit: int = 6,
 ) -> Dict[str, Any]:
+    """Hybrid retrieval over approved content.
+
+    Candidates are ranked lexically (term frequency, as before) and — when an
+    embedding provider is configured and chunks carry embeddings — semantically
+    by cosine similarity to the question. The two rankings are fused with
+    reciprocal rank fusion, so semantically-phrased questions match material
+    they share no keywords with, while exact-term matches keep their edge.
+    Without embeddings the behavior is identical to the old lexical search.
+    """
     terms = content_terms(f"{section_id} {question}")
     if not terms:
         terms = content_terms(section_id)
@@ -800,7 +864,10 @@ def search_approved_content(
         chunk_rows = db.query(ContentChunk).filter(ContentChunk.chapter_id.in_(chapter_ids)).all()
         chapter_by_id = {chapter.id: chapter for chapter in chapters}
 
-        scored: List[Tuple[int, str, Dict[str, Any]]] = []
+        query_vector = embeddings_service.embed_query(question or section_id)
+        min_similarity = _min_semantic_similarity()
+
+        candidates: Dict[Tuple[str, int], Dict[str, Any]] = {}
         for concept in concept_rows:
             text = "\n".join(
                 [
@@ -812,47 +879,70 @@ def search_approved_content(
                     " ".join(map(str, concept.formulas or [])),
                 ]
             )
-            score = _score_text(text, terms)
-            if score:
-                chapter = chapter_by_id.get(concept.chapter_id)
-                scored.append(
-                    (
-                        score + 3,
-                        "concept",
-                        {
-                            "chapter": chapter,
-                            "title": concept.title,
-                            "text": text,
-                            "pages": concept.source_pages or [],
-                            "section_id": concept.concept_id,
-                        },
-                    )
-                )
+            lexical = _score_text(text, terms)
+            if lexical:
+                candidates[("concept", concept.id)] = {
+                    "lexical": lexical + 3,
+                    "semantic": 0.0,
+                    "type": "concept",
+                    "payload": {
+                        "chapter": chapter_by_id.get(concept.chapter_id),
+                        "title": concept.title,
+                        "text": text,
+                        "pages": concept.source_pages or [],
+                        "section_id": concept.concept_id,
+                    },
+                }
         for chunk in chunk_rows:
             chunk_terms = set(chunk.lexical_terms or [])
-            score = len(chunk_terms.intersection(terms)) * 2 + _score_text(chunk.text or "", terms)
-            if score:
-                chapter = chapter_by_id.get(chunk.chapter_id)
-                scored.append(
-                    (
-                        score,
-                        "chunk",
-                        {
-                            "chapter": chapter,
-                            "title": chunk.section_title or f"Pages {chunk.page_start}-{chunk.page_end}",
-                            "text": chunk.text,
-                            "pages": [page for page in (chunk.page_start, chunk.page_end) if page],
-                            "section_id": chunk.chunk_id,
-                        },
-                    )
-                )
-        scored.sort(key=lambda item: item[0], reverse=True)
+            lexical = len(chunk_terms.intersection(terms)) * 2 + _score_text(chunk.text or "", terms)
+            semantic = 0.0
+            if query_vector is not None and chunk.embedding:
+                semantic = embeddings_service.similarity(query_vector, chunk.embedding)
+                if semantic < min_similarity:
+                    semantic = 0.0
+            if lexical or semantic:
+                candidates[("chunk", chunk.id)] = {
+                    "lexical": lexical,
+                    "semantic": semantic,
+                    "type": "chunk",
+                    "payload": {
+                        "chapter": chapter_by_id.get(chunk.chapter_id),
+                        "title": chunk.section_title or f"Pages {chunk.page_start}-{chunk.page_end}",
+                        "text": chunk.text,
+                        "pages": [page for page in (chunk.page_start, chunk.page_end) if page],
+                        "section_id": chunk.chunk_id,
+                    },
+                }
+
+        lexical_ranking = [
+            key
+            for key, candidate in sorted(
+                candidates.items(), key=lambda item: (-item[1]["lexical"], item[0])
+            )
+            if candidate["lexical"] > 0
+        ]
+        semantic_ranking = [
+            key
+            for key, candidate in sorted(
+                candidates.items(), key=lambda item: (-item[1]["semantic"], item[0])
+            )
+            if candidate["semantic"] > 0
+        ]
+
+        fused: Dict[Tuple[str, int], float] = {}
+        for ranking in (lexical_ranking, semantic_ranking):
+            for rank, key in enumerate(ranking, start=1):
+                fused[key] = fused.get(key, 0.0) + 1.0 / (_RRF_K + rank)
+        ordered_keys = sorted(fused, key=lambda key: (-fused[key], key))
 
         blocks: List[str] = []
         used_pages: List[int] = []
         used_sections: List[str] = []
         total_chars = 0
-        for _, source_type, payload in scored[: limit * 2]:
+        for key in ordered_keys[: limit * 2]:
+            candidate = candidates[key]
+            payload = candidate["payload"]
             chapter = payload["chapter"]
             if chapter is None:
                 continue
@@ -860,7 +950,7 @@ def search_approved_content(
             header = (
                 f"## {payload['title']}\n"
                 f"Source: {chapter.board} Class {chapter.class_level} {chapter.subject}, "
-                f"{chapter.chapter_name}, page(s): {page_label}, type: {source_type}\n"
+                f"{chapter.chapter_name}, page(s): {page_label}, type: {candidate['type']}\n"
             )
             block = f"{header}{payload['text']}".strip()
             if total_chars + len(block) > max_chars:
@@ -883,6 +973,8 @@ def search_approved_content(
             "source": "approved_content_pipeline",
             "source_pages": sorted(set(used_pages)),
             "matched_sections": used_sections,
+            "retrieval_mode": "hybrid" if query_vector is not None else "lexical",
+            "semantic_matches": len(semantic_ranking),
         }
     finally:
         db.close()

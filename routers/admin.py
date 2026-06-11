@@ -15,6 +15,7 @@ from app.request_models import (
     AgentCommandRequest,
     AgentMessageRequest,
     ContentConceptImportRequest,
+    ContentEmbedRequest,
     ContentGenerateConceptsRequest,
     ContentIngestFolderRequest,
 )
@@ -28,6 +29,7 @@ from Logic.content_pipeline import (
     RAW_NCERT_DIR,
     approve_chapter,
     chapter_report,
+    embed_missing_chunks,
     generate_concepts_for_chapter,
     import_concepts_for_chapter,
     ingest_pdf_folder,
@@ -303,6 +305,48 @@ def admin_content_generate_json(
         db.rollback()
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (ValueError, json.JSONDecodeError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/admin/content/embed")
+def admin_content_embed(
+    payload: ContentEmbedRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Backfill embeddings for chunks ingested before embeddings were configured."""
+    try:
+        if payload.run_in_background:
+            job = job_queue.submit(
+                db,
+                job_type="embed_chunks",
+                source_path=f"chapter:{payload.chapter_id}" if payload.chapter_id else "all_chapters",
+                payload={"chapter_id": payload.chapter_id},
+            )
+            result: Dict[str, Any] = {
+                "job": serialize_job(job),
+                "queued": True,
+                "poll": f"/admin/content/jobs/{job.job_id}",
+            }
+        else:
+            result = embed_missing_chunks(db, chapter_id=payload.chapter_id)
+            db.commit()
+        record_admin_audit(
+            db,
+            current_admin=current_admin,
+            action="content_embed_chunks",
+            target_type="chapter" if payload.chapter_id else "content_folder",
+            target_id=str(payload.chapter_id or "all"),
+            metadata={"run_in_background": payload.run_in_background},
+            request=request,
+        )
+        return result
+    except RuntimeError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
