@@ -1,0 +1,341 @@
+"""Personal AI Coach API: bootstrap, chat (sync + SSE), conversations, cycles."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
+
+from app.request_models import CoachConversationPatch
+from app.security import (
+    enforce_user_quota,
+    is_backend_admin,
+    require_same_user_or_admin,
+    session_id_belongs_to_user,
+    verify_firebase_user,
+)
+from app.serializers import (
+    apply_conversation_patch,
+    group_conversation_rows,
+    interaction_session_id,
+    serialize_coach_conversation,
+    serialize_coach_memory,
+    serialize_coach_profile,
+    serialize_daily_signal,
+    session_id_from_conversation_id,
+)
+from database import get_db
+from Logic.agents.coach_agent import (
+    coach_agent,
+    coach_agent_stream,
+    get_or_create_coach,
+    run_daily_learning_cycle,
+)
+from Logic.analytics_engine import get_user_analytics
+from Logic.autonomous_study_loop import run_autonomous_study_loop
+from models import AICoachDailySignal, AICoachMemory
+from schemas import (
+    AutonomousStudyRequest,
+    AutonomousStudyResponse,
+    CoachBootstrapRequest,
+    CoachChatRequest,
+    CoachDailySignalResponse,
+    CoachDashboardResponse,
+    CoachMemoryResponse,
+    CoachProfileResponse,
+)
+from services.coach_service import conversation_rows_for_user
+
+router = APIRouter(tags=["coach"])
+
+
+class CoachTurnRequest:
+    """Adapter exposing a CoachChatRequest as the attribute bag the agent expects."""
+
+    def __init__(self, payload: CoachChatRequest):
+        self.user_id = payload.user_id
+        self.question = (payload.original_message or payload.message).strip()
+        self.raw_message = payload.message
+        self.original_message = payload.original_message
+        self.grounding_context_prompt = payload.grounding_context_prompt
+        self.section_id = payload.section_id or payload.topic or payload.subject or "general"
+        self.session_id = payload.session_id or f"coach-{payload.user_id}"
+        self.mode = "coach"
+        self.intent = payload.intent
+        self.difficulty = "medium"
+        self.subject = payload.subject
+        self.chapter = payload.chapter
+        self.topic = payload.topic
+        self.mentor_directive = payload.mentor_directive
+        self.system_guardrail = payload.system_guardrail
+        self.strict_grounding = payload.strict_grounding
+        self.retrieval_required = payload.retrieval_required
+        self.fallback_to_general_knowledge = payload.fallback_to_general_knowledge
+        self.required_not_found_response = payload.required_not_found_response
+        self.student_state = payload.student_state
+        self.adaptive_strategy = payload.adaptive_strategy
+        self.learning_context = payload.learning_context
+        self.attachments = [item.model_dump() for item in payload.attachments]
+        self.direct_answer = payload.direct_answer
+        self.socratic_mode = payload.socratic_mode
+
+
+@router.post("/coach/bootstrap", response_model=CoachProfileResponse)
+def coach_bootstrap(
+    payload: CoachBootstrapRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(payload.user_id, current_user)
+
+    coach = get_or_create_coach(
+        db=db,
+        user_id=payload.user_id,
+        student_display_name=payload.student_display_name,
+        preferred_subjects=payload.preferred_subjects,
+        target_exam=payload.target_exam,
+        target_exam_date=payload.target_exam_date,
+    )
+
+    return CoachProfileResponse(**serialize_coach_profile(coach))
+
+
+@router.get("/coach/conversations/{user_id}")
+def coach_conversations(
+    user_id: str,
+    include_archived: bool = Query(default=True),
+    limit: int = Query(default=40, ge=1, le=80),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+    coach = get_or_create_coach(db=db, user_id=user_id)
+    rows = conversation_rows_for_user(db, coach, user_id)
+    grouped = group_conversation_rows(rows)
+    conversations = [
+        serialize_coach_conversation(session_id, session_rows)
+        for session_id, session_rows in grouped.items()
+    ]
+    if not include_archived:
+        conversations = [item for item in conversations if not item.get("archived")]
+    conversations.sort(key=lambda item: (bool(item.get("pinned")), item.get("updatedAt") or ""), reverse=True)
+    return {
+        "user_id": user_id,
+        "conversations": conversations[:limit],
+    }
+
+
+@router.get("/coach/conversations/{user_id}/{conversation_id}")
+def coach_conversation_detail(
+    user_id: str,
+    conversation_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+    session_id = session_id_from_conversation_id(user_id, conversation_id)
+    if not is_backend_admin(current_user) and not session_id_belongs_to_user(session_id, user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed for this conversation")
+
+    coach = get_or_create_coach(db=db, user_id=user_id)
+    rows = [
+        row for row in conversation_rows_for_user(db, coach, user_id, limit=800)
+        if interaction_session_id(row) == session_id
+    ]
+    if not rows:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+
+    return {
+        "user_id": user_id,
+        "conversation": serialize_coach_conversation(session_id, rows),
+    }
+
+
+@router.patch("/coach/conversations/{user_id}/{conversation_id}")
+def update_coach_conversation(
+    user_id: str,
+    conversation_id: str,
+    patch: CoachConversationPatch,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+    session_id = session_id_from_conversation_id(user_id, conversation_id)
+    if not is_backend_admin(current_user) and not session_id_belongs_to_user(session_id, user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed for this conversation")
+
+    coach = get_or_create_coach(db=db, user_id=user_id)
+    rows = [
+        row for row in conversation_rows_for_user(db, coach, user_id, limit=800)
+        if interaction_session_id(row) == session_id
+    ]
+    if not rows:
+        return {
+            "user_id": user_id,
+            "conversation": None,
+            "status": "no_saved_messages",
+        }
+    for row in rows:
+        apply_conversation_patch(row, patch)
+    db.commit()
+    return {
+        "user_id": user_id,
+        "conversation": serialize_coach_conversation(session_id, rows),
+        "status": "updated",
+    }
+
+
+@router.delete("/coach/conversations/{user_id}/{conversation_id}")
+def delete_coach_conversation(
+    user_id: str,
+    conversation_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+    session_id = session_id_from_conversation_id(user_id, conversation_id)
+    if not is_backend_admin(current_user) and not session_id_belongs_to_user(session_id, user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed for this conversation")
+
+    coach = get_or_create_coach(db=db, user_id=user_id)
+    rows = [
+        row for row in conversation_rows_for_user(db, coach, user_id, limit=800)
+        if interaction_session_id(row) == session_id
+    ]
+    deleted = len(rows)
+    for row in rows:
+        db.delete(row)
+    db.commit()
+    return {
+        "user_id": user_id,
+        "session_id": session_id,
+        "deleted": deleted,
+        "status": "deleted",
+    }
+
+
+@router.get("/coach/{user_id}", response_model=CoachDashboardResponse)
+def coach_dashboard(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+
+    coach = get_or_create_coach(db=db, user_id=user_id)
+
+    memories = (
+        db.query(AICoachMemory)
+        .filter(AICoachMemory.coach_id == coach.coach_id)
+        .order_by(AICoachMemory.importance.desc(), AICoachMemory.updated_at.desc())
+        .limit(8)
+        .all()
+    )
+
+    daily_signal = (
+        db.query(AICoachDailySignal)
+        .filter(AICoachDailySignal.coach_id == coach.coach_id)
+        .order_by(AICoachDailySignal.id.desc())
+        .first()
+    )
+
+    try:
+        analytics_snapshot = get_user_analytics(db, user_id)
+    except Exception:
+        analytics_snapshot = {}
+
+    return CoachDashboardResponse(
+        profile=CoachProfileResponse(**serialize_coach_profile(coach)),
+        memories=[CoachMemoryResponse(**serialize_coach_memory(memory)) for memory in memories],
+        daily_signal=(
+            CoachDailySignalResponse(**serialize_daily_signal(daily_signal))
+            if daily_signal
+            else None
+        ),
+        analytics_snapshot=analytics_snapshot,
+    )
+
+
+@router.post("/coach/chat")
+def coach_chat(
+    payload: CoachChatRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(payload.user_id, current_user)
+    enforce_user_quota(payload.user_id, "coach")
+
+    result = coach_agent(CoachTurnRequest(payload), db=db)
+    return result
+
+
+@router.post("/coach/chat/stream")
+async def coach_chat_stream(
+    payload: CoachChatRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    """
+    Stream the coach's reply via Server-Sent Events (SSE).
+    The frontend will receive tokens one by one and display them
+    as they arrive, creating a real-time typing effect.
+    """
+    require_same_user_or_admin(payload.user_id, current_user)
+    enforce_user_quota(payload.user_id, "coach")
+
+    coach_request = CoachTurnRequest(payload)
+
+    def event_stream():
+        for token in coach_agent_stream(coach_request, db=db):
+            # coach_agent_stream already returns complete SSE frames.
+            yield token
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/coach/daily-learning/{user_id}", response_model=CoachDailySignalResponse)
+def coach_daily_learning(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+
+    signal = run_daily_learning_cycle(db=db, user_id=user_id)
+    return CoachDailySignalResponse(**serialize_daily_signal(signal))
+
+
+@router.post("/coach/autonomous-study/{user_id}", response_model=AutonomousStudyResponse)
+def coach_autonomous_study(
+    user_id: str,
+    payload: AutonomousStudyRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    require_same_user_or_admin(user_id, current_user)
+    enforce_user_quota(user_id, "coach")
+
+    mission = run_autonomous_study_loop(
+        db=db,
+        user_id=user_id,
+        current_topic=payload.current_topic,
+        current_chapter=payload.current_chapter,
+        subject=payload.subject,
+        current_knowledge=payload.current_knowledge,
+        learning_goal=payload.learning_goal,
+        available_minutes=payload.available_minutes,
+        exam_target=payload.exam_target,
+        preferred_style=payload.preferred_style,
+        prerequisite_confidence=payload.prerequisite_confidence,
+    )
+    return AutonomousStudyResponse(**mission)
