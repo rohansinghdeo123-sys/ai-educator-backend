@@ -1948,6 +1948,9 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
     recent_sessions = _build_recent_session_snapshot(_get_recent_sessions(db, user_id))
     memories = _get_recent_memories(db, coach.coach_id)
     recent_interactions = _get_recent_interactions(db, coach.coach_id, session_id=session_id)
+    # Release the read transaction's pooled connection before the (slow)
+    # profiler LLM call so long model latency never pins a DB connection.
+    db.commit()
     query_understanding = resolve_hybrid_query(
         question,
         declared_intent=intent,

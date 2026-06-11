@@ -26,7 +26,7 @@ from app.serializers import (
     serialize_daily_signal,
     session_id_from_conversation_id,
 )
-from database import get_db
+from database import SessionLocal, get_db
 from Logic.agents.coach_agent import (
     coach_agent,
     coach_agent_stream,
@@ -274,7 +274,6 @@ def coach_chat(
 @router.post("/coach/chat/stream")
 async def coach_chat_stream(
     payload: CoachChatRequest,
-    db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
     """
@@ -288,9 +287,20 @@ async def coach_chat_stream(
     coach_request = CoachTurnRequest(payload)
 
     def event_stream():
-        for token in coach_agent_stream(coach_request, db=db):
-            # coach_agent_stream already returns complete SSE frames.
-            yield token
+        # The generator owns its session: it is opened only once streaming
+        # starts and is guaranteed to close even if the client disconnects
+        # mid-stream, so long turns cannot pin request-scoped pool slots.
+        db = SessionLocal()
+        try:
+            for token in coach_agent_stream(coach_request, db=db):
+                # coach_agent_stream already returns complete SSE frames.
+                yield token
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
 
     return StreamingResponse(
         event_stream(),
