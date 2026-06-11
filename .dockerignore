@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+firebase-service-account.json
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+**/__pycache__/
+*.pyc
+.claude/
+tests/
+data/raw/ncert/**/*.pdf
+desktop.ini
+Dockerfile
+.dockerignore
+README.md
