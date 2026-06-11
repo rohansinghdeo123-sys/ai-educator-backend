@@ -137,3 +137,12 @@ def check_db_health() -> bool:
     except Exception as e:
         logger.error(f"DATABASE HEALTH CHECK FAILED: {e}")
         return False
+
+
+def get_db():
+    """FastAPI dependency yielding a request-scoped session."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
