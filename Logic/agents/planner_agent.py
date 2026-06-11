@@ -3,10 +3,13 @@
 import os
 import json
 import re
+import logging
 from groq import Groq
 from Logic.analytics_engine import get_user_analytics
-from Logic.knowledge_graph import knowledge_graph   # <-- NEW
+from Logic.knowledge_graph import knowledge_graph
 from Logic.agent_event_bus import event_bus
+
+logger = logging.getLogger(__name__)
 
 _groq_client = None
 
@@ -38,11 +41,14 @@ def planner_agent(request, db):
         concepts = knowledge_graph.search_by_keyword(topic_name, limit=3)
         for c in concepts:
             hint = f"- {c['title']} (importance: {c.get('importance_level', 'medium')}, weightage: {c.get('typical_exam_weightage', 'medium')})"
-            if c.get('prerequisites'):
-                hint += f" | Prerequisites: {', '.join(c['prerequisites'])}"
-            if c.get('common_mistakes'):
-                mistakes = [m['mistake'] for m in c['common_mistakes']]
-                hint += f" | Watch for: {', '.join(mistakes[:2])}"
+            prereqs = c.get('prerequisites')
+            if prereqs and isinstance(prereqs, (list, tuple)):
+                hint += f" | Prerequisites: {', '.join(prereqs)}"
+            mistakes_raw = c.get('common_mistakes')
+            if mistakes_raw and isinstance(mistakes_raw, list):
+                mistakes = [m.get('mistake', '') for m in mistakes_raw if isinstance(m, dict) and m.get('mistake')]
+                if mistakes:
+                    hint += f" | Watch for: {', '.join(mistakes[:2])}"
             concept_hints.append(hint)
 
     graph_context = ""
@@ -87,15 +93,19 @@ Return ONLY valid JSON. No markdown, no explanations.
         )
         raw_output = response.choices[0].message.content.strip()
 
-        # Robust JSON extraction
-        json_match = re.search(r'\{.*\}', raw_output, re.DOTALL)
-        if json_match:
-            plan_json = json.loads(json_match.group(0))
-        else:
+        # Extract first complete JSON object without greedy over-matching
+        try:
+            decoder = json.JSONDecoder()
+            start = raw_output.index('{')
+            plan_json, _ = decoder.raw_decode(raw_output, start)
+        except (ValueError, json.JSONDecodeError):
             plan_json = json.loads(raw_output)
 
+        if not isinstance(plan_json, dict) or not isinstance(plan_json.get("steps"), list):
+            raise ValueError(f"LLM returned unexpected structure: {plan_json}")
+
     except Exception as e:
-        # Fallback if model fails
+        logger.error("planner_agent failed for user %s: %s", user_id, e, exc_info=True)
         default_topic = weak_topics[0] if weak_topics else "basics"
         plan_json = {
             "steps": [
