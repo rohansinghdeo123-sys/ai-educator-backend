@@ -30,7 +30,15 @@ from Logic.knowledge_graph import knowledge_graph   # <-- NEW
 
 logger = logging.getLogger("ai_educator.agents.revision")
 
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+_groq_client = None
+
+
+def _get_groq_client() -> Groq:
+    """Lazy client so importing this module never requires GROQ_API_KEY."""
+    global _groq_client
+    if _groq_client is None:
+        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    return _groq_client
 MODEL_NAME = os.getenv(
     "GROQ_REVISION_MODEL",
     os.getenv("GROQ_FAST_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
@@ -179,7 +187,7 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
     messages = [{"role": "user", "content": system_prompt}]
 
     try:
-        response = groq_client.chat.completions.create(
+        response = _get_groq_client().chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
             temperature=config["temp"],
@@ -250,7 +258,7 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
                 retry_context += "\n\n--- STRUCTURED KNOWLEDGE ---\n" + concept_data
             retry_prompt = student_instructions + "\n\n" + config["prompt"].format(context=retry_context)
             try:
-                retry_response = groq_client.chat.completions.create(
+                retry_response = _get_groq_client().chat.completions.create(
                     model=MODEL_NAME,
                     messages=[{"role": "user", "content": retry_prompt}],
                     temperature=config["temp"],

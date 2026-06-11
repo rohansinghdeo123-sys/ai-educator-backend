@@ -27,7 +27,15 @@ from prompts.agent_prompts import EXAM_MCQ_PROMPT, EXAM_PROBABLE_PROMPT
 
 logger = logging.getLogger("ai_educator.agents.exam")
 
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+_groq_client = None
+
+
+def _get_groq_client() -> Groq:
+    """Lazy client so importing this module never requires GROQ_API_KEY."""
+    global _groq_client
+    if _groq_client is None:
+        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    return _groq_client
 MODEL_NAME = os.getenv("GROQ_EXAM_MODEL", os.getenv("GROQ_TUTOR_MODEL", "openai/gpt-oss-120b"))
 
 
@@ -352,7 +360,7 @@ def probable_to_text(questions: List[Dict[str, Any]]) -> str:
 
 
 def call_groq(prompt: str, temperature: float, max_tokens: int) -> str:
-    response = groq_client.chat.completions.create(
+    response = _get_groq_client().chat.completions.create(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": prompt}],
         temperature=temperature,

@@ -26,7 +26,15 @@ from Logic.knowledge_graph import knowledge_graph   # <-- NEW import
 
 logger = logging.getLogger("ai_educator.agents.tutor")
 
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+_groq_client = None
+
+
+def _get_groq_client() -> Groq:
+    """Lazy client so importing this module never requires GROQ_API_KEY."""
+    global _groq_client
+    if _groq_client is None:
+        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    return _groq_client
 MODEL_NAME = os.getenv("GROQ_TUTOR_MODEL", "openai/gpt-oss-120b")
 
 # In-memory session store
@@ -206,7 +214,7 @@ def tutor_agent(request) -> dict:
     }, session_id=session_id)
 
     try:
-        response = groq_client.chat.completions.create(
+        response = _get_groq_client().chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
             temperature=0.25,
@@ -276,7 +284,7 @@ def tutor_agent(request) -> dict:
                 {"role": "user", "content": question},
             ]
             try:
-                retry_response = groq_client.chat.completions.create(
+                retry_response = _get_groq_client().chat.completions.create(
                     model=MODEL_NAME,
                     messages=retry_messages,
                     temperature=0.2,

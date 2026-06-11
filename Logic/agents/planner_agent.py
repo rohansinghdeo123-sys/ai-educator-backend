@@ -8,7 +8,15 @@ from Logic.analytics_engine import get_user_analytics
 from Logic.knowledge_graph import knowledge_graph   # <-- NEW
 from Logic.agent_event_bus import event_bus
 
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+_groq_client = None
+
+
+def _get_groq_client() -> Groq:
+    """Lazy client so importing this module never requires GROQ_API_KEY."""
+    global _groq_client
+    if _groq_client is None:
+        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    return _groq_client
 PLANNER_MODEL = os.getenv(
     "GROQ_PLANNER_MODEL",
     os.getenv("GROQ_FAST_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
@@ -71,7 +79,7 @@ Return ONLY valid JSON. No markdown, no explanations.
 """
 
     try:
-        response = groq_client.chat.completions.create(
+        response = _get_groq_client().chat.completions.create(
             model=PLANNER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,

@@ -3,9 +3,15 @@
 import os
 from groq import Groq
 
-groq_client = Groq(
-    api_key=os.getenv("GROQ_API_KEY")
-)
+_groq_client = None
+
+
+def _get_groq_client() -> Groq:
+    """Lazy client so importing this module never requires GROQ_API_KEY."""
+    global _groq_client
+    if _groq_client is None:
+        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    return _groq_client
 
 MCQ_FEEDBACK_MODEL = os.getenv(
     "GROQ_FEEDBACK_MODEL",
@@ -57,7 +63,7 @@ STUDENT ANSWER:
 FINAL FEEDBACK:
 """
 
-    response = groq_client.chat.completions.create(
+    response = _get_groq_client().chat.completions.create(
         model=MCQ_FEEDBACK_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
