@@ -10,13 +10,6 @@ pydantic==2.12.5
 pydantic-settings==2.13.1
 starlette==0.52.1
 httpx==0.28.1
-langchain==1.2.15
-langchain-classic==1.0.3
-langchain-community==0.4.1
-langchain-core==1.2.27
-langchain-groq==1.1.2
-langchain-text-splitters==1.1.1
-langsmith==0.7.26
 tenacity==9.1.4
 PyYAML==6.0.3
 requests==2.33.1
@@ -24,7 +17,6 @@ urllib3==2.6.3
 certifi==2026.2.25
 idna==3.11
 cryptography==48.0.0
-marshmallow==3.26.2
 six==1.17.0
 python-dateutil==2.9.0.post0
 pg8000
