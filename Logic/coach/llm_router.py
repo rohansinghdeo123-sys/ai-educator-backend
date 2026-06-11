@@ -14,6 +14,7 @@ from typing import Any, Dict, Iterable, Iterator, List
 from groq import Groq
 import requests
 from sqlalchemy import func
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 
 from .costing import estimate_messages_tokens, estimate_model_cost_usd, estimate_text_tokens
 from .settings import coach_settings
@@ -240,6 +241,21 @@ class LLMRouter:
                 if delta:
                     yield self._chunk_namespace(delta)
 
+    @staticmethod
+    def _is_transient_error(exc: BaseException) -> bool:
+        status = getattr(exc, "status_code", None) or getattr(
+            getattr(exc, "response", None), "status_code", None
+        )
+        return status in {429, 500, 502, 503, 504} or isinstance(
+            exc, (requests.Timeout, requests.ConnectionError)
+        )
+
+    @retry(
+        retry=retry_if_exception(_is_transient_error.__func__),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(initial=0.5, max=4.0),
+        reraise=True,
+    )
     def _create_completion(
         self,
         *,

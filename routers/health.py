@@ -20,17 +20,23 @@ def liveness_probe():
 
 @router.get("/health/ready")
 def readiness_probe():
+    import os
+
     db_ready = check_db_health()
     firebase_ready = bool(security.firebase_ready())
+    llm_ready = bool(
+        os.getenv("GROQ_API_KEY") or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+    )
     knowledge_ready = bool(knowledge_graph.list_chapters())
     artifact_ready = bool(available_artifact_sections())
-    ready = db_ready and firebase_ready
+    ready = db_ready and firebase_ready and llm_ready
     return JSONResponse(
         status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,
         content={
             "status": "ready" if ready else "degraded",
             "database": db_ready,
             "firebase": firebase_ready,
+            "llm": llm_ready,
             "knowledge_graph": knowledge_ready,
             "artifacts": artifact_ready,
             "version": "2.5.0-production-guardrails",
