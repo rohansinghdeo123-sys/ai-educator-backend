@@ -203,6 +203,20 @@ def persist_coach_trace(
         )
 
     db.commit()
+
+    # Mirror the completed turn into OpenTelemetry (no-op unless configured).
+    try:
+        from app.telemetry import emit_coach_turn_trace
+
+        emit_coach_turn_trace(
+            user_id=user_id,
+            session_id=session_id,
+            turn_id=turn_id,
+            observability=observability,
+        )
+    except Exception as exc:
+        logger.warning("Telemetry mirror skipped: %s", exc)
+
     return {
         "model_calls": len(model_calls),
         "tool_calls": len(tools),

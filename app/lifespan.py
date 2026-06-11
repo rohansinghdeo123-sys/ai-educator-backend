@@ -15,6 +15,7 @@ from sqlalchemy import inspect, text
 
 import models  # noqa: F401  (ensures all tables are registered on Base.metadata)
 from app import security
+from app.telemetry import init_telemetry, shutdown_telemetry
 from database import Base, engine
 from Logic.agent_event_bus import event_bus
 from Logic.knowledge_graph import knowledge_graph
@@ -73,8 +74,10 @@ async def lifespan(app):
     event_bus.set_sink(persist_event_from_bus)
     security.initialize_firebase_admin()
     _load_knowledge_graph()
+    init_telemetry()
 
     yield
 
     # ── shutdown ─────────────────────────────────────────────────────────
+    shutdown_telemetry()
     engine.dispose()
