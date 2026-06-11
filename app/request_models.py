@@ -54,6 +54,7 @@ class AgentMessageRequest(BaseModel):
 class ContentIngestFolderRequest(BaseModel):
     root_path: Optional[str] = Field(default=None, max_length=600)
     replace_existing_extraction: bool = True
+    run_in_background: bool = True
 
 
 class ContentConceptImportRequest(BaseModel):
@@ -64,6 +65,7 @@ class ContentConceptImportRequest(BaseModel):
 class ContentGenerateConceptsRequest(BaseModel):
     replace_existing: bool = True
     max_batch_chars: int = Field(default=9000, ge=2500, le=16000)
+    run_in_background: bool = True
 
 
 class AdminAuditRequest(BaseModel):

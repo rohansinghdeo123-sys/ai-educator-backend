@@ -76,8 +76,13 @@ async def lifespan(app):
     _load_knowledge_graph()
     init_telemetry()
 
+    from services.job_queue import job_queue
+
+    job_queue.start()
+
     yield
 
     # ── shutdown ─────────────────────────────────────────────────────────
+    job_queue.stop()
     shutdown_telemetry()
     engine.dispose()

@@ -443,10 +443,16 @@ def ingest_pdf_file(
     return chapter
 
 
-def ingest_pdf_folder(db: Session, root_path: Optional[str] = None, *, replace: bool = True) -> Dict[str, Any]:
+def run_ingest_folder_job(
+    db: Session,
+    job: ContentIngestionJob,
+    *,
+    root_path: Optional[str] = None,
+    replace: bool = True,
+) -> Dict[str, Any]:
+    """Execute folder ingestion against an existing job row (sync or worker)."""
     root = safe_data_path(root_path)
     root.mkdir(parents=True, exist_ok=True)
-    job = create_job(db, job_type="ingest_folder", source_path=str(root))
     chapters: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
     try:
@@ -459,7 +465,13 @@ def ingest_pdf_folder(db: Session, root_path: Optional[str] = None, *, replace: 
                 logger.exception("Content ingestion failed for %s", pdf_path)
                 errors.append({"path": str(pdf_path), "error": str(exc)})
         job.status = "completed" if not errors else "needs_review"
-        job.summary = {"root": str(root), "pdf_count": len(pdfs), "chapters": len(chapters), "errors": errors}
+        job.summary = {
+            **(job.summary or {}),
+            "root": str(root),
+            "pdf_count": len(pdfs),
+            "chapters": len(chapters),
+            "errors": errors,
+        }
         db.commit()
         return {"job": serialize_job(job), "chapters": chapters, "errors": errors}
     except Exception as exc:
@@ -467,6 +479,13 @@ def ingest_pdf_folder(db: Session, root_path: Optional[str] = None, *, replace: 
         job.error = str(exc)
         db.commit()
         raise
+
+
+def ingest_pdf_folder(db: Session, root_path: Optional[str] = None, *, replace: bool = True) -> Dict[str, Any]:
+    root = safe_data_path(root_path)
+    root.mkdir(parents=True, exist_ok=True)
+    job = create_job(db, job_type="ingest_folder", source_path=str(root))
+    return run_ingest_folder_job(db, job, root_path=root_path, replace=replace)
 
 
 def import_concepts_for_chapter(

@@ -34,6 +34,7 @@ from Logic.content_pipeline import (
     list_chapters as list_content_chapters,
     publish_chapter,
     serialize_chapter,
+    serialize_job,
 )
 from Logic.observability_store import (
     get_latest_observability_version,
@@ -41,7 +42,8 @@ from Logic.observability_store import (
     get_observability_summary,
     get_recent_observability_events,
 )
-from models import AdminAuditLog
+from models import AdminAuditLog, ContentIngestionJob
+from services.job_queue import job_queue
 from services.admin_intelligence import (
     CONFIRMED_ADMIN_ACTIONS,
     _admin_float,
@@ -145,18 +147,39 @@ def admin_content_ingest_folder(
     current_admin: Dict[str, Any] = Depends(require_admin),
 ):
     try:
-        result = ingest_pdf_folder(
-            db,
-            root_path=payload.root_path,
-            replace=payload.replace_existing_extraction,
-        )
+        if payload.run_in_background:
+            job = job_queue.submit(
+                db,
+                job_type="ingest_folder",
+                source_path=payload.root_path or str(RAW_NCERT_DIR),
+                payload={
+                    "root_path": payload.root_path,
+                    "replace_existing_extraction": payload.replace_existing_extraction,
+                },
+            )
+            result: Dict[str, Any] = {
+                "job": serialize_job(job),
+                "chapters": [],
+                "errors": [],
+                "queued": True,
+                "poll": f"/admin/content/jobs/{job.job_id}",
+            }
+        else:
+            result = ingest_pdf_folder(
+                db,
+                root_path=payload.root_path,
+                replace=payload.replace_existing_extraction,
+            )
         record_admin_audit(
             db,
             current_admin=current_admin,
             action="content_ingest_folder",
             target_type="content_folder",
             target_id=payload.root_path or str(RAW_NCERT_DIR),
-            metadata={"replace_existing_extraction": payload.replace_existing_extraction},
+            metadata={
+                "replace_existing_extraction": payload.replace_existing_extraction,
+                "run_in_background": payload.run_in_background,
+            },
             request=request,
         )
         return result
@@ -227,29 +250,76 @@ def admin_content_generate_json(
     current_admin: Dict[str, Any] = Depends(require_admin),
 ):
     try:
-        chapter = generate_concepts_for_chapter(
-            db,
-            chapter_id,
-            replace=payload.replace_existing,
-            max_batch_chars=payload.max_batch_chars,
-        )
-        db.commit()
+        if payload.run_in_background:
+            job = job_queue.submit(
+                db,
+                job_type="generate_concepts",
+                source_path=f"chapter:{chapter_id}",
+                payload={
+                    "chapter_id": chapter_id,
+                    "replace_existing": payload.replace_existing,
+                    "max_batch_chars": payload.max_batch_chars,
+                },
+            )
+            result: Dict[str, Any] = {
+                "job": serialize_job(job),
+                "queued": True,
+                "poll": f"/admin/content/jobs/{job.job_id}",
+            }
+        else:
+            chapter = generate_concepts_for_chapter(
+                db,
+                chapter_id,
+                replace=payload.replace_existing,
+                max_batch_chars=payload.max_batch_chars,
+            )
+            db.commit()
+            result = serialize_chapter(chapter)
         record_admin_audit(
             db,
             current_admin=current_admin,
             action="content_generate_json",
             target_type="chapter",
             target_id=str(chapter_id),
-            metadata={"replace_existing": payload.replace_existing, "max_batch_chars": payload.max_batch_chars},
+            metadata={
+                "replace_existing": payload.replace_existing,
+                "max_batch_chars": payload.max_batch_chars,
+                "run_in_background": payload.run_in_background,
+            },
             request=request,
         )
-        return serialize_chapter(chapter)
+        return result
     except RuntimeError as exc:
         db.rollback()
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (ValueError, json.JSONDecodeError) as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/admin/content/jobs")
+def admin_content_jobs(
+    limit: int = Query(default=40, ge=1, le=200),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    query = db.query(ContentIngestionJob).order_by(ContentIngestionJob.id.desc())
+    if status_filter:
+        query = query.filter(ContentIngestionJob.status == status_filter)
+    return {"jobs": [serialize_job(job) for job in query.limit(limit).all()]}
+
+
+@router.get("/admin/content/jobs/{job_id}")
+def admin_content_job_detail(
+    job_id: str,
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    job = db.query(ContentIngestionJob).filter(ContentIngestionJob.job_id == job_id).first()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job": serialize_job(job)}
 
 
 @router.post("/admin/content/approve/{chapter_id}")
