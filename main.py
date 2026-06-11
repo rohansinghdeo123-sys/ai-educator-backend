@@ -45,6 +45,35 @@ app.add_middleware(
 )
 
 
+# ================= GLOBAL EXCEPTION HANDLER =================
+def _cors_headers_for(request: Request) -> dict:
+    """CORS headers for handler responses: the 500 handler runs outside
+    CORSMiddleware, so without these the browser hides the error body."""
+    origin = request.headers.get("origin", "")
+    if origin and (origin in config.ALLOWED_ORIGINS or "*" in config.ALLOWED_ORIGINS):
+        return {"Access-Control-Allow-Origin": origin, "Vary": "Origin"}
+    return {}
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", "") or uuid.uuid4().hex
+    logger.exception(
+        "Unhandled error | request_id=%s method=%s path=%s",
+        request_id,
+        request.method,
+        request.url.path,
+    )
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "detail": "Internal server error. Please retry or contact support with the request id.",
+            "request_id": request_id,
+        },
+        headers={"X-Request-ID": request_id, **_cors_headers_for(request)},
+    )
+
+
 # ================= REQUEST GUARDRAILS =================
 @app.middleware("http")
 async def production_guardrails(request: Request, call_next):
@@ -65,11 +94,9 @@ async def production_guardrails(request: Request, call_next):
             )
 
     started = time.perf_counter()
-    try:
-        response = await call_next(request)
-    except Exception:
-        logger.exception("Request failed | request_id=%s path=%s", request_id, request.url.path)
-        raise
+    # Unhandled exceptions propagate to unhandled_exception_handler, which
+    # logs them with request context and returns a sanitized 500.
+    response = await call_next(request)
 
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Response-Time-ms"] = str(round((time.perf_counter() - started) * 1000, 2))

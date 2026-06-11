@@ -302,8 +302,9 @@ def tutor_agent(request) -> dict:
                     "step": "retry_complete",
                     "message": f"Retry quality: score={quality['score']}",
                 }, session_id=session_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Keep the original answer, but record that the quality retry failed.
+                logger.warning("Tutor quality retry failed; keeping first answer | session_id=%s error=%s", session_id, exc)
 
     # ===== STEP 7: UPDATE MEMORY =====
     memory.append({"role": "user", "content": question})

@@ -1,5 +1,6 @@
 """Strict platform-data retriever for Study Lab coach answers."""
 
+import logging
 import re
 from typing import Any, Dict
 
@@ -9,6 +10,8 @@ from Logic.tools.knowledge_search import SECTION_FILE_MAP, search_knowledge_base
 
 from .models import RetrievalResult
 from .settings import coach_settings
+
+logger = logging.getLogger("ai_educator.coach.retriever")
 
 
 def _scope_value(scope: Dict[str, Any], key: str) -> str:
@@ -96,7 +99,12 @@ class GroundedRetriever:
                     supported=True,
                 )
         except Exception:
-            pass
+            # Approved content is the primary source; a failure here silently
+            # downgrades answers to the markdown knowledge base, so make it loud.
+            logger.exception(
+                "Approved-content search failed; falling back to markdown knowledge base | section_id=%s",
+                section_id,
+            )
 
         result = search_knowledge_base(
             section_id=section_id,

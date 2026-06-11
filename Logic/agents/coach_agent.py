@@ -2340,7 +2340,8 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
 
     try:
         analytics_snapshot = get_user_analytics(db, user_id)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Could not load analytics snapshot for personalization | user_id=%s error=%s", user_id, exc)
         analytics_snapshot = {}
 
     recommendation = _make_rule_based_recommendation(

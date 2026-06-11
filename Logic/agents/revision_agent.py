@@ -272,8 +272,9 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
                     answer=formatted_answer,
                     mode=revision_type,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                # Keep the original answer, but record that the quality retry failed.
+                logger.warning("Revision quality retry failed; keeping first answer | section_id=%s error=%s", section_id, exc)
 
     latency_ms = round((time.time() - start_time) * 1000)
 
