@@ -1924,7 +1924,6 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
         detail="Preparing the right learning route.",
         turn_id=turn_id,
     )
-    time.sleep(0.12)
     yield _stage_event(
         stage="received",
         status="done",
@@ -2532,7 +2531,6 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
             detail="Checking clarity, accuracy, and the teaching level.",
             turn_id=turn_id,
         )
-        time.sleep(0.12)
         yield _stage_event(
             stage="reviewing",
             status="done",
@@ -2551,6 +2549,7 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
     )
 
     reviewed_answer_buffer = ""
+    live_streamed = False
     if should_review_answer:
         try:
             review_stream = model_gateway.stream(
@@ -2585,6 +2584,11 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
                 if not delta:
                     continue
                 reviewed_answer_buffer += delta
+                # True streaming: deliver tokens as the reviewer produces them.
+                # answer.completed below remains the authoritative final text
+                # (formatting / quality-repair may adjust it).
+                live_streamed = True
+                yield _answer_delta_event(delta, turn_id=turn_id)
         except Exception as exc:
             logger.error("[COACH STREAM REVIEW] Groq API error: %s", exc)
             agent_state.apply_error(stage="reviewer_stream", error=exc)
@@ -2802,8 +2806,9 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
     )
     trace.mark_phase("delivery")
 
-    for delta in _iter_text_chunks(final_answer):
-        yield _answer_delta_event(delta, turn_id=turn_id)
+    if not live_streamed:
+        for delta in _iter_text_chunks(final_answer):
+            yield _answer_delta_event(delta, turn_id=turn_id)
 
     yield _stage_event(
         stage="formatting",
@@ -2821,7 +2826,6 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
         detail="Finalizing the response in your study chat.",
         turn_id=turn_id,
     )
-    time.sleep(0.25)
     yield _stage_event(
         stage="delivering",
         status="done",
@@ -2830,7 +2834,6 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
         detail="Final answer delivered.",
         turn_id=turn_id,
     )
-    time.sleep(0.2)
     latency_ms = trace.finish()
     observability = coach_observability.snapshot(
         query=query_understanding.to_dict(),
