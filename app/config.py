@@ -52,6 +52,9 @@ ALLOWED_ORIGINS = env_list(
 
 # ================= RATE LIMITS & QUOTAS =================
 RATE_LIMIT_ENABLED = env_bool("RATE_LIMIT_ENABLED", True)
+# When behind a reverse proxy (Render/Heroku), key unauthenticated rate limits
+# on the proxy-appended (last) X-Forwarded-For hop. Disable for direct exposure.
+TRUST_PROXY_HEADERS = env_bool("TRUST_PROXY_HEADERS", True)
 RATE_LIMIT_PER_MINUTE = env_int("RATE_LIMIT_PER_MINUTE", 120)
 AI_RATE_LIMIT_PER_MINUTE = env_int("AI_RATE_LIMIT_PER_MINUTE", 24)
 ADMIN_RATE_LIMIT_PER_MINUTE = env_int("ADMIN_RATE_LIMIT_PER_MINUTE", 180)

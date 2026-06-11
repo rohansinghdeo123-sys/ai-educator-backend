@@ -20,6 +20,8 @@ from app import config
 
 
 class SlidingWindowLimiter:
+    MAX_TRACKED_KEYS = 50_000  # bound memory under hostile key churn
+
     def __init__(self) -> None:
         self._events: Dict[str, deque[float]] = defaultdict(deque)
         self._lock = Lock()
@@ -30,6 +32,10 @@ class SlidingWindowLimiter:
         now = time.time()
         cutoff = now - window_seconds
         with self._lock:
+            if len(self._events) > self.MAX_TRACKED_KEYS:
+                stale = [k for k, b in self._events.items() if not b or b[-1] <= cutoff]
+                for k in stale:
+                    del self._events[k]
             bucket = self._events[key]
             while bucket and bucket[0] <= cutoff:
                 bucket.popleft()
@@ -64,12 +70,23 @@ daily_quotas = DailyQuotaStore()
 
 
 def client_rate_key(request: Request) -> str:
-    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    client_host = forwarded or (request.client.host if request.client else "unknown")
     auth_header = request.headers.get("authorization") or ""
     if auth_header:
         token_hash = sha256(auth_header.encode("utf-8")).hexdigest()[:16]
         return f"auth:{token_hash}:{request.url.path}"
+
+    client_host = request.client.host if request.client else "unknown"
+    if config.TRUST_PROXY_HEADERS:
+        # Behind a trusted reverse proxy (Render/Heroku), the proxy APPENDS the
+        # real client IP as the LAST hop. The first entries are client-supplied
+        # and spoofable, so never key on them.
+        forwarded = [
+            part.strip()
+            for part in (request.headers.get("x-forwarded-for") or "").split(",")
+            if part.strip()
+        ]
+        if forwarded:
+            client_host = forwarded[-1]
     return f"ip:{client_host}:{request.url.path}"
 
 
