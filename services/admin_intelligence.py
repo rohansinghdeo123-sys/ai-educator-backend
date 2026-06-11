@@ -56,6 +56,15 @@ logger = logging.getLogger("ai_educator.services.admin_intelligence")
 ADMIN_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
 
+def _prompt_fingerprint() -> str:
+    try:
+        from prompts.registry import prompt_registry
+
+        return prompt_registry.fingerprint()
+    except Exception:
+        return "agentic-control-plane-v1"
+
+
 # ===================================================================
 # The functions below are extracted verbatim from the original main.py.
 # ===================================================================
@@ -523,7 +532,7 @@ def build_admin_model_registry(db: Session) -> Dict[str, Any]:
             "review_model": coach_settings.review_model,
             "embedding_model": os.getenv("EMBEDDING_MODEL") or None,
             "rag_index_version": hashlib_data_version(),
-            "prompt_version": os.getenv("PROMPT_VERSION", "agentic-control-plane-v1"),
+            "prompt_version": os.getenv("PROMPT_VERSION") or _prompt_fingerprint(),
             "agent_workflow_version": os.getenv("AGENT_WORKFLOW_VERSION", "agentic-control-plane-v1"),
             "deployment_version": os.getenv("RENDER_GIT_COMMIT", "2.5.0-production-guardrails"),
             "quality_score": quality["quality_score"],

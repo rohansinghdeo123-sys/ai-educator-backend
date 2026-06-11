@@ -462,6 +462,17 @@ def admin_data_registry(
     return build_admin_data_registry(db)
 
 
+@router.get("/admin/prompts")
+def admin_prompts(_current_admin: Dict[str, Any] = Depends(require_admin)):
+    from prompts.registry import prompt_registry
+
+    return {
+        "fingerprint": prompt_registry.fingerprint(),
+        "prompts": prompt_registry.describe(),
+        "override_hint": "Set PROMPT_VERSION_<NAME> (e.g. PROMPT_VERSION_TUTOR_AGENT=v2) to switch versions without a deploy.",
+    }
+
+
 @router.get("/admin/model-registry")
 def admin_model_registry(
     db: Session = Depends(get_db),
