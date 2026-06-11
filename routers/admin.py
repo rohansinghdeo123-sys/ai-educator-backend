@@ -61,8 +61,12 @@ from services.admin_service import (
     record_admin_audit,
     record_admin_audit_simple,
 )
+from services.ttl_cache import TTLCache
 
 router = APIRouter(tags=["admin"])
+
+ADMIN_CONSOLE_TTL_SECONDS = 15.0
+admin_console_cache = TTLCache(max_entries=4)
 
 
 @router.get("/admin/me")
@@ -81,7 +85,13 @@ def admin_console(
     db: Session = Depends(get_db),
     _current_admin: Dict[str, Any] = Depends(require_founder_admin),
 ):
-    return build_admin_console_payload(db)
+    # The console is polled by the dashboard and the payload is identical for
+    # every founder admin, so a short cache absorbs the aggregation cost.
+    return admin_console_cache.get_or_build(
+        "admin_console",
+        ADMIN_CONSOLE_TTL_SECONDS,
+        lambda: build_admin_console_payload(db),
+    )
 
 
 @router.get("/admin/audit")
@@ -375,7 +385,11 @@ def admin_overview(
     db: Session = Depends(get_db),
     _current_admin: Dict[str, Any] = Depends(require_admin),
 ):
-    return build_admin_overview(db)
+    return admin_console_cache.get_or_build(
+        "admin_overview",
+        ADMIN_CONSOLE_TTL_SECONDS,
+        lambda: build_admin_overview(db),
+    )
 
 
 @router.get("/admin/agents")

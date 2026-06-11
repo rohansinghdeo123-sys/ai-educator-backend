@@ -23,7 +23,6 @@ from sqlalchemy.orm import Session
 from app import config, security
 from app.serializers import (
     format_test_session,
-    interaction_session_id as _interaction_session_id,
     serialize_audit_log as _serialize_audit_log,
     student_payload as _student_payload,
     trace_payload as _trace_payload,
@@ -1155,11 +1154,14 @@ def build_admin_console_payload(db: Session) -> Dict[str, Any]:
     traces_24h = db.query(ModelToolTrace).filter(ModelToolTrace.created_at >= cutoff_24h)
     events_24h = db.query(ObservabilityEvent).filter(ObservabilityEvent.created_at >= cutoff_24h)
 
-    active_session_ids = {
-        _interaction_session_id(row)
-        for row in interactions_today.order_by(AICoachInteraction.id.desc()).limit(2500).all()
-        if _interaction_session_id(row)
-    }
+    active_sessions_today = int(
+        interactions_today.with_entities(
+            func.count(distinct(AICoachInteraction.metadata_json["session_id"].as_string()))
+        )
+        .filter(AICoachInteraction.metadata_json["session_id"].as_string() != "")
+        .scalar()
+        or 0
+    )
     test_users_today = {
         user_id for (user_id,) in tests_today.with_entities(TestHistory.user_id).distinct().all() if user_id
     }
@@ -1251,7 +1253,7 @@ def build_admin_console_payload(db: Session) -> Dict[str, Any]:
         "overview": {
             "total_users": _metric(_safe_count(db.query(UserProgress)), source="user_progress"),
             "active_students_today": _metric(len(coach_users_today | test_users_today), source="coach_interactions+test_history"),
-            "active_sessions": _metric(len(active_session_ids), source="coach_interaction_metadata"),
+            "active_sessions": _metric(active_sessions_today, source="coach_interaction_metadata"),
             "questions_asked": _metric(total_questions_today, source="ai_coach_interactions", unit="today"),
             "revision_generations": _metric(None, source="not_instrumented", note="Revision generation needs a dedicated event counter."),
             "exam_generations": _metric(exam_generations_today, source="test_history", unit="today"),
