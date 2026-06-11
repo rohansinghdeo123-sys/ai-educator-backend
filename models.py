@@ -331,7 +331,6 @@ class ModelToolTrace(Base):
     estimated_cost_usd = Column(Float, default=0.0)
     metadata_json = Column(JSON, default=dict)
 
-
 class DailyQuotaUsage(Base):
     """Persistent per-user daily usage counters for AI routes."""
     __tablename__ = "daily_quota_usage"

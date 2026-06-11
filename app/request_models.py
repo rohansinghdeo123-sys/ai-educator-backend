@@ -74,6 +74,14 @@ class AdminAuditRequest(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class AdminActionRequest(BaseModel):
+    action: str
+    target_type: str = ""
+    target_id: str = ""
+    confirmed: bool = False
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
 class GenerateMCQRequest(BaseModel):
     topic: str = Field(min_length=1, max_length=180)
     section_id: Optional[str] = Field(default=None, max_length=160)

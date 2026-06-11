@@ -1,14 +1,16 @@
-"""Admin console, audit, content pipeline, agent registry, and command endpoints."""
+"""Admin console, audit, content pipeline, agent registry, intelligence, and commands."""
 
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional
+from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.request_models import (
+    AdminActionRequest,
     AdminAuditRequest,
     AgentCommandRequest,
     AgentMessageRequest,
@@ -17,7 +19,7 @@ from app.request_models import (
     ContentIngestFolderRequest,
 )
 from app.security import require_admin, require_founder_admin
-from app.serializers import serialize_audit_log
+from app.serializers import normalize_topic, serialize_audit_log
 from database import get_db
 from Logic.agent_event_bus import event_bus
 from Logic.agent_router import get_agent_registry, route_to_agent
@@ -40,10 +42,22 @@ from Logic.observability_store import (
     get_recent_observability_events,
 )
 from models import AdminAuditLog
-from services.admin_service import (
+from services.admin_intelligence import (
+    CONFIRMED_ADMIN_ACTIONS,
+    _admin_float,
+    _admin_iso,
     build_admin_console_payload,
+    build_admin_data_registry,
+    build_admin_model_registry,
+    build_admin_overview,
+    build_admin_students,
+    build_admin_system_health,
+    build_admin_traces,
+)
+from services.admin_service import (
     generic_llm_chat,
     record_admin_audit,
+    record_admin_audit_simple,
 )
 
 router = APIRouter(tags=["admin"])
@@ -69,7 +83,7 @@ def admin_console(
 
 
 @router.get("/admin/audit")
-def admin_audit_logs(
+def admin_audit(
     limit: int = Query(default=80, ge=1, le=300),
     db: Session = Depends(get_db),
     _current_admin: Dict[str, Any] = Depends(require_founder_admin),
@@ -286,11 +300,48 @@ def admin_content_publish(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.get("/admin/overview")
+def admin_overview(
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    return build_admin_overview(db)
+
+
 @router.get("/admin/agents")
-def admin_get_agents(_current_admin: Dict[str, Any] = Depends(require_admin)):
+def admin_get_agents(
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    traces = build_admin_traces(db, limit=120)
+    recent_by_agent: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for event in get_recent_observability_events(db, limit=200):
+        recent_by_agent[str(event.get("agent_id") or "unknown")].append(event)
+
+    agents = []
+    for agent in event_bus.get_all_agents():
+        agent_id = str(agent.get("agent_id") or "")
+        events_for_agent = recent_by_agent.get(agent_id, [])[:8]
+        agent["recent_events"] = events_for_agent
+        agent["recent_runs"] = [
+            run
+            for run in traces["runs"]
+            if any(agent_id in str(row.get("name") or "") for row in run.get("rows", []))
+        ][:5]
+        agent["data_source"] = (
+            next((event.get("data", {}).get("source") for event in events_for_agent if isinstance(event.get("data"), dict) and event.get("data", {}).get("source")), "")
+            or "event_bus"
+        )
+        agent["estimated_cost_usd"] = round(
+            sum(_admin_float(run.get("estimated_cost_usd")) for run in agent["recent_runs"]),
+            8,
+        )
+        agents.append(agent)
+
     return {
-        "agents": event_bus.get_all_agents(),
+        "agents": agents,
         "system": event_bus.get_system_stats(),
+        "observability": get_observability_summary(db),
     }
 
 
@@ -313,6 +364,167 @@ def admin_get_agent(
         return {"error": f"Agent '{agent_id}' not found"}
 
     return agent
+
+
+@router.get("/admin/traces")
+def admin_get_traces(
+    limit: int = Query(default=80, ge=1, le=300),
+    trace_type: Optional[str] = Query(default=None),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    user_id: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    return build_admin_traces(
+        db,
+        limit=limit,
+        trace_type=trace_type,
+        status_filter=status_filter,
+        user_id=user_id,
+    )
+
+
+@router.get("/admin/data-registry")
+def admin_data_registry(
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    return build_admin_data_registry(db)
+
+
+@router.get("/admin/model-registry")
+def admin_model_registry(
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    return build_admin_model_registry(db)
+
+
+@router.get("/admin/students")
+def admin_students(
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    return build_admin_students(db, limit=limit)
+
+
+@router.get("/admin/system-health")
+def admin_system_health(
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    return build_admin_system_health(db)
+
+
+@router.get("/admin/audit-logs")
+def admin_audit_logs(
+    limit: int = Query(default=80, ge=1, le=300),
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    rows = (
+        db.query(AdminAuditLog)
+        .order_by(AdminAuditLog.created_at.desc(), AdminAuditLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "logs": [
+            {
+                "id": row.id,
+                "created_at": _admin_iso(row.created_at),
+                "actor_uid": row.actor_uid or "",
+                "actor_email": row.actor_email or "",
+                "admin_uid": row.actor_uid or "",
+                "admin_email": row.actor_email or "",
+                "action": row.action or "",
+                "target_type": row.target_type or "",
+                "target_id": row.target_id or "",
+                "status": row.status or "",
+                "metadata": row.metadata_json or {},
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.post("/admin/action")
+def admin_action(
+    request: AdminActionRequest,
+    db: Session = Depends(get_db),
+    current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    normalized_action = normalize_topic(request.action)
+    if normalized_action in CONFIRMED_ADMIN_ACTIONS and not request.confirmed:
+        record_admin_audit_simple(
+            db,
+            current_admin,
+            action=normalized_action,
+            target_type=request.target_type,
+            target_id=request.target_id,
+            status_value="blocked_confirmation_required",
+            metadata={"payload": request.payload},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Confirmation is required for this admin action.",
+        )
+
+    if normalized_action == "export_data_report":
+        record_admin_audit_simple(
+            db,
+            current_admin,
+            action=normalized_action,
+            target_type=request.target_type,
+            target_id=request.target_id,
+            status_value="success",
+            metadata={"payload": request.payload},
+        )
+        return {
+            "status": "success",
+            "message": "Data report generated from current backend state.",
+            "report": {
+                "overview": build_admin_overview(db),
+                "data_registry": build_admin_data_registry(db),
+                "model_registry": build_admin_model_registry(db),
+                "system_health": build_admin_system_health(db),
+            },
+        }
+
+    if normalized_action == "clear_temp_cache":
+        record_admin_audit_simple(
+            db,
+            current_admin,
+            action=normalized_action,
+            target_type=request.target_type or "backend",
+            target_id=request.target_id,
+            status_value="success",
+            metadata={"payload": request.payload, "note": "No durable study/user data was deleted."},
+        )
+        return {
+            "status": "success",
+            "message": "Temporary cache clear recorded. No durable study/user data was deleted.",
+        }
+
+    status_value = "unsupported"
+    record_admin_audit_simple(
+        db,
+        current_admin,
+        action=normalized_action,
+        target_type=request.target_type,
+        target_id=request.target_id,
+        status_value=status_value,
+        metadata={
+            "payload": request.payload,
+            "todo": "Backend workflow not implemented yet; action intentionally not executed.",
+        },
+    )
+    return {
+        "status": status_value,
+        "message": "This action is not wired to a safe backend workflow yet.",
+        "todo": "Implement the backend worker or service connector before enabling execution.",
+    }
 
 
 @router.get("/admin/events")
@@ -395,10 +607,11 @@ def admin_send_command(
     record_admin_audit(
         db,
         current_admin=current_admin,
-        action="agent_command",
+        action=f"agent_{request.command}",
         target_type="agent",
         target_id=request.agent_id,
-        metadata={"command": request.command},
+        status_value="success" if result.get("success") else "failed",
+        metadata={"payload": request.payload, "result": result},
         request=http_request,
     )
     return result
@@ -411,6 +624,15 @@ def admin_send_message(
     db: Session = Depends(get_db),
     current_admin: Dict[str, Any] = Depends(require_admin),
 ):
+    record_admin_audit_simple(
+        db,
+        current_admin,
+        action="agent_message",
+        target_type="agent",
+        target_id=request.agent_id,
+        status_value="requested",
+        metadata={"mode": request.mode or "study", "session_id": request.session_id},
+    )
     if request.mode == "casual":
         agent_stats = event_bus.get_agent(request.agent_id) or {}
         recent_events = event_bus.get_recent_events(
