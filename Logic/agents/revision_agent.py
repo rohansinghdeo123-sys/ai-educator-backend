@@ -13,15 +13,14 @@ This agent handles all revision-related tasks with the agentic cycle:
 Every step emits events to the Agent Event Bus for real-time admin monitoring.
 """
 
-import os
 import time
 import logging
-from groq import Groq
 from prompts.agent_prompts import (
     SUMMARY_AGENT_PROMPT,
     EXPLAIN_AGENT_PROMPT,
     KEYPOINTS_AGENT_PROMPT,
 )
+from Logic.coach.model_gateway import model_gateway
 from Logic.tools.knowledge_search import search_knowledge_base
 from Logic.tools.chemistry_formatter import format_chemistry_output
 from Logic.tools.answer_evaluator import evaluate_answer_quality
@@ -30,19 +29,10 @@ from Logic.knowledge_graph import knowledge_graph   # <-- NEW
 
 logger = logging.getLogger("ai_educator.agents.revision")
 
-_groq_client = None
-
-
-def _get_groq_client() -> Groq:
-    """Lazy client so importing this module never requires GROQ_API_KEY."""
-    global _groq_client
-    if _groq_client is None:
-        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    return _groq_client
-MODEL_NAME = os.getenv(
-    "GROQ_REVISION_MODEL",
-    os.getenv("GROQ_FAST_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
-)
+# Revision content is template-driven, so the fast tier is enough. The shared
+# gateway owns timeouts, retries, provider fallback, and cost records;
+# GROQ_FAST_MODEL still selects the primary model.
+MODEL_NAME = model_gateway.model_for("tutor", complexity="fast")
 
 # Mode-to-prompt mapping
 REVISION_PROMPTS = {
@@ -187,15 +177,19 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
     messages = [{"role": "user", "content": system_prompt}]
 
     try:
-        response = _get_groq_client().chat.completions.create(
-            model=MODEL_NAME,
+        raw_answer = model_gateway.complete(
+            role="tutor",
             messages=messages,
+            complexity="fast",
+            agent_name="tutor_model",
+            task=f"Generate {revision_type} revision content from section context.",
+            student_visible=True,
+            safety_tier="final_answer",
             temperature=config["temp"],
             max_tokens=config["max_tokens"],
-        )
-        raw_answer = response.choices[0].message.content.strip()
+        ).strip()
     except Exception as e:
-        logger.error(f"[REVISION] Groq API error: {e}")
+        logger.error(f"[REVISION] LLM error: {e}")
         event_bus.emit("revision", "error", {
             "step": "generate",
             "message": f"LLM API error: {str(e)}",
@@ -258,15 +252,18 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
                 retry_context += "\n\n--- STRUCTURED KNOWLEDGE ---\n" + concept_data
             retry_prompt = student_instructions + "\n\n" + config["prompt"].format(context=retry_context)
             try:
-                retry_response = _get_groq_client().chat.completions.create(
-                    model=MODEL_NAME,
+                retry_answer = model_gateway.complete(
+                    role="tutor",
                     messages=[{"role": "user", "content": retry_prompt}],
+                    complexity="fast",
+                    agent_name="tutor_model",
+                    task=f"Retry low-quality {revision_type} revision content with more context.",
+                    student_visible=True,
+                    safety_tier="final_answer",
                     temperature=config["temp"],
                     max_tokens=config["max_tokens"] + 100,
                 )
-                formatted_answer = format_chemistry_output(
-                    retry_response.choices[0].message.content.strip()
-                )
+                formatted_answer = format_chemistry_output(retry_answer.strip())
                 quality = evaluate_answer_quality(
                     question=question,
                     answer=formatted_answer,

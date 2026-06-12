@@ -13,11 +13,10 @@ This is a TRUE AGENT that follows the Think → Act → Observe → Respond cycl
 Every step emits events to the Agent Event Bus for real-time admin monitoring.
 """
 
-import os
 import time
 import logging
-from groq import Groq
 from prompts.agent_prompts import TUTOR_AGENT_PROMPT
+from Logic.coach.model_gateway import model_gateway
 from Logic.tools.knowledge_search import search_knowledge_base
 from Logic.tools.chemistry_formatter import format_chemistry_output
 from Logic.tools.answer_evaluator import evaluate_answer_quality
@@ -26,16 +25,9 @@ from Logic.knowledge_graph import knowledge_graph   # <-- NEW import
 
 logger = logging.getLogger("ai_educator.agents.tutor")
 
-_groq_client = None
-
-
-def _get_groq_client() -> Groq:
-    """Lazy client so importing this module never requires GROQ_API_KEY."""
-    global _groq_client
-    if _groq_client is None:
-        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    return _groq_client
-MODEL_NAME = os.getenv("GROQ_TUTOR_MODEL", "openai/gpt-oss-120b")
+# The shared gateway owns timeouts, retries, provider fallback, and cost
+# records; GROQ_TUTOR_MODEL still selects the primary model.
+MODEL_NAME = model_gateway.model_for("tutor")
 
 # In-memory session store
 _sessions: dict[str, list] = {}
@@ -214,15 +206,18 @@ def tutor_agent(request) -> dict:
     }, session_id=session_id)
 
     try:
-        response = _get_groq_client().chat.completions.create(
-            model=MODEL_NAME,
+        raw_answer = model_gateway.complete(
+            role="tutor",
             messages=messages,
+            agent_name="tutor_model",
+            task="Answer a Study Lab doubt from retrieved section context.",
+            student_visible=True,
+            safety_tier="final_answer",
             temperature=0.25,
             max_tokens=500,
-        )
-        raw_answer = response.choices[0].message.content.strip()
+        ).strip()
     except Exception as e:
-        logger.error(f"[TUTOR] Groq API error: {e}")
+        logger.error(f"[TUTOR] LLM error: {e}")
         event_bus.emit("tutor", "error", {
             "step": "generate",
             "message": f"LLM API error: {str(e)}",
@@ -284,15 +279,17 @@ def tutor_agent(request) -> dict:
                 {"role": "user", "content": question},
             ]
             try:
-                retry_response = _get_groq_client().chat.completions.create(
-                    model=MODEL_NAME,
+                retry_answer = model_gateway.complete(
+                    role="tutor",
                     messages=retry_messages,
+                    agent_name="tutor_model",
+                    task="Retry a low-quality Study Lab answer with more context.",
+                    student_visible=True,
+                    safety_tier="final_answer",
                     temperature=0.2,
                     max_tokens=600,
                 )
-                formatted_answer = format_chemistry_output(
-                    retry_response.choices[0].message.content.strip()
-                )
+                formatted_answer = format_chemistry_output(retry_answer.strip())
                 quality = evaluate_answer_quality(
                     question=question,
                     answer=formatted_answer,

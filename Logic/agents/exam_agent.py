@@ -11,14 +11,12 @@ and align questions with curriculum learning objectives.
 
 import json
 import logging
-import os
 import re
 import time
 from typing import Any, Dict, List, Optional
 
-from groq import Groq
-
 from Logic.agent_event_bus import event_bus
+from Logic.coach.model_gateway import model_gateway
 from Logic.tools.answer_evaluator import evaluate_answer_quality
 from Logic.tools.chemistry_formatter import format_chemistry_output
 from Logic.tools.knowledge_search import search_knowledge_base
@@ -27,16 +25,9 @@ from prompts.agent_prompts import EXAM_MCQ_PROMPT, EXAM_PROBABLE_PROMPT
 
 logger = logging.getLogger("ai_educator.agents.exam")
 
-_groq_client = None
-
-
-def _get_groq_client() -> Groq:
-    """Lazy client so importing this module never requires GROQ_API_KEY."""
-    global _groq_client
-    if _groq_client is None:
-        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    return _groq_client
-MODEL_NAME = os.getenv("GROQ_EXAM_MODEL", os.getenv("GROQ_TUTOR_MODEL", "openai/gpt-oss-120b"))
+# The shared gateway owns timeouts, retries, provider fallback, and cost
+# records; GROQ_TUTOR_MODEL still selects the primary model.
+MODEL_NAME = model_gateway.model_for("tutor")
 
 
 def extract_json_object(text: str) -> Optional[Dict[str, Any]]:
@@ -360,13 +351,16 @@ def probable_to_text(questions: List[Dict[str, Any]]) -> str:
 
 
 def call_groq(prompt: str, temperature: float, max_tokens: int) -> str:
-    response = _get_groq_client().chat.completions.create(
-        model=MODEL_NAME,
+    return model_gateway.complete(
+        role="tutor",
         messages=[{"role": "user", "content": prompt}],
+        agent_name="tutor_model",
+        task="Generate structured exam questions from section context.",
+        student_visible=True,
+        safety_tier="final_answer",
         temperature=temperature,
         max_tokens=max_tokens,
-    )
-    return response.choices[0].message.content.strip()
+    ).strip()
 
 
 def exam_agent(request, exam_type: str = "mcq") -> dict:
