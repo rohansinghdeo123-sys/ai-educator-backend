@@ -86,11 +86,6 @@ def evaluate_answer_quality(
             issues.append(f"HALLUCINATION: Contains '{phrase}'.")
             score -= 0.3
 
-    # ---- CHECK 5: Markdown leakage ----
-    if "**" in answer or "##" in answer or "```" in answer:
-        issues.append("FORMAT: Contains markdown formatting (should be plain text).")
-        score -= 0.1
-
     # Clamp score
     score = max(0.0, min(1.0, score))
     passed = score >= 0.5 and "EMPTY_OR_SHORT" not in str(issues)

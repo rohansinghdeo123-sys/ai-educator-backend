@@ -351,16 +351,24 @@ def probable_to_text(questions: List[Dict[str, Any]]) -> str:
 
 
 def call_groq(prompt: str, temperature: float, max_tokens: int) -> str:
-    return model_gateway.complete(
-        role="tutor",
-        messages=[{"role": "user", "content": prompt}],
-        agent_name="tutor_model",
-        task="Generate structured exam questions from section context.",
-        student_visible=True,
-        safety_tier="final_answer",
-        temperature=temperature,
-        max_tokens=max_tokens,
-    ).strip()
+    kwargs = {
+        "role": "tutor",
+        "messages": [{"role": "user", "content": prompt}],
+        "agent_name": "tutor_model",
+        "task": "Generate structured exam questions from section context.",
+        "student_visible": True,
+        "safety_tier": "final_answer",
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    try:
+        # JSON mode removes the whole regex-rescue tier when supported.
+        return model_gateway.complete(
+            **kwargs, response_format={"type": "json_object"}
+        ).strip()
+    except Exception as exc:
+        logger.warning("[EXAM] JSON mode unavailable, retrying as plain text: %s", exc)
+        return model_gateway.complete(**kwargs).strip()
 
 
 def exam_agent(request, exam_type: str = "mcq") -> dict:
@@ -368,8 +376,12 @@ def exam_agent(request, exam_type: str = "mcq") -> dict:
 
     section_id = request.section_id
     question = request.question
+    try:
+        requested_count = max(1, min(int(getattr(request, "count", 5) or 5), 10))
+    except Exception:
+        requested_count = 5
 
-    logger.info("[EXAM] Type: %s | Section: %s", exam_type, section_id)
+    logger.info("[EXAM] Type: %s | Section: %s | Count: %s", exam_type, section_id, requested_count)
 
     event_bus.emit(
         "exam",
@@ -491,9 +503,11 @@ def exam_agent(request, exam_type: str = "mcq") -> dict:
         temperature = 0.25
         max_tokens = 900
     else:
-        prompt = build_structured_mcq_prompt(enriched_context, count=5)
+        prompt = build_structured_mcq_prompt(enriched_context, count=requested_count)
         temperature = 0.2
-        max_tokens = 1400
+        # Scale output room with the requested question count so a 10-question
+        # pack is not silently truncated at the 5-question token budget.
+        max_tokens = min(3200, 300 * requested_count + 200)
 
     event_bus.emit(
         "exam",
@@ -552,10 +566,12 @@ def exam_agent(request, exam_type: str = "mcq") -> dict:
             "text": answer_text,
         }
     else:
-        mcq_questions = normalize_structured_mcqs(payload, count=5)
+        mcq_questions = normalize_structured_mcqs(payload, count=requested_count)
 
-        if len(mcq_questions) < 5:
-            mcq_questions = parse_text_mcqs(formatted_answer, count=5)
+        if len(mcq_questions) < requested_count:
+            text_questions = parse_text_mcqs(formatted_answer, count=requested_count)
+            if len(text_questions) > len(mcq_questions):
+                mcq_questions = text_questions
 
         answer_text = mcqs_to_legacy_text(mcq_questions) if mcq_questions else formatted_answer
         data = {
