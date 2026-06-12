@@ -1180,7 +1180,10 @@ def _build_study_prompt(
     if retrieved_material and str(retrieved_material.get("context") or "").strip():
         graph_context = str(retrieved_material.get("context") or "").strip()
 
-    adaptive_format = _build_answer_format_instruction(answer_format)
+    # The Response Planner is the single format authority. The ANSWER_FORMATS
+    # block only fills in when no plan exists, so the tutor never has to
+    # satisfy two competing format contracts (and saves ~200 tokens per turn).
+    adaptive_format = "" if response_plan else _build_answer_format_instruction(answer_format)
     response_plan_instruction = build_response_plan_instruction(response_plan)
     adaptive_teaching = _build_adaptive_teaching_instruction(adaptive_context)
     conversation_context = conversation_context or {}
@@ -1376,7 +1379,9 @@ def _build_review_prompt(
     strict_grounding: bool = False,
     response_plan: Optional[Dict[str, Any]] = None,
 ) -> str:
-    adaptive_format = _build_answer_format_instruction(answer_format)
+    # Same single-format-authority rule as the study prompt: the Response
+    # Planner wins; the ANSWER_FORMATS block only fills in when no plan exists.
+    adaptive_format = "" if response_plan else _build_answer_format_instruction(answer_format)
     response_plan_instruction = build_response_plan_instruction(response_plan)
     adaptive_teaching = _build_adaptive_teaching_instruction(adaptive_context)
 
@@ -2445,6 +2450,7 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
         draft_prompt = f"{draft_prompt}\n\n{orchestration_prompt}"
 
         draft = ""
+        draft_finish_reason = ""
         try:
             draft_stream = model_gateway.stream(
                 role="tutor",
@@ -2461,7 +2467,11 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
                 max_tokens=1100,
             )
             for chunk in draft_stream:
-                delta = getattr(chunk.choices[0].delta, "content", None) or ""
+                choice = chunk.choices[0]
+                finish = getattr(choice, "finish_reason", None)
+                if finish:
+                    draft_finish_reason = str(finish)
+                delta = getattr(choice.delta, "content", None) or ""
                 if not delta:
                     continue
                 draft += delta
@@ -2480,6 +2490,36 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
                 draft = _material_not_found(adaptive_context) if strict_grounding else (
                     recommendation if intent == "planning" else "I'm having trouble explaining that right now."
                 )
+        if draft_finish_reason == "length" and draft.strip():
+            # The draft hit max_tokens mid-answer; finish it instead of
+            # delivering a sentence that stops without warning.
+            try:
+                continuation = model_gateway.complete(
+                    role="tutor",
+                    messages=[
+                        {"role": "system", "content": draft_prompt},
+                        {"role": "user", "content": question},
+                        {"role": "assistant", "content": draft},
+                        {
+                            "role": "user",
+                            "content": "Your answer was cut off. Continue exactly where you stopped. Do not repeat anything you already wrote.",
+                        },
+                    ],
+                    complexity=routing_tier,
+                    agent_name="tutor_model",
+                    task="Continue a truncated tutor draft.",
+                    student_visible=True,
+                    safety_tier="draft_answer",
+                    temperature=0.2,
+                    max_tokens=400,
+                )
+                if continuation.strip():
+                    draft += continuation
+                    turn_state["partial_answer"] = draft
+                    trace.record_fallback("draft_truncated_continued", added_chars=len(continuation))
+                    yield _answer_delta_event(continuation, turn_id=turn_id)
+            except Exception as exc:
+                logger.warning("[COACH DRAFT] Continuation after truncation failed: %s", exc)
         agent_state.apply_answer(draft=draft)
 
         enriched = (

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 import json
+import logging
 import os
 from types import SimpleNamespace
 import threading
@@ -18,6 +19,8 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from .costing import estimate_messages_tokens, estimate_model_cost_usd, estimate_text_tokens
 from .settings import coach_settings
+
+logger = logging.getLogger("ai_educator.coach.llm_router")
 
 
 PROVIDER_ALIASES = {
@@ -52,6 +55,7 @@ class ModelCallRecord:
     estimated_route_cost_usd: float = 0.0
     route_reason: str = ""
     budget_action: str = "allowed"
+    truncated: bool = False
 
 
 class LLMRouter:
@@ -178,15 +182,25 @@ class LLMRouter:
         return headers
 
     @staticmethod
-    def _completion_namespace(content: str) -> Any:
+    def _completion_namespace(content: str, finish_reason: str = "") -> Any:
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=content),
+                    finish_reason=finish_reason or None,
+                )
+            ]
         )
 
     @staticmethod
-    def _chunk_namespace(content: str) -> Any:
+    def _chunk_namespace(content: str, finish_reason: str = "") -> Any:
         return SimpleNamespace(
-            choices=[SimpleNamespace(delta=SimpleNamespace(content=content))]
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content=content),
+                    finish_reason=finish_reason or None,
+                )
+            ]
         )
 
     def _http_complete(
@@ -218,8 +232,9 @@ class LLMRouter:
         if stream:
             return self._iter_http_stream(response)
         data = response.json()
-        content = str(data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-        return self._completion_namespace(content)
+        choice = data.get("choices", [{}])[0]
+        content = str(choice.get("message", {}).get("content") or "").strip()
+        return self._completion_namespace(content, str(choice.get("finish_reason") or ""))
 
     def _iter_http_stream(self, response: Any) -> Iterator[Any]:
         with response:
@@ -237,9 +252,11 @@ class LLMRouter:
                     payload = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                delta = payload.get("choices", [{}])[0].get("delta", {}).get("content") or ""
-                if delta:
-                    yield self._chunk_namespace(delta)
+                choice = payload.get("choices", [{}])[0]
+                delta = choice.get("delta", {}).get("content") or ""
+                finish_reason = str(choice.get("finish_reason") or "")
+                if delta or finish_reason:
+                    yield self._chunk_namespace(delta, finish_reason)
 
     @staticmethod
     def _is_transient_error(exc: BaseException) -> bool:
@@ -410,6 +427,7 @@ class LLMRouter:
         fallback: bool = False,
         error: str = "",
         budget_action: str = "allowed",
+        truncated: bool = False,
     ) -> None:
         output_tokens = estimate_text_tokens(output_text)
         actual_cost = estimate_model_cost_usd(
@@ -438,12 +456,20 @@ class LLMRouter:
             estimated_route_cost_usd=route.estimated_route_cost_usd,
             route_reason=route.reason,
             budget_action=budget_action,
+            truncated=truncated,
         ))
 
     @staticmethod
     def _chunk_text(chunk: Any) -> str:
         try:
             return chunk.choices[0].delta.content or ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _chunk_finish_reason(chunk: Any) -> str:
+        try:
+            return str(chunk.choices[0].finish_reason or "")
         except Exception:
             return ""
 
@@ -494,6 +520,12 @@ class LLMRouter:
                     **kwargs,
                 )
                 content = (response.choices[0].message.content or "").strip()
+                finish_reason = str(getattr(response.choices[0], "finish_reason", "") or "")
+                truncated = finish_reason == "length"
+                if truncated:
+                    logger.warning(
+                        "Model output truncated at max_tokens | role=%s model=%s", role, route.model
+                    )
                 self._record_call(
                     role=role,
                     route=route,
@@ -504,6 +536,7 @@ class LLMRouter:
                     input_tokens=input_tokens,
                     output_text=content,
                     fallback=attempt > 1,
+                    truncated=truncated,
                 )
                 return content
             except Exception as exc:
@@ -566,6 +599,7 @@ class LLMRouter:
 
             started_at = time.perf_counter()
             output_parts: list[str] = []
+            finish_reason = ""
             try:
                 response = self._create_completion(
                     route=route,
@@ -578,7 +612,13 @@ class LLMRouter:
                     chunk_text = self._chunk_text(chunk)
                     if chunk_text:
                         output_parts.append(chunk_text)
+                    finish_reason = self._chunk_finish_reason(chunk) or finish_reason
                     yield chunk
+                truncated = finish_reason == "length"
+                if truncated:
+                    logger.warning(
+                        "Streamed output truncated at max_tokens | role=%s model=%s", role, route.model
+                    )
                 self._record_call(
                     role=role,
                     route=route,
@@ -589,6 +629,7 @@ class LLMRouter:
                     input_tokens=input_tokens,
                     output_text="".join(output_parts),
                     fallback=attempt > 1,
+                    truncated=truncated,
                 )
                 return
             except Exception as exc:
