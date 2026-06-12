@@ -59,6 +59,7 @@ from Logic.coach import (
     semantic_event,
     understand_query,
 )
+from Logic.coach.llm_judge import judge_coach_answer, should_judge_turn
 from Logic.coach.memory_store import (
     build_layered_lesson_memory,
     build_memory_summary,
@@ -3274,3 +3275,24 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
     encoded = base64.b64encode(final_answer.encode("utf-8")).decode("ascii")
     yield f"data: {encoded}\n\n"
     yield "data: [DONE]\n\n"
+
+    # Sampled LLM-as-judge evaluation (COACH_JUDGE_SAMPLE_RATE, default off).
+    # Runs after the final frame so sampled turns add no student-visible
+    # latency; results land in the observability event stream.
+    if final_answer and not lightweight_reply and should_judge_turn():
+        judge_report = judge_coach_answer(
+            model_gateway,
+            question=question,
+            answer=final_answer,
+            retrieved_context=str((retrieved_material or {}).get("context") or ""),
+            intent=intent,
+        )
+        if judge_report:
+            coach_observability.emit(
+                session_id,
+                "metric",
+                message="LLM judge sampled this delivered answer.",
+                turn_id=turn_id,
+                judge=judge_report,
+                heuristic_quality=quality_report.score,
+            )

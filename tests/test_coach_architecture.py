@@ -493,6 +493,43 @@ class CoachArchitectureTests(unittest.TestCase):
         db.close()
         engine.dispose()
 
+    def test_llm_judge_parses_scores_and_respects_sample_gate(self):
+        from Logic.coach import llm_judge
+
+        class JudgeGateway:
+            def complete(self, *args, **kwargs):
+                return (
+                    '{"factual_accuracy": 9, "pedagogy": 7, "grounding_fidelity": 10,'
+                    ' "verdict": "pass", "main_issue": ""}'
+                )
+
+        report = llm_judge.judge_coach_answer(
+            JudgeGateway(),
+            question="What is a mole?",
+            answer="A mole is the SI unit for amount of substance.",
+            retrieved_context="",
+            intent="definition",
+        )
+        self.assertIsNotNone(report)
+        self.assertEqual(report["factual_accuracy"], 9.0)
+        self.assertEqual(report["verdict"], "pass")
+        self.assertAlmostEqual(report["overall"], 8.67, places=2)
+
+        with patch.dict("os.environ", {"COACH_JUDGE_SAMPLE_RATE": "0"}):
+            self.assertFalse(llm_judge.should_judge_turn())
+        with patch.dict("os.environ", {"COACH_JUDGE_SAMPLE_RATE": "1.0"}):
+            self.assertTrue(llm_judge.should_judge_turn())
+
+        class BrokenGateway:
+            def complete(self, *args, **kwargs):
+                raise RuntimeError("provider down")
+
+        self.assertIsNone(
+            llm_judge.judge_coach_answer(
+                BrokenGateway(), question="q", answer="a"
+            )
+        )
+
     def test_session_summary_includes_replay_contract(self):
         test = SimpleNamespace(
             id=42,
