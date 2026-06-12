@@ -453,6 +453,46 @@ class CoachArchitectureTests(unittest.TestCase):
         db.close()
         engine.dispose()
 
+    def test_stream_disconnect_persists_user_turn(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        uid = "student_disconnect"
+        session_id = f"coach-{uid}-conv"
+        request = SimpleNamespace(
+            user_id=uid,
+            session_id=session_id,
+            question="Okay thanks, that helped me a lot today",
+            intent="study_advice",
+            mode="coach",
+            attachments=[],
+        )
+
+        stream = coach_agent_stream(request, db=db)
+        saw_drafting = False
+        for frame in stream:
+            event = parse_semantic_event(frame)
+            if event.get("stage") == "drafting":
+                saw_drafting = True
+                break
+        # Simulate the client disconnecting mid-stream.
+        stream.close()
+
+        self.assertTrue(saw_drafting)
+        rows = (
+            db.query(AICoachInteraction)
+            .filter(AICoachInteraction.user_id == uid)
+            .all()
+        )
+        self.assertTrue(rows, "interrupted stream must still persist the student turn")
+        user_rows = [row for row in rows if row.role == "user"]
+        self.assertEqual(len(user_rows), 1)
+        self.assertEqual(user_rows[0].message, request.question)
+        self.assertTrue(user_rows[0].metadata_json.get("stream_interrupted"))
+        db.close()
+        engine.dispose()
+
     def test_session_summary_includes_replay_contract(self):
         test = SimpleNamespace(
             id=42,

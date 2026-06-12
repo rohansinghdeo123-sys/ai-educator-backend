@@ -1814,13 +1814,50 @@ def _mark_stream_runtime_failed(db, turn_id: str, exc: Exception) -> None:
         logger.warning("Could not record stream failure step: %s", step_exc)
 
 
+def _persist_interrupted_turn(db, turn_state: Dict[str, Any]) -> None:
+    """Best-effort save when the stream ends before the normal persistence ran.
+
+    The healthy path persists before answer.completed; this fallback keeps the
+    student's question (and any partial answer) in conversation memory when the
+    client disconnects mid-stream, so follow-ups still have a thread to resolve.
+    """
+    if db is None or not isinstance(turn_state, dict) or turn_state.get("persisted"):
+        return
+    coach = turn_state.get("coach")
+    question = str(turn_state.get("question") or "").strip()
+    if coach is None or not question:
+        return
+    answer = str(turn_state.get("final_answer") or turn_state.get("partial_answer") or "").strip()
+    intent = str(turn_state.get("intent") or "study_advice")
+    mode = str(turn_state.get("mode") or "coach")
+    metadata = {
+        "session_id": turn_state.get("session_id"),
+        "stream_interrupted": True,
+        "is_follow_up": bool(turn_state.get("is_follow_up")),
+        "retrieval_policy": turn_state.get("retrieval_policy"),
+    }
+    try:
+        db.rollback()
+        _persist_interaction(db=db, coach=coach, role="user", message=question, intent=intent, mode=mode, metadata=metadata)
+        if answer:
+            _persist_interaction(db=db, coach=coach, role="assistant", message=answer, intent=intent, mode=mode, metadata=metadata)
+        turn_state["persisted"] = True
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning("Could not persist interrupted coach turn: %s", exc)
+
+
 def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
     turn_id = ""
     session_id = getattr(request, "session_id", "")
     completed_sent = False
     done_sent = False
+    turn_state: Dict[str, Any] = {}
     try:
-        for frame in _coach_agent_stream_impl(request, db=db):
+        for frame in _coach_agent_stream_impl(request, db=db, turn_state=turn_state):
             event = parse_semantic_event(frame)
             if event:
                 turn_id = str(event.get("turn_id") or turn_id or "")
@@ -1829,10 +1866,12 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
             done_sent = done_sent or frame.strip() == "data: [DONE]"
             yield frame
     except GeneratorExit:
+        _persist_interrupted_turn(db, turn_state)
         raise
     except Exception as exc:
         logger.exception("[COACH STREAM] Unhandled stream failure")
         _mark_stream_runtime_failed(db, turn_id, exc)
+        _persist_interrupted_turn(db, turn_state)
         if done_sent:
             return
 
@@ -1868,7 +1907,9 @@ def coach_agent_stream(request, db=None) -> Generator[str, None, None]:
         yield "data: [DONE]\n\n"
 
 
-def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
+def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, Any]] = None) -> Generator[str, None, None]:
+    if turn_state is None:
+        turn_state = {}
     if db is None:
         yield "data: Coach needs database access to personalize advice.\n\n"
         return
@@ -1877,6 +1918,15 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
     question = getattr(request, "question", "")
     session_id = getattr(request, "session_id", f"coach-{user_id}")
     turn_id = f"turn_{uuid.uuid4().hex[:12]}"
+    turn_state.update(
+        {
+            "question": question,
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "intent": getattr(request, "intent", "study_advice"),
+            "mode": getattr(request, "mode", "coach"),
+        }
+    )
     model_gateway.begin_turn(turn_id)
     tool_gateway.begin_turn(turn_id)
     trace = coach_observability.start_turn(turn_id=turn_id, session_id=session_id)
@@ -1946,6 +1996,7 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
     trace.mark_phase("understanding")
 
     coach = get_or_create_coach(db, user_id)
+    turn_state["coach"] = coach
     progress = _build_progress_snapshot(db, user_id)
     topic_snapshot = _get_topic_snapshot(db, user_id)
     recent_sessions = _build_recent_session_snapshot(_get_recent_sessions(db, user_id))
@@ -2009,6 +2060,7 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
         memories=memories,
     )
     conversation_context = _merge_frontend_context(conversation_context, adaptive_context)
+    turn_state["is_follow_up"] = bool(conversation_context.get("is_follow_up"))
     agent_state.apply_conversation_context(conversation_context)
     lesson_memory = build_layered_lesson_memory(
         coach=coach,
@@ -2063,6 +2115,7 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
         coach_plan = build_coach_plan(query_understanding)
         strict_grounding = False
     response_plan_payload = response_plan.to_dict()
+    turn_state["retrieval_policy"] = retrieval_policy
     agent_state.metadata["response_plan"] = response_plan_payload
     agent_state.add_message(
         sender_agent="response_planner",
@@ -2460,6 +2513,8 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
         if len(final_answer) < 20:
             final_answer = draft
     agent_state.apply_answer(final_answer=final_answer, next_best_action=recommendation)
+    turn_state["final_answer"] = final_answer
+    turn_state["intent"] = intent
     answer_agent_name = "conversation_responder" if lightweight_reply else "tutor_model"
     agent_state.add_message(
         sender_agent=answer_agent_name,
@@ -2591,6 +2646,7 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
                 if not delta:
                     continue
                 reviewed_answer_buffer += delta
+                turn_state["partial_answer"] = reviewed_answer_buffer
                 # True streaming: deliver tokens as the reviewer produces them.
                 # answer.completed below remains the authoritative final text
                 # (formatting / quality-repair may adjust it).
@@ -2607,6 +2663,7 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
     else:
         final_answer = _apply_deterministic_format(final_answer)
     final_answer = _enforce_response_plan_constraints(final_answer, response_plan_payload)
+    turn_state["final_answer"] = final_answer
     agent_state.apply_answer(final_answer=final_answer, reviewer_notes=reviewer_answer)
     review_status = "completed" if should_review_answer and reviewer_answer else (
         "fallback" if should_review_answer else "skipped"
@@ -2708,6 +2765,7 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
         "initial": initial_repair_decision.to_dict(),
         "final": repair_decision.to_dict(),
     }
+    turn_state["final_answer"] = final_answer
     agent_state.apply_answer(final_answer=final_answer)
     agent_state.apply_quality(quality_report, verification)
     agent_state.metadata["repair"] = repair_report
@@ -2897,8 +2955,7 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
         "agent_message_count": len(agent_state.agent_messages),
     }
 
-    # ── Base64‑encode the entire answer to protect newlines ─────────────
-    yield semantic_event(
+    completed_event = semantic_event(
         "answer.completed",
         turn_id=turn_id,
         answer=final_answer,
@@ -2957,12 +3014,8 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
         },
     )
 
-    # Keep the encoded answer for older clients while the semantic contract rolls out.
-    encoded = base64.b64encode(final_answer.encode("utf-8")).decode("ascii")
-    yield f"data: {encoded}\n\n"
-    yield "data: [DONE]\n\n"
-
-    # Persist
+    # Persist BEFORE the final frames so a client disconnect between the last
+    # delta and [DONE] cannot lose the turn (the follow-up memory depends on it).
     coach.daily_strategy = recommendation
     coach.next_best_action = recommendation
     coach.last_interaction_at = datetime.utcnow()
@@ -3093,3 +3146,10 @@ def _coach_agent_stream_impl(request, db=None) -> Generator[str, None, None]:
         },
         session_id=session_id,
     )
+    turn_state["persisted"] = True
+
+    yield completed_event
+    # Keep the encoded answer for older clients while the semantic contract rolls out.
+    encoded = base64.b64encode(final_answer.encode("utf-8")).decode("ascii")
+    yield f"data: {encoded}\n\n"
+    yield "data: [DONE]\n\n"
