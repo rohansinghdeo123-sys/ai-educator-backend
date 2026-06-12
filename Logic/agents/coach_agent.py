@@ -515,6 +515,28 @@ def _build_conversation_context(
     }
 
 
+def _history_messages(interactions: List[AICoachInteraction], limit: int = 6) -> List[Dict[str, str]]:
+    """Conversation history as real alternating user/assistant turns.
+
+    Models condition far better on a proper message array than on the same
+    text squeezed into the system prompt. The newest exchange keeps near-full
+    text; older turns are truncated so the prompt stays lean.
+    """
+    rows = [
+        row
+        for row in interaction_messages(interactions, limit=limit)
+        if row.get("role") in {"user", "assistant"}
+    ]
+    messages: List[Dict[str, str]] = []
+    for index, row in enumerate(rows):
+        content = str(row.get("content") or "").strip()
+        max_chars = 1400 if index >= len(rows) - 2 else 320
+        if len(content) > max_chars:
+            content = content[: max_chars - 3].rstrip() + "..."
+        messages.append({"role": str(row["role"]), "content": content})
+    return messages
+
+
 def _build_assistance_blocks(question: str, answer_format: Dict[str, Any]) -> List[Dict[str, str]]:
     topic_hint = (question or "this concept").strip()
     if len(topic_hint) > 90:
@@ -1252,8 +1274,7 @@ LEARNING INTELLIGENCE BLUEPRINT:
 CONVERSATION CONTEXT:
 Follow-up mode: {follow_up_mode}
 Last student question: {conversation_context.get("last_student_question", "None")}
-Recent lesson thread:
-{conversation_context.get("recent_thread", "No previous lesson thread.")}
+The recent lesson thread is supplied as real conversation turns before the student's newest message. Resolve short references like "this", "it", "why", or "example" from those turns.
 
 LONG-TERM STUDENT GUIDANCE:
 {conversation_context.get("long_term_summary", "No long-term summary yet.")}
@@ -2039,7 +2060,11 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
         current_question=question,
     )
     conversation_context["lesson_memory"] = lesson_memory
-    conversation_context["lesson_memory_prompt"] = format_layered_lesson_memory(lesson_memory)
+    # Recent turns reach the tutor as real conversation messages, so the
+    # prompt-side memory block must not repeat them.
+    conversation_context["lesson_memory_prompt"] = format_layered_lesson_memory(
+        lesson_memory, include_recent_turns=False
+    )
     trace.memory_layers = [
         key for key, value in lesson_memory.items()
         if value and key in {"recent_turns", "current_topic", "unresolved_doubt", "misconceptions", "preferences", "long_term_summary"}
@@ -2448,16 +2473,18 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
                 response_plan=response_plan_payload,
             )
         draft_prompt = f"{draft_prompt}\n\n{orchestration_prompt}"
+        draft_messages = [
+            {"role": "system", "content": draft_prompt},
+            *_history_messages(recent_interactions),
+            {"role": "user", "content": question},
+        ]
 
         draft = ""
         draft_finish_reason = ""
         try:
             draft_stream = model_gateway.stream(
                 role="tutor",
-                messages=[
-                    {"role": "system", "content": draft_prompt},
-                    {"role": "user", "content": question},
-                ],
+                messages=draft_messages,
                 complexity=routing_tier,
                 agent_name="tutor_model",
                 task="Stream the core tutor answer from context, tools, and policy.",
@@ -2497,8 +2524,7 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
                 continuation = model_gateway.complete(
                     role="tutor",
                     messages=[
-                        {"role": "system", "content": draft_prompt},
-                        {"role": "user", "content": question},
+                        *draft_messages,
                         {"role": "assistant", "content": draft},
                         {
                             "role": "user",

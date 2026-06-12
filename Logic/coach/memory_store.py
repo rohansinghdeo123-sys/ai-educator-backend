@@ -81,22 +81,27 @@ def build_layered_lesson_memory(
     }
 
 
-def format_layered_lesson_memory(memory: Dict[str, Any]) -> str:
-    turns = memory.get("recent_turns") or []
-    recent = "\n".join(
-        f"- {item.get('role', 'message')}: {str(item.get('content') or '')[:240]}"
-        for item in turns
-        if isinstance(item, dict)
-    )
+def format_layered_lesson_memory(memory: Dict[str, Any], include_recent_turns: bool = True) -> str:
+    """Render lesson memory for a prompt.
+
+    Pass ``include_recent_turns=False`` when the caller already supplies the
+    recent thread as real conversation messages, so the same turns are not
+    paid for twice in the prompt.
+    """
     misconceptions = memory.get("misconceptions") or []
-    return "\n".join(
-        [
-            f"Current topic: {memory.get('current_topic') or 'Open tutor topic'}",
-            f"Unresolved doubt: {memory.get('unresolved_doubt') or 'None'}",
-            f"Known misconceptions: {', '.join(misconceptions) if misconceptions else 'None recorded'}",
-            f"Study preferences: {memory.get('preferences') or 'No preference saved'}",
-            f"Long-term summary: {memory.get('long_term_summary') or 'No long-term summary yet'}",
-            "Recent lesson turns:",
-            recent or "- No earlier turns in this lesson.",
-        ]
-    )
+    lines = [
+        f"Current topic: {memory.get('current_topic') or 'Open tutor topic'}",
+        f"Unresolved doubt: {memory.get('unresolved_doubt') or 'None'}",
+        f"Known misconceptions: {', '.join(misconceptions) if misconceptions else 'None recorded'}",
+        f"Study preferences: {memory.get('preferences') or 'No preference saved'}",
+        f"Long-term summary: {memory.get('long_term_summary') or 'No long-term summary yet'}",
+    ]
+    if include_recent_turns:
+        turns = memory.get("recent_turns") or []
+        recent = "\n".join(
+            f"- {item.get('role', 'message')}: {str(item.get('content') or '')[:240]}"
+            for item in turns
+            if isinstance(item, dict)
+        )
+        lines.extend(["Recent lesson turns:", recent or "- No earlier turns in this lesson."])
+    return "\n".join(lines)
