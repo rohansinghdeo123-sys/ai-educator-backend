@@ -10,6 +10,10 @@ class CoachSettings:
     provider_order: str = os.getenv("COACH_PROVIDER_ORDER", os.getenv("COACH_LLM_PROVIDER", "groq"))
     fast_model: str = os.getenv("GROQ_FAST_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
     tutor_model: str = os.getenv("GROQ_TUTOR_MODEL", "openai/gpt-oss-120b")
+    # Deep tier: numerical, exam, and strict-grounding turns. Point this (or
+    # OPENROUTER_DEEP_MODEL / OPENAI_DEEP_MODEL with provider order) at a
+    # frontier model to upgrade reasoning-heavy turns without touching code.
+    deep_model: str = os.getenv("GROQ_DEEP_MODEL", os.getenv("GROQ_TUTOR_MODEL", "openai/gpt-oss-120b"))
     review_model: str = os.getenv("GROQ_REVIEW_MODEL", "llama-3.3-70b-versatile")
     vision_model: str = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
     fallback_model: str = os.getenv("GROQ_FALLBACK_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")

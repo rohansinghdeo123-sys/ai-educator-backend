@@ -2432,6 +2432,8 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
         if intent == "definition"
         and not query_understanding.is_follow_up
         and retrieval_policy == "none"
+        else "deep"
+        if intent in {"numerical", "exam"} or strict_grounding
         else "balanced"
     )
 

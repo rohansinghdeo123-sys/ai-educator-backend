@@ -114,6 +114,8 @@ class LLMRouter:
             return "REVIEW"
         if role == "profiler" or complexity == "fast":
             return "FAST"
+        if complexity == "deep":
+            return "DEEP"
         return "TUTOR"
 
     def _provider_api_key(self, provider: str) -> str:
@@ -330,6 +332,8 @@ class LLMRouter:
             return coach_settings.fast_model
         if role == "reviewer":
             return coach_settings.review_model
+        if complexity == "deep":
+            return coach_settings.deep_model
         return coach_settings.tutor_model
 
     def _estimate_route_cost(self, provider: str, model: str, input_tokens: int, output_tokens: int) -> float:
