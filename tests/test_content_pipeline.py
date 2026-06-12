@@ -170,6 +170,70 @@ class ContentPipelineTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_search_scope_topic_narrows_to_matching_chapter(self):
+        SessionTesting = self._session_factory()
+        db = SessionTesting()
+        try:
+            hydrocarbons = ContentChapter(
+                board="NCERT",
+                class_level="11",
+                subject="Chemistry",
+                chapter_name="Hydrocarbons",
+                slug="ncert_class_11_chemistry_hydrocarbons",
+                status="approved",
+            )
+            thermodynamics = ContentChapter(
+                board="NCERT",
+                class_level="11",
+                subject="Chemistry",
+                chapter_name="Thermodynamics",
+                slug="ncert_class_11_chemistry_thermodynamics",
+                status="approved",
+            )
+            db.add_all([hydrocarbons, thermodynamics])
+            db.flush()
+            db.add(
+                ContentChunk(
+                    chapter_id=hydrocarbons.id,
+                    chunk_id="hydro_chunk",
+                    text="Combustion of hydrocarbons releases energy as heat.",
+                    page_start=4,
+                    page_end=4,
+                    lexical_terms=["combustion", "hydrocarbons", "energy"],
+                )
+            )
+            db.add(
+                ContentChunk(
+                    chapter_id=thermodynamics.id,
+                    chunk_id="thermo_chunk",
+                    text="Thermodynamics studies combustion energy transfer in systems.",
+                    page_start=9,
+                    page_end=9,
+                    lexical_terms=["combustion", "energy", "thermodynamics"],
+                )
+            )
+            db.commit()
+
+            with patch("Logic.content_pipeline.SessionLocal", SessionTesting):
+                # Topic names a chapter: results must come only from it.
+                narrowed = search_approved_content(
+                    "combustion",
+                    "what happens during combustion",
+                    scope={"subject": "Chemistry", "topic": "Thermodynamics"},
+                )
+                # Topic finer-grained than any chapter name: keep all chapters.
+                fallback = search_approved_content(
+                    "combustion",
+                    "what happens during combustion",
+                    scope={"subject": "Chemistry", "topic": "alkanes"},
+                )
+
+            self.assertIn("Thermodynamics studies combustion", narrowed["context"])
+            self.assertNotIn("Combustion of hydrocarbons", narrowed["context"])
+            self.assertIn("Combustion of hydrocarbons", fallback["context"])
+        finally:
+            db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

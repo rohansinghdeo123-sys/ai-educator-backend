@@ -799,20 +799,30 @@ def chapter_report(db: Session, chapter_id: int) -> Dict[str, Any]:
 
 
 def _chapter_scope_matches(chapter: ContentChapter, scope: Optional[Dict[str, Any]], section_id: str) -> bool:
+    """Hard scope filters: subject and chapter must match when supplied."""
     if not scope:
         return True
     subject = normalize_key(scope.get("subject"))
     chapter_value = normalize_key(scope.get("chapter"))
-    topic = normalize_key(scope.get("topic") or scope.get("section_id") or section_id)
     if subject and subject not in normalize_key(chapter.subject):
         return False
     if chapter_value and chapter_value not in normalize_key(f"{chapter.chapter_name} {chapter.slug} chapter_{chapter.chapter_number or ''}"):
         return False
-    if topic and topic not in {"general", "open", "any", "all"}:
-        haystack = normalize_key(f"{chapter.chapter_name} {chapter.slug} {chapter.subject}")
-        if topic not in haystack:
-            return True
     return True
+
+
+def _chapter_matches_topic(chapter: ContentChapter, scope: Optional[Dict[str, Any]], section_id: str) -> bool:
+    """Soft topic filter: True when the scope topic names this chapter.
+
+    Topics are often finer-grained than chapter names (e.g. topic "alkanes"
+    inside chapter "Hydrocarbons"), so callers must treat a miss as
+    "no preference", not exclusion — see search_approved_content.
+    """
+    topic = normalize_key((scope or {}).get("topic") or (scope or {}).get("section_id") or section_id)
+    if not topic or topic in {"general", "open", "any", "all"}:
+        return False
+    haystack = normalize_key(f"{chapter.chapter_name} {chapter.slug} {chapter.subject}")
+    return topic in haystack
 
 
 def _score_text(text: str, terms: Sequence[str]) -> int:
@@ -857,6 +867,11 @@ def search_approved_content(
     try:
         chapters = db.query(ContentChapter).filter(ContentChapter.status.in_(APPROVED_STATUSES)).all()
         chapters = [chapter for chapter in chapters if _chapter_scope_matches(chapter, scope, section_id)]
+        # Topic narrows to matching chapters when it names one; otherwise the
+        # topic is finer-grained than chapter names and ranking handles it.
+        topic_matched = [chapter for chapter in chapters if _chapter_matches_topic(chapter, scope, section_id)]
+        if topic_matched:
+            chapters = topic_matched
         if not chapters:
             return {"context": "", "source": "content_pipeline", "paragraphs_found": 0}
         chapter_ids = [chapter.id for chapter in chapters]
