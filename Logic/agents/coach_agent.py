@@ -20,6 +20,7 @@ from Logic.agent_event_bus import event_bus
 from Logic.agent_runtime import (
     build_initial_agent_state,
     complete_agent_run,
+    flush_agent_runtime,
     record_agent_handoff,
     record_agent_messages,
     record_agent_step,
@@ -1810,6 +1811,9 @@ def _mark_stream_runtime_failed(db, turn_id: str, exc: Exception) -> None:
             output_data={"error": str(exc)[:500]},
             error=exc,
         )
+        # Steps are buffered until run completion; a failed run never reaches
+        # complete_agent_run, so flush the buffered telemetry here.
+        flush_agent_runtime(db, turn_id)
     except Exception as step_exc:
         logger.warning("Could not record stream failure step: %s", step_exc)
 

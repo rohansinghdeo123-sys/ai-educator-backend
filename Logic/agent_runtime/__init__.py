@@ -18,6 +18,7 @@ from .state import (
 )
 from .store import (
     complete_agent_run,
+    flush_agent_runtime,
     record_agent_handoff,
     record_agent_messages,
     record_agent_step,
@@ -37,6 +38,7 @@ __all__ = [
     "build_initial_agent_state",
     "clamp_confidence",
     "complete_agent_run",
+    "flush_agent_runtime",
     "normalize_agent_role",
     "normalize_handoff_status",
     "normalize_message_type",

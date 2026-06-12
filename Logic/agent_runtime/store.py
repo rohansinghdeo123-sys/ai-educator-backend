@@ -1,9 +1,18 @@
-"""Persistence helpers for the controlled agent runtime."""
+"""Persistence helpers for the controlled agent runtime.
+
+Steps, handoffs, messages, and tool calls are buffered in memory per run and
+written in a single commit by ``complete_agent_run`` (or
+``flush_agent_runtime`` on failure paths). The coach turn engine records a
+dozen telemetry rows per turn; committing each one individually put 10+
+synchronous Postgres round trips between the student and their answer.
+Only ``start_agent_run`` still commits eagerly so crashed turns stay visible.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import logging
+import threading
 from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy.orm import Session
@@ -51,12 +60,51 @@ def _commit_or_rollback(db: Session, action: str) -> bool:
         return False
 
 
-def _next_step_order(db: Session, run_id: str) -> int:
+_PENDING_LOCK = threading.Lock()
+_PENDING_ROWS: Dict[str, List[Any]] = {}
+_PENDING_STEP_ORDER: Dict[str, int] = {}
+_MAX_PENDING_RUNS = 64
+
+
+def _queue_pending(run_id: str, rows: Iterable[Any]) -> None:
+    with _PENDING_LOCK:
+        bucket = _PENDING_ROWS.setdefault(run_id, [])
+        bucket.extend(rows)
+        # Abandoned runs (process killed mid-turn) must not grow the buffer
+        # without bound; evict the oldest runs' telemetry.
+        while len(_PENDING_ROWS) > _MAX_PENDING_RUNS:
+            evicted = next(iter(_PENDING_ROWS))
+            _PENDING_ROWS.pop(evicted, None)
+            _PENDING_STEP_ORDER.pop(evicted, None)
+
+
+def _drain_pending(run_id: str) -> List[Any]:
+    with _PENDING_LOCK:
+        _PENDING_STEP_ORDER.pop(run_id, None)
+        return _PENDING_ROWS.pop(run_id, [])
+
+
+def _next_step_order(run_id: str) -> int:
+    with _PENDING_LOCK:
+        order = _PENDING_STEP_ORDER.get(run_id, 0) + 1
+        _PENDING_STEP_ORDER[run_id] = order
+        return order
+
+
+def flush_agent_runtime(db: Session, run_id: str) -> int:
+    """Write any buffered telemetry rows for a run in a single commit."""
+    rows = _drain_pending(run_id)
+    if not rows:
+        return 0
     try:
-        count = db.query(AgentRuntimeStep).filter(AgentRuntimeStep.run_id == run_id).count()
-        return int(count or 0) + 1
-    except Exception:
-        return 1
+        db.add_all(rows)
+        if not _commit_or_rollback(db, "buffered records"):
+            return 0
+        return len(rows)
+    except Exception as exc:
+        db.rollback()
+        logger.warning("Could not flush agent runtime buffer for %s: %s", run_id, exc)
+        return 0
 
 
 def start_agent_run(
@@ -126,7 +174,7 @@ def record_agent_step(
             step_name=step_name,
             agent_name=normalize_agent_role(agent_name) if agent_name else "",
             status=status,
-            step_order=_next_step_order(db, run_id),
+            step_order=_next_step_order(run_id),
             started_at=started_at,
             completed_at=completed_at,
             latency_ms=max(0, int(latency_ms or 0)),
@@ -134,13 +182,9 @@ def record_agent_step(
             output_json=output_data or {},
             error=_compact_text(error, 1000),
         )
-        db.add(step)
-        if not _commit_or_rollback(db, f"step {step_name}"):
-            return None
-        db.refresh(step)
+        _queue_pending(run_id, [step])
         return step
     except Exception as exc:
-        db.rollback()
         logger.warning("Could not record agent runtime step %s: %s", step_name, exc)
         return None
 
@@ -151,11 +195,11 @@ def record_agent_messages(
     run_id: str,
     messages: Iterable[AgentMessage],
 ) -> int:
-    stored = 0
     try:
+        rows = []
         for message in list(messages or []):
             payload = message.to_dict()
-            db.add(
+            rows.append(
                 AgentRuntimeMessage(
                     run_id=run_id,
                     sender_agent=str(payload.get("sender_agent") or ""),
@@ -168,12 +212,10 @@ def record_agent_messages(
                     result_json=_safe_dict(payload.get("result")),
                 )
             )
-            stored += 1
-        if stored and not _commit_or_rollback(db, "messages"):
-            return 0
-        return stored
+        if rows:
+            _queue_pending(run_id, rows)
+        return len(rows)
     except Exception as exc:
-        db.rollback()
         logger.warning("Could not record agent runtime messages: %s", exc)
         return 0
 
@@ -185,8 +227,8 @@ def record_agent_tool_calls(
     tools: Iterable[Dict[str, Any]],
     agent_name: str = "lead_coach_orchestrator",
 ) -> int:
-    stored = 0
     try:
+        rows = []
         for tool in list(tools or []):
             tool_name = str(tool.get("name") or tool.get("tool_name") or "tool")
             output_payload = _safe_dict(tool.get("output") or tool.get("result") or tool.get("output_json"))
@@ -196,7 +238,7 @@ def record_agent_tool_calls(
                     for key, value in tool.items()
                     if key not in {"name", "tool_name", "agent_name", "status", "latency_ms", "input", "input_json", "error"}
                 }
-            db.add(
+            rows.append(
                 AgentRuntimeToolCall(
                     run_id=run_id,
                     tool_name=tool_name,
@@ -209,12 +251,10 @@ def record_agent_tool_calls(
                     error=_compact_text(tool.get("error"), 1000),
                 )
             )
-            stored += 1
-        if stored and not _commit_or_rollback(db, "tool calls"):
-            return 0
-        return stored
+        if rows:
+            _queue_pending(run_id, rows)
+        return len(rows)
     except Exception as exc:
-        db.rollback()
         logger.warning("Could not record agent runtime tool calls: %s", exc)
         return 0
 
@@ -240,13 +280,9 @@ def record_agent_handoff(
             input_json=input_data or {},
             result_json=result_data or {},
         )
-        db.add(handoff)
-        if not _commit_or_rollback(db, f"handoff {from_agent}->{to_agent}"):
-            return None
-        db.refresh(handoff)
+        _queue_pending(run_id, [handoff])
         return handoff
     except Exception as exc:
-        db.rollback()
         logger.warning("Could not record agent runtime handoff: %s", exc)
         return None
 
@@ -259,6 +295,7 @@ def complete_agent_run(
     latency_ms: int = 0,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Optional[AgentRuntimeRun]:
+    pending_rows = _drain_pending(state.turn_id)
     try:
         run = db.query(AgentRuntimeRun).filter(AgentRuntimeRun.run_id == state.turn_id).first()
         if run is None:
@@ -272,6 +309,8 @@ def complete_agent_run(
                 started_at=_now(),
             )
             db.add(run)
+        if pending_rows:
+            db.add_all(pending_rows)
         run.status = status
         run.intent = state.detected_intent
         run.mode = state.selected_mode
