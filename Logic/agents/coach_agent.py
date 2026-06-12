@@ -1046,67 +1046,28 @@ def _run_learning_intelligence_agent(
     conversation_context: Optional[Dict[str, Any]],
     retrieval_policy: str = "none",
 ) -> str:
+    """Build the private teaching blueprint deterministically.
+
+    This used to be a separate fast-model call, which put a full LLM round
+    trip between the student and the draft while restating signals the turn
+    engine already computed. The bullets below carry the same routing
+    guidance into the tutor prompt at zero latency and token cost.
+    """
     adaptive_context = adaptive_context or {}
     conversation_context = conversation_context or {}
     student_state = _as_dict(adaptive_context.get("student_state"))
     adaptive_strategy = _as_dict(adaptive_context.get("adaptive_strategy"))
 
-    fallback = "\n".join([
+    return "\n".join([
         f"- Intent: {intent}",
         f"- Format: {answer_format.get('label', 'Concept Builder')}",
         f"- Student level: {student_state.get('knowledge_level', 'unknown')}",
         f"- Emotional state: {student_state.get('emotional_state', 'steady')}",
         f"- Knowledge route: {retrieval_policy}",
+        f"- Follow-up mode: {bool(conversation_context.get('is_follow_up'))}",
         f"- Strategy: {adaptive_strategy.get('answer_style', 'adaptive teacher-led explanation')}",
         "- Teach the core idea, check understanding, and store the weak signal if confusion appears.",
     ])
-
-    try:
-        prompt = f"""
-You are the Learning Intelligence Profiler for a school AI tutor.
-
-Create a compact private teaching blueprint. Do not answer the student.
-
-Return 5-7 short bullets covering:
-- true intent
-- likely knowledge level
-- prerequisite risk
-- best teaching sequence
-- whether to test
-- whether to rely on reasoning, conversation memory, or retrieved study material
-- memory/weak-signal to store
-- ideal final response shape
-
-Question:
-{question}
-
-Detected intent: {intent}
-Selected answer format: {answer_format.get("label", "Concept Builder")}
-Student state: {student_state}
-Adaptive strategy: {adaptive_strategy}
-Follow-up mode: {conversation_context.get("is_follow_up", False)}
-Retrieval policy: {retrieval_policy}
-Recent thread:
-{conversation_context.get("recent_thread", "No previous lesson thread.")}
-""".strip()
-
-        blueprint = model_gateway.complete(
-            role="profiler",
-            messages=[
-                {"role": "system", "content": "You create concise private tutoring plans for another AI agent."},
-                {"role": "user", "content": prompt},
-            ],
-            agent_name="intent_profiler",
-            task="Create a private learning blueprint for the tutor model.",
-            student_visible=False,
-            safety_tier="planning",
-            temperature=0.12,
-            max_tokens=280,
-        )
-        return blueprint or fallback
-    except Exception as exc:
-        logger.error("[LEARNING INTELLIGENCE] Groq API error: %s", exc)
-        return fallback
 
 
 # ─── KNOWLEDGE-GRAPH ANSWER BUILDER (no LLM) ────────────────────────────────
@@ -2446,6 +2407,7 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
 
     # ── Answer source ──────────────────────────────────────────────────
     should_review_answer = True
+    live_streamed = False
     if lightweight_reply:
         final_answer = lightweight_reply
         should_review_answer = False
@@ -2484,7 +2446,7 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
 
         draft = ""
         try:
-            draft = model_gateway.complete(
+            draft_stream = model_gateway.stream(
                 role="tutor",
                 messages=[
                     {"role": "system", "content": draft_prompt},
@@ -2492,20 +2454,32 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
                 ],
                 complexity=routing_tier,
                 agent_name="tutor_model",
-                task="Draft the core tutor answer from context, tools, and policy.",
-                student_visible=False,
+                task="Stream the core tutor answer from context, tools, and policy.",
+                student_visible=True,
                 safety_tier="draft_answer",
                 temperature=0.35,
-                max_tokens=700,
+                max_tokens=1100,
             )
+            for chunk in draft_stream:
+                delta = getattr(chunk.choices[0].delta, "content", None) or ""
+                if not delta:
+                    continue
+                draft += delta
+                turn_state["partial_answer"] = draft
+                # True streaming: the tutor draft is the student-visible answer.
+                # answer.completed below remains the authoritative final text
+                # (formatting / conditional review / repair may adjust it).
+                live_streamed = True
+                yield _answer_delta_event(delta, turn_id=turn_id)
         except Exception as exc:
-            logger.error("[COACH DRAFT] Groq error: %s", exc)
+            logger.error("[COACH DRAFT] LLM error: %s", exc)
             agent_state.apply_error(stage="tutor_draft", error=exc)
             trace.record_fallback("tutor_model_failed", error=str(exc)[:240])
-            fallback = _material_not_found(adaptive_context) if strict_grounding else (
-                recommendation if intent == "planning" else "I'm having trouble explaining that right now."
-            )
-            draft = fallback
+            if not draft.strip():
+                live_streamed = False
+                draft = _material_not_found(adaptive_context) if strict_grounding else (
+                    recommendation if intent == "planning" else "I'm having trouble explaining that right now."
+                )
         agent_state.apply_answer(draft=draft)
 
         enriched = (
@@ -2583,136 +2557,10 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
         detail=(
             "Conversational response is ready."
             if lightweight_reply
-            else "Core explanation is ready for strategy review."
+            else "Core explanation is ready for quality checks."
         ),
         turn_id=turn_id,
     )
-    if not lightweight_reply:
-        trace.mark_phase("reviewing")
-        yield _stage_event(
-            stage="reviewing",
-            status="active",
-            agent="Coach",
-            title="Verifying the answer",
-            detail="Checking clarity, accuracy, and the teaching level.",
-            turn_id=turn_id,
-        )
-        yield _stage_event(
-            stage="reviewing",
-            status="done",
-            agent="Coach",
-            title="Answer verified",
-            detail="The response is clear and ready to deliver.",
-            turn_id=turn_id,
-        )
-    yield _stage_event(
-        stage="formatting",
-        status="active",
-        agent="Coach",
-        title="Writing your answer",
-        detail="Streaming the response into a clean study format.",
-        turn_id=turn_id,
-    )
-
-    reviewed_answer_buffer = ""
-    live_streamed = False
-    if should_review_answer:
-        try:
-            review_stream = model_gateway.stream(
-                role="reviewer",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": _build_review_prompt(
-                            coach=coach,
-                            question=question,
-                            draft=final_answer,
-                            intent=intent,
-                            answer_format=answer_format,
-                            adaptive_context=adaptive_context,
-                            learning_blueprint=learning_blueprint,
-                            strict_grounding=strict_grounding,
-                            response_plan=response_plan_payload,
-                        ) + f"\n\n{orchestration_prompt}",
-                    },
-                    {"role": "user", "content": "Polish the draft into the final student answer."},
-                ],
-                complexity="fast" if routing_tier == "fast" else "balanced",
-                agent_name="answer_reviewer",
-                task="Stream the reviewed final answer to the student.",
-                student_visible=True,
-                safety_tier="final_answer",
-                temperature=0.18,
-                max_tokens=850,
-            )
-            for chunk in review_stream:
-                delta = getattr(chunk.choices[0].delta, "content", None) or ""
-                if not delta:
-                    continue
-                reviewed_answer_buffer += delta
-                turn_state["partial_answer"] = reviewed_answer_buffer
-                # True streaming: deliver tokens as the reviewer produces them.
-                # answer.completed below remains the authoritative final text
-                # (formatting / quality-repair may adjust it).
-                live_streamed = True
-                yield _answer_delta_event(delta, turn_id=turn_id)
-        except Exception as exc:
-            logger.error("[COACH STREAM REVIEW] Groq API error: %s", exc)
-            agent_state.apply_error(stage="reviewer_stream", error=exc)
-            trace.record_fallback("reviewer_stream_failed", error=str(exc)[:240])
-
-    reviewer_answer = reviewed_answer_buffer.strip()
-    if reviewer_answer:
-        final_answer = _apply_deterministic_format(reviewed_answer_buffer)
-    else:
-        final_answer = _apply_deterministic_format(final_answer)
-    final_answer = _enforce_response_plan_constraints(final_answer, response_plan_payload)
-    turn_state["final_answer"] = final_answer
-    agent_state.apply_answer(final_answer=final_answer, reviewer_notes=reviewer_answer)
-    review_status = "completed" if should_review_answer and reviewer_answer else (
-        "fallback" if should_review_answer else "skipped"
-    )
-    agent_state.add_message(
-        sender_agent="answer_reviewer",
-        receiver_agent="lead_coach_orchestrator",
-        message_type="review_result",
-        task="Polish the draft for clarity, accuracy, tone, and student friendliness.",
-        evidence={
-            "review_required": should_review_answer,
-            "strict_grounding": strict_grounding,
-            "answer_format": answer_format,
-            "response_plan": response_plan_payload,
-        },
-        confidence=0.88 if review_status in {"completed", "skipped"} else 0.58,
-        result={
-            "status": review_status,
-            "review_chars": len(reviewer_answer),
-            "final_answer_chars": len(final_answer or ""),
-        },
-    )
-    record_agent_handoff(
-        db,
-        run_id=turn_id,
-        from_agent="lead_coach_orchestrator",
-        to_agent="answer_reviewer",
-        reason="Check the draft before delivery when the route needs review.",
-        status=review_status,
-        input_data={"review_required": should_review_answer, "draft_chars": len(agent_state.tutor_draft or "")},
-        result_data={"review_chars": len(reviewer_answer), "final_answer_chars": len(final_answer or "")},
-    )
-    record_agent_step(
-        db,
-        run_id=turn_id,
-        step_name="answer_reviewed",
-        agent_name="answer_reviewer",
-        status=review_status,
-        output_data={
-            "review_required": should_review_answer,
-            "review_chars": len(reviewer_answer),
-            "final_answer_chars": len(final_answer or ""),
-        },
-    )
-
     trace.mark_phase("quality")
     quality_report = score_coach_answer(
         question=question,
@@ -2741,6 +2589,143 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
             passed=bool(verification.get("passed")),
             issues=list(verification.get("issues") or []),
         )
+
+    # Review is an exception path: it runs only when the deterministic checks
+    # flag the draft, so a healthy turn costs a single generation.
+    review_needed = should_review_answer and (
+        not quality_report.passed
+        or (bool(verification) and not verification.get("passed", True))
+    )
+    if not lightweight_reply:
+        trace.mark_phase("reviewing")
+        yield _stage_event(
+            stage="reviewing",
+            status="active",
+            agent="Coach",
+            title="Verifying the answer",
+            detail=(
+                "Improving clarity and accuracy before delivery."
+                if review_needed
+                else "Checking clarity, accuracy, and the teaching level."
+            ),
+            turn_id=turn_id,
+        )
+    reviewer_answer = ""
+    if review_needed:
+        try:
+            reviewer_answer = model_gateway.complete(
+                role="reviewer",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": _build_review_prompt(
+                            coach=coach,
+                            question=question,
+                            draft=final_answer,
+                            intent=intent,
+                            answer_format=answer_format,
+                            adaptive_context=adaptive_context,
+                            learning_blueprint=learning_blueprint,
+                            strict_grounding=strict_grounding,
+                            response_plan=response_plan_payload,
+                        ) + f"\n\n{orchestration_prompt}",
+                    },
+                    {"role": "user", "content": "Polish the draft into the final student answer."},
+                ],
+                complexity="fast" if routing_tier == "fast" else "balanced",
+                agent_name="answer_reviewer",
+                task="Repair a flagged tutor draft before delivery.",
+                student_visible=True,
+                safety_tier="final_answer",
+                temperature=0.18,
+                max_tokens=1200,
+            ).strip()
+        except Exception as exc:
+            logger.error("[COACH REVIEW] LLM error: %s", exc)
+            agent_state.apply_error(stage="answer_review", error=exc)
+            trace.record_fallback("reviewer_failed", error=str(exc)[:240])
+
+    if reviewer_answer:
+        final_answer = _apply_deterministic_format(reviewer_answer)
+    else:
+        final_answer = _apply_deterministic_format(final_answer)
+    final_answer = _enforce_response_plan_constraints(final_answer, response_plan_payload)
+    turn_state["final_answer"] = final_answer
+    agent_state.apply_answer(final_answer=final_answer, reviewer_notes=reviewer_answer)
+    if reviewer_answer:
+        quality_report = score_coach_answer(
+            question=question,
+            answer=final_answer,
+            retrieved_context=str((retrieved_material or {}).get("context") or ""),
+            strict_grounding=strict_grounding,
+            intent=intent,
+            answer_format=str(answer_format.get("id") or "concept"),
+        )
+    if not lightweight_reply:
+        yield _stage_event(
+            stage="reviewing",
+            status="done",
+            agent="Coach",
+            title="Answer verified",
+            detail=(
+                "Improved the answer before delivery."
+                if reviewer_answer
+                else "The response is clear and ready to deliver."
+            ),
+            turn_id=turn_id,
+        )
+    yield _stage_event(
+        stage="formatting",
+        status="active",
+        agent="Coach",
+        title="Writing your answer",
+        detail="Finalizing the response in a clean study format.",
+        turn_id=turn_id,
+    )
+    review_status = "completed" if review_needed and reviewer_answer else (
+        "fallback" if review_needed else "skipped"
+    )
+    agent_state.add_message(
+        sender_agent="answer_reviewer",
+        receiver_agent="lead_coach_orchestrator",
+        message_type="review_result",
+        task="Polish the draft for clarity, accuracy, tone, and student friendliness.",
+        evidence={
+            "review_required": review_needed,
+            "strict_grounding": strict_grounding,
+            "answer_format": answer_format,
+            "response_plan": response_plan_payload,
+        },
+        confidence=0.88 if review_status in {"completed", "skipped"} else 0.58,
+        result={
+            "status": review_status,
+            "review_chars": len(reviewer_answer),
+            "final_answer_chars": len(final_answer or ""),
+        },
+    )
+    record_agent_handoff(
+        db,
+        run_id=turn_id,
+        from_agent="lead_coach_orchestrator",
+        to_agent="answer_reviewer",
+        reason="Check the draft before delivery when the route needs review.",
+        status=review_status,
+        input_data={"review_required": review_needed, "draft_chars": len(agent_state.tutor_draft or "")},
+        result_data={"review_chars": len(reviewer_answer), "final_answer_chars": len(final_answer or "")},
+    )
+    record_agent_step(
+        db,
+        run_id=turn_id,
+        step_name="answer_reviewed",
+        agent_name="answer_reviewer",
+        status=review_status,
+        output_data={
+            "review_required": review_needed,
+            "review_chars": len(reviewer_answer),
+            "final_answer_chars": len(final_answer or ""),
+        },
+    )
+
     initial_repair_decision = decide_answer_repair(
         quality=quality_report,
         verification=verification,
