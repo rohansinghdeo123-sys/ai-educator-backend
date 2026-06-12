@@ -113,6 +113,45 @@ class ContentPipelineTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_approval_bumps_version_only_when_source_pdf_changed(self):
+        SessionTesting = self._session_factory()
+        db = SessionTesting()
+        try:
+            chapter = ContentChapter(
+                slug="ncert_class_11_chemistry_chapter_1",
+                status="validated",
+                source_hash="hash_a",
+                validation_report={"ready_for_approval": True},
+                concept_count=3,
+            )
+            db.add(chapter)
+            db.commit()
+
+            # First approval: goes live as v1 and records the live hash.
+            approve_chapter(db, chapter.id, approved_by="founder")
+            db.commit()
+            self.assertEqual(chapter.version, "v1")
+            self.assertEqual(chapter.published_source_hash, "hash_a")
+
+            # Re-approval without a PDF change must NOT bump the version.
+            chapter.status = "validated"
+            db.commit()
+            approve_chapter(db, chapter.id, approved_by="founder")
+            db.commit()
+            self.assertEqual(chapter.version, "v1")
+
+            # Re-ingest with a new PDF (new source hash), then re-approve:
+            # the version must bump so traces can name the source revision.
+            chapter.status = "validated"
+            chapter.source_hash = "hash_b"
+            db.commit()
+            approve_chapter(db, chapter.id, approved_by="founder")
+            db.commit()
+            self.assertEqual(chapter.version, "v2")
+            self.assertEqual(chapter.published_source_hash, "hash_b")
+        finally:
+            db.close()
+
     def test_search_approved_content_ignores_unapproved_chapters(self):
         SessionTesting = self._session_factory()
         db = SessionTesting()

@@ -368,6 +368,9 @@ class ContentChapter(Base):
     source_hash = Column(String, default="", index=True)
     status = Column(String, default="uploaded", index=True)
     version = Column(String, default="v1")
+    # Hash of the PDF that is currently live for students; lets approval bump
+    # the version when a re-ingested PDF replaces the published source.
+    published_source_hash = Column(String, default="")
 
     page_count = Column(Integer, default=0)
     extracted_page_count = Column(Integer, default=0)

@@ -381,7 +381,9 @@ def admin_content_approve(
     chapter_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_admin: Dict[str, Any] = Depends(require_admin),
+    # Approval makes a chapter visible to Study Lab retrieval, so it is
+    # founder-gated: regular admins prepare content, the founder makes it live.
+    current_admin: Dict[str, Any] = Depends(require_founder_admin),
 ):
     try:
         chapter = approve_chapter(db, chapter_id, approved_by=str(current_admin.get("uid") or "admin"))
@@ -405,7 +407,7 @@ def admin_content_publish(
     chapter_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_admin: Dict[str, Any] = Depends(require_admin),
+    current_admin: Dict[str, Any] = Depends(require_founder_admin),
 ):
     try:
         chapter = publish_chapter(db, chapter_id, published_by=str(current_admin.get("uid") or "admin"))

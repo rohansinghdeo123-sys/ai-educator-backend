@@ -387,7 +387,9 @@ def ingest_pdf_file(
     chapter.pdf_path = str(pdf_path)
     chapter.source_hash = source_hash
     chapter.status = "uploaded"
-    chapter.version = DEFAULT_VERSION
+    # Keep the version across re-ingests; approval bumps it when the source
+    # hash differs from what students last saw.
+    chapter.version = chapter.version or DEFAULT_VERSION
     chapter.updated_at = datetime.utcnow()
     db.flush()
 
@@ -666,6 +668,13 @@ def generate_concepts_for_chapter(
     return import_concepts_for_chapter(db, chapter.id, generated, replace=replace)
 
 
+def _next_version(value: str) -> str:
+    match = re.fullmatch(r"v(\d+)", str(value or "").strip().lower())
+    if match:
+        return f"v{int(match.group(1)) + 1}"
+    return "v2"
+
+
 def approve_chapter(db: Session, chapter_id: int, *, approved_by: str = "") -> ContentChapter:
     chapter = db.query(ContentChapter).filter(ContentChapter.id == chapter_id).one_or_none()
     if chapter is None:
@@ -675,6 +684,12 @@ def approve_chapter(db: Session, chapter_id: int, *, approved_by: str = "") -> C
         raise ValueError("Chapter has no validated concepts. Import or generate concept JSON first.")
     if not report.get("ready_for_approval"):
         raise ValueError("Chapter is not ready for approval. Review validation_report first.")
+    # Approval is the moment content goes live for students. If the PDF was
+    # re-ingested since the last approval, bump the version so reports and
+    # traces can say which source revision answered a question.
+    if chapter.published_source_hash and chapter.published_source_hash != chapter.source_hash:
+        chapter.version = _next_version(chapter.version)
+    chapter.published_source_hash = chapter.source_hash
     chapter.status = "approved"
     chapter.approved_by = approved_by or "admin"
     chapter.approved_at = datetime.utcnow()
@@ -732,6 +747,7 @@ def serialize_chapter(chapter: ContentChapter) -> Dict[str, Any]:
         "pdf_path": chapter.pdf_path,
         "status": chapter.status,
         "version": chapter.version,
+        "published_source_hash": chapter.published_source_hash or "",
         "page_count": chapter.page_count,
         "extracted_page_count": chapter.extracted_page_count,
         "chunk_count": chapter.chunk_count,
