@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.security import (
@@ -17,7 +19,7 @@ from app.request_models import SubmitSessionRequest
 from app.serializers import format_test_session, normalize_topic, progress_payload
 from database import get_db
 from Logic.analytics_engine import get_user_analytics
-from models import TestHistory
+from models import TestHistory, UserProgress
 from schemas import (
     ProgressResponse,
     ProgressUpdate,
@@ -26,8 +28,11 @@ from schemas import (
 )
 from services.leaderboard_service import build_leaderboard
 from services.progress_service import apply_streak, create_test_history, get_or_create_progress
+from services.ttl_cache import TTLCache
 
 router = APIRouter(tags=["progress"])
+
+_pulse_cache = TTLCache(max_entries=4)
 
 
 @router.post("/update-progress")
@@ -250,6 +255,35 @@ def get_session_replay(
         "date": test.date.isoformat() if test.date else None,
         "replay_data": replay,
     }
+
+
+@router.get("/public/pulse")
+def public_pulse(db: Session = Depends(get_db)):
+    """Anonymized platform aggregates for logged-out surfaces (login page).
+
+    Deliberately public: returns counts and totals only — never user ids,
+    names, emails, phones, or any per-student record.
+    """
+
+    def build() -> Dict[str, Any]:
+        students, total_xp, top_streak = db.query(
+            func.count(UserProgress.id),
+            func.coalesce(func.sum(UserProgress.xp), 0),
+            func.coalesce(func.max(UserProgress.streak), 0),
+        ).one()
+        week_ago = date.today() - timedelta(days=7)
+        sessions_7d = (
+            db.query(func.count(TestHistory.id)).filter(TestHistory.date >= week_ago).scalar() or 0
+        )
+        return {
+            "students": int(students or 0),
+            "total_xp": int(total_xp or 0),
+            "top_streak": int(top_streak or 0),
+            "sessions_7d": int(sessions_7d),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    return _pulse_cache.get_or_build("pulse", 60.0, build)
 
 
 @router.get("/leaderboard")

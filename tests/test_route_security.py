@@ -33,6 +33,15 @@ class RouteSecurityTests(unittest.TestCase):
         self.assertEqual(self.client.get("/health/live").status_code, 200)
         self.assertEqual(self.client.get("/health").status_code, 200)
 
+    def test_public_pulse_is_public_and_anonymized(self):
+        resp = self.client.get("/public/pulse")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        for key in ("students", "total_xp", "top_streak", "sessions_7d"):
+            self.assertIn(key, body)
+        for forbidden in ("user_id", "users", "email", "phone", "name", "leaderboard"):
+            self.assertNotIn(forbidden, body)
+
     def test_protected_routes_require_auth(self):
         for method, path in [
             ("get", "/get-progress/u1"),
