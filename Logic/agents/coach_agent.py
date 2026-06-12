@@ -447,17 +447,19 @@ def _get_recent_interactions(
         db.query(AICoachInteraction)
         .filter(AICoachInteraction.coach_id == coach_id)
         .order_by(AICoachInteraction.id.desc())
-        .limit(limit * 3)
+        .limit(limit * 6)
         .all()
     )
     if session_id:
-        session_rows = [
+        # Never blend other conversations into this session's lesson thread.
+        # A new conversation must start with an empty thread - falling back to
+        # another session's rows made follow-ups resolve against the wrong
+        # lesson and leaked content across chats.
+        rows = [
             row for row in rows
             if isinstance(row.metadata_json, dict)
             and row.metadata_json.get("session_id") == session_id
         ]
-        if session_rows:
-            rows = session_rows
 
     return list(reversed(rows[:limit]))
 
@@ -560,6 +562,61 @@ def _build_assistance_blocks(question: str, answer_format: Dict[str, Any]) -> Li
             "prompt": f"What common mistake do students make in {topic_hint}, and how can I avoid it?",
         },
     ]
+
+
+def _maybe_refresh_long_term_summary(
+    db,
+    coach: AICoachProfile,
+    conversation_context: Dict[str, Any],
+    question: str,
+    final_answer: str,
+) -> None:
+    """Every 8th interaction, replace the template summary with a model-written
+    consolidation so the coach accumulates real understanding of the student
+    over weeks instead of stomping the summary with a fixed sentence."""
+    try:
+        turn_count = (
+            db.query(AICoachInteraction)
+            .filter(AICoachInteraction.coach_id == coach.coach_id)
+            .count()
+        )
+    except Exception:
+        return
+    if turn_count < 8 or turn_count % 8:
+        return
+    try:
+        summary = model_gateway.complete(
+            role="profiler",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You maintain a private long-term learning summary for a school student. "
+                        "Merge the previous summary with the newest lesson into at most 5 short lines: "
+                        "current focus topics, strengths, recurring confusions, and the next priority. "
+                        "Plain text only. Do not address the student."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Previous summary:\n{coach.long_term_summary or 'None yet.'}\n\n"
+                        f"Newest exchange:\nStudent: {question[:400]}\nTutor: {final_answer[:700]}\n\n"
+                        f"Durable memory:\n{conversation_context.get('durable_memory', 'None')}"
+                    ),
+                },
+            ],
+            agent_name="memory_mastery_engine",
+            task="Consolidate the student's long-term learning summary.",
+            student_visible=False,
+            safety_tier="memory",
+            temperature=0.2,
+            max_tokens=180,
+        ).strip()
+        if summary:
+            coach.long_term_summary = summary[:1200]
+    except Exception as exc:
+        logger.warning("Long-term summary consolidation skipped: %s", exc)
 
 
 def _update_learning_journey_summary(
@@ -3084,6 +3141,13 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
             answer_format=answer_format,
             topic_snapshot=topic_snapshot,
             is_follow_up=bool(conversation_context.get("is_follow_up")),
+        )
+        _maybe_refresh_long_term_summary(
+            db=db,
+            coach=coach,
+            conversation_context=conversation_context,
+            question=question,
+            final_answer=final_answer,
         )
 
     _persist_interaction(
