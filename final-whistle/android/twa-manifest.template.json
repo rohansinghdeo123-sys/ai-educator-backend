@@ -1,0 +1,22 @@
+{
+  "//": "Bubblewrap TWA template. Replace YOUR-DOMAIN with your deployed Vercel host (no https://), then run `bubblewrap init --manifest=...`. Regenerate signing keys locally.",
+  "packageId": "com.finalwhistle.app",
+  "host": "YOUR-DOMAIN.vercel.app",
+  "name": "Final Whistle",
+  "launcherName": "Final Whistle",
+  "display": "standalone",
+  "orientation": "portrait",
+  "themeColor": "#0A0E1A",
+  "navigationColor": "#0A0E1A",
+  "backgroundColor": "#0A0E1A",
+  "startUrl": "/dashboard",
+  "iconUrl": "https://YOUR-DOMAIN.vercel.app/icon-512.png",
+  "maskableIconUrl": "https://YOUR-DOMAIN.vercel.app/icon-maskable-512.png",
+  "webManifestUrl": "https://YOUR-DOMAIN.vercel.app/manifest.webmanifest",
+  "fallbackType": "customtabs",
+  "enableNotifications": false,
+  "appVersionName": "1.0.0",
+  "appVersionCode": 1,
+  "shortcuts": [],
+  "generatorApp": "bubblewrap-cli"
+}
