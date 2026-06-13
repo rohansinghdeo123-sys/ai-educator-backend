@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-pitch-900 text-white antialiased;
+  background-image:
+    radial-gradient(circle at 50% -10%, rgba(57, 255, 139, 0.10), transparent 55%),
+    radial-gradient(circle at 100% 0%, rgba(255, 212, 94, 0.06), transparent 45%);
+  background-attachment: fixed;
+  min-height: 100dvh;
+}
+
+@layer components {
+  /* Frosted glass card */
+  .glass {
+    @apply rounded-2xl border border-white/10 bg-white/[0.04] backdrop-blur-xl shadow-glass;
+  }
+
+  /* Primary neon CTA */
+  .btn-neon {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-neon px-5 py-2.5
+           font-semibold text-pitch-950 shadow-neon transition
+           hover:brightness-110 active:scale-[0.98] disabled:opacity-50;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-white/15
+           bg-white/5 px-5 py-2.5 font-medium text-white transition hover:bg-white/10;
+  }
+
+  .stat-pill {
+    @apply flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5
+           text-sm font-semibold;
+  }
+
+  /* Neon pitch divider line */
+  .pitch-line {
+    @apply h-px w-full bg-gradient-to-r from-transparent via-neon/40 to-transparent;
+  }
+}
+
+/* Subtle scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { @apply rounded-full bg-white/10; }
+::-webkit-scrollbar-thumb:hover { @apply bg-white/20; }
