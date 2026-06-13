@@ -2,6 +2,7 @@ import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import { createServerSupabase } from '@/lib/supabase/server';
 import PredictionForm from '@/components/PredictionForm';
+import ShareButton from '@/components/ShareButton';
 import { kickoffTime } from '@/lib/format';
 import type { Match, Prediction } from '@/lib/types';
 
@@ -67,6 +68,8 @@ export default async function MatchPage({ params }: { params: { id: string } }) 
       ) : (
         <PredictionForm match={m} existing={prediction} />
       )}
+
+      {prediction && <ShareButton predictionId={prediction.id} />}
     </div>
   );
 }
