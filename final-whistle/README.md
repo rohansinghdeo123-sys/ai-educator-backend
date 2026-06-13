@@ -24,6 +24,8 @@ See [`PLAN.md`](./PLAN.md) for the full architecture, scoring rules and roadmap.
 At [supabase.com](https://supabase.com), then:
 - **SQL Editor** → paste & run [`supabase/schema.sql`](./supabase/schema.sql)
   (tables, RLS, profile bootstrap trigger, seed badges).
+- (Optional) run [`supabase/seed.sql`](./supabase/seed.sql) for 8 demo teams +
+  a sample matchday so the app isn't empty on first launch.
 - **Authentication → Providers → Google**: enable it, add your Google OAuth
   client ID/secret ([Google Cloud Console](https://console.cloud.google.com)).
   Set the authorized redirect URI to:
