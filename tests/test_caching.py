@@ -63,26 +63,42 @@ class TTLCacheTests(unittest.TestCase):
 
 
 class FakeFirebaseAuth:
-    class UidIdentifier:
-        def __init__(self, uid):
-            self.uid = uid
-
     class _User:
-        def __init__(self, uid):
+        def __init__(self, uid, disabled=False):
             self.uid = uid
             self.display_name = f"Name {uid}"
             self.email = f"{uid}@example.com"
+            self.disabled = disabled
 
-    class _Result:
-        def __init__(self, users):
+    class _Page:
+        def __init__(self, users, next_page_token=None):
             self.users = users
+            self.next_page_token = next_page_token
 
-    def __init__(self):
+    def __init__(self, user_ids, disabled_ids=None, page_size=1000, fail=False):
         self.calls = 0
+        self.user_ids = list(user_ids)
+        self.disabled_ids = set(disabled_ids or [])
+        self.page_size = page_size
+        self.fail = fail
 
-    def get_users(self, identifiers):
+    def list_users(self, page_token=None, max_results=1000):
         self.calls += 1
-        return self._Result([self._User(identifier.uid) for identifier in identifiers])
+        if self.fail:
+            raise RuntimeError("Firebase directory unavailable")
+
+        start = int(page_token or 0)
+        size = min(max_results, self.page_size)
+        selected = self.user_ids[start:start + size]
+        next_index = start + len(selected)
+        next_page_token = str(next_index) if next_index < len(self.user_ids) else None
+        return self._Page(
+            [
+                self._User(user_id, disabled=user_id in self.disabled_ids)
+                for user_id in selected
+            ],
+            next_page_token=next_page_token,
+        )
 
 
 class LeaderboardCacheTests(unittest.TestCase):
@@ -104,7 +120,7 @@ class LeaderboardCacheTests(unittest.TestCase):
         leaderboard_service._firebase_lookup_cache.clear()
 
     def test_firebase_lookup_is_cached_across_calls(self):
-        fake_auth = FakeFirebaseAuth()
+        fake_auth = FakeFirebaseAuth(self.USER_IDS)
         with patch.object(leaderboard_service.security, "firebase_ready", return_value=True), patch.object(
             leaderboard_service.security, "firebase_auth", fake_auth
         ):
@@ -113,7 +129,7 @@ class LeaderboardCacheTests(unittest.TestCase):
         self.assertEqual(fake_auth.calls, 1)
 
     def test_cache_does_not_widen_email_visibility(self):
-        fake_auth = FakeFirebaseAuth()
+        fake_auth = FakeFirebaseAuth(self.USER_IDS)
         with patch.object(leaderboard_service.security, "firebase_ready", return_value=True), patch.object(
             leaderboard_service.security, "firebase_auth", fake_auth
         ):
@@ -130,6 +146,61 @@ class LeaderboardCacheTests(unittest.TestCase):
         self.assertIsNone(stranger_rows[self.USER_IDS[0]]["email"])
         # Both views came from one cached Firebase lookup.
         self.assertEqual(fake_auth.calls, 1)
+
+    def test_includes_every_active_firebase_user_across_pages(self):
+        directory_users = [
+            *self.USER_IDS,
+            *[f"lb-directory-user-{index}" for index in range(12)],
+        ]
+        disabled_user = directory_users[-1]
+        fake_auth = FakeFirebaseAuth(
+            directory_users,
+            disabled_ids={disabled_user},
+            page_size=4,
+        )
+
+        with patch.object(leaderboard_service.security, "firebase_ready", return_value=True), patch.object(
+            leaderboard_service.security, "firebase_auth", fake_auth
+        ):
+            rows = leaderboard_service.build_leaderboard(
+                self.db,
+                {"uid": self.USER_IDS[0], "name": "Current Student"},
+            )
+
+        row_ids = {row["user_id"] for row in rows}
+        self.assertEqual(row_ids, set(directory_users) - {disabled_user})
+        self.assertGreater(fake_auth.calls, 1)
+        self.assertEqual(rows[0]["user_id"], self.USER_IDS[1])
+        zero_progress = next(row for row in rows if row["user_id"] == "lb-directory-user-0")
+        self.assertEqual(zero_progress["xp"], 0)
+        self.assertEqual(zero_progress["streak"], 0)
+        self.assertEqual(zero_progress["total_tests"], 0)
+
+    def test_falls_back_to_all_progress_rows_when_firebase_is_unavailable(self):
+        fallback_ids = [f"lb-fallback-user-{index}" for index in range(12)]
+        self.db.add_all(
+            [
+                UserProgress(user_id=user_id, xp=index, streak=index % 3)
+                for index, user_id in enumerate(fallback_ids)
+            ]
+        )
+        self.db.commit()
+
+        fake_auth = FakeFirebaseAuth([], fail=True)
+        try:
+            with patch.object(leaderboard_service.security, "firebase_ready", return_value=True), patch.object(
+                leaderboard_service.security, "firebase_auth", fake_auth
+            ):
+                rows = leaderboard_service.build_leaderboard(self.db)
+
+            row_ids = {row["user_id"] for row in rows}
+            self.assertTrue(set(fallback_ids).issubset(row_ids))
+            self.assertGreaterEqual(len(rows), 12)
+        finally:
+            self.db.query(UserProgress).filter(UserProgress.user_id.in_(fallback_ids)).delete(
+                synchronize_session=False
+            )
+            self.db.commit()
 
 
 class AdminConsoleCacheTests(unittest.TestCase):
