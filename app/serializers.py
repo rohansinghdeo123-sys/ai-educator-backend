@@ -16,6 +16,7 @@ from models import (
     AdminAuditLog,
     ModelToolTrace,
     TestHistory,
+    UserProfile,
     UserProgress,
 )
 
@@ -62,7 +63,7 @@ def iso_or_none(value: Optional[datetime]) -> Optional[str]:
     return value.isoformat() if value else None
 
 
-def format_test_session(test: TestHistory) -> Dict[str, Any]:
+def format_test_session(test: TestHistory, class_level: str = "") -> Dict[str, Any]:
     questions = int(test.total_questions or 0)
     correct = int(test.score or 0)
     seconds = int(test.time_spent_seconds or 0)
@@ -97,6 +98,7 @@ def format_test_session(test: TestHistory) -> Dict[str, Any]:
     return {
         "id": str(test.id),
         "subject": "Chemistry",
+        "class_level": class_level,
         "topic": test.topic or "unknown",
         "duration": duration_minutes,
         "questions": questions,
@@ -331,9 +333,12 @@ def trace_payload(row: ModelToolTrace) -> Dict[str, Any]:
     }
 
 
-def student_payload(row: UserProgress) -> Dict[str, Any]:
+def student_payload(row: UserProgress, profile: Optional[UserProfile] = None) -> Dict[str, Any]:
     return {
         "user_id": row.user_id,
+        "display_name": profile.display_name if profile else "",
+        "class_level": profile.class_level if profile else "",
+        "onboarding_completed": bool(profile.onboarding_completed) if profile else False,
         "xp": int(row.xp or 0),
         "level": int(row.level or 1),
         "streak": int(row.streak or 0),

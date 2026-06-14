@@ -544,10 +544,11 @@ def admin_model_registry(
 @router.get("/admin/students")
 def admin_students(
     limit: int = Query(default=50, ge=1, le=200),
+    class_level: str = Query(default="", max_length=32),
     db: Session = Depends(get_db),
     _current_admin: Dict[str, Any] = Depends(require_admin),
 ):
-    return build_admin_students(db, limit=limit)
+    return build_admin_students(db, limit=limit, class_level=class_level)
 
 
 @router.get("/admin/system-health")

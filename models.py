@@ -63,6 +63,23 @@ class UserProgress(Base):
 
 
 # =========================================================
+# USER PROFILE
+# =========================================================
+class UserProfile(Base):
+    """Canonical account profile populated during post-login onboarding."""
+
+    __tablename__ = "user_profiles"
+
+    user_id = Column(String, primary_key=True)
+    email = Column(String, default="", index=True)
+    display_name = Column(String, default="")
+    class_level = Column(String, default="", index=True)
+    onboarding_completed = Column(Boolean, default=False, index=True)
+    created_at = Column(DateTime, default=_utcnow_naive)
+    updated_at = Column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)
+
+
+# =========================================================
 # TEST HISTORY
 # =========================================================
 class TestHistory(Base):

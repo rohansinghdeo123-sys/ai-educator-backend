@@ -1,7 +1,61 @@
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+ALLOWED_CLASS_LEVELS = {
+    "",
+    "Class 6",
+    "Class 7",
+    "Class 8",
+    "Class 9",
+    "Class 10",
+    "Class 11",
+    "Class 12",
+    "Other",
+}
+
+
+# =========================================================
+# USER PROFILE SCHEMAS
+# =========================================================
+class UserProfileUpdate(BaseModel):
+    display_name: Optional[str] = Field(default=None, min_length=2, max_length=80)
+    class_level: Optional[str] = Field(default=None, max_length=32)
+    onboarding_completed: Optional[bool] = None
+
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = " ".join(value.split())
+        if len(cleaned) < 2 or not any(character.isalpha() for character in cleaned):
+            raise ValueError("Enter a valid name")
+        return cleaned
+
+    @field_validator("class_level")
+    @classmethod
+    def validate_class_level(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if cleaned not in ALLOWED_CLASS_LEVELS:
+            raise ValueError("Select a valid class level")
+        return cleaned
+
+
+class UserProfileResponse(BaseModel):
+    user_id: str
+    email: str = ""
+    display_name: str = ""
+    class_level: str = ""
+    onboarding_completed: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 # =========================================================

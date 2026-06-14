@@ -36,6 +36,7 @@ class _LegacyRequest:
         required_not_found_response: Optional[str] = None,
         count: int = 5,
         topic: Optional[str] = None,
+        class_level: str = "",
     ):
         self.question = question
         self.section_id = section_id
@@ -51,6 +52,8 @@ class _LegacyRequest:
         self.fallback_to_general_knowledge = not strict_grounding
         self.required_not_found_response = required_not_found_response or MATERIAL_NOT_FOUND_MESSAGE
         self.count = count
+        self.class_level = class_level
+        self.learning_context = {"class_level": class_level} if class_level else {}
 
 
 def normalize_section_id(section_id: str) -> str:
@@ -74,6 +77,7 @@ def section_doubt(
     difficulty: str = "medium",
     strict_grounding: bool = False,
     required_not_found_response: Optional[str] = None,
+    class_level: str = "",
 ) -> str:
     """
     Main entry point for the section-based AI tutor.
@@ -96,14 +100,20 @@ def section_doubt(
         if search_result.get("error") or not str(search_result.get("context") or "").strip():
             return not_found
 
+    class_context = (
+        f"Student class level: {class_level}. Match the vocabulary, depth, examples, and exam framing to this level.\n\n"
+        if class_level
+        else ""
+    )
     request = _LegacyRequest(
-        question=question,
+        question=f"{class_context}{question}",
         section_id=section_id,
         session_id=session_id,
         mode=mode,
         difficulty=difficulty,
         strict_grounding=strict_grounding,
         required_not_found_response=not_found,
+        class_level=class_level,
     )
 
     logger.info(
@@ -192,6 +202,7 @@ def run_structured_agent(
     required_not_found_response: Optional[str] = None,
     count: int = 5,
     topic: Optional[str] = None,
+    class_level: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], Any]:
     request = _LegacyRequest(
         question=question,
@@ -203,6 +214,7 @@ def run_structured_agent(
         required_not_found_response=required_not_found_response,
         count=count,
         topic=topic,
+        class_level=class_level,
     )
 
     result = route_to_agent(request)
@@ -470,9 +482,10 @@ def build_grounded_fallback_probable_questions(
     ]
 
 
-def build_mcq_instruction(topic: str, difficulty: str, count: int) -> str:
+def build_mcq_instruction(topic: str, difficulty: str, count: int, class_level: str = "") -> str:
+    learner_level = class_level or "school"
     return f"""
-Generate exactly {count} high-quality Class 11 Chemistry MCQs for topic: {topic}.
+Generate exactly {count} high-quality {learner_level} Chemistry MCQs for topic: {topic}.
 
 Return valid JSON only.
 Do not include markdown.
@@ -519,6 +532,7 @@ def generate_structured_mcqs(
     strict_grounding: bool = False,
     required_not_found_response: Optional[str] = None,
     include_source: bool = False,
+    class_level: str = "",
 ) -> Dict[str, Any]:
     safe_count = max(1, min(int(count or 5), 10))
     safe_topic = (topic or section_id or "unknown").strip()
@@ -546,7 +560,7 @@ def generate_structured_mcqs(
 
     def _attempt() -> Tuple[List[Dict[str, Any]], Any]:
         payload, raw = run_structured_agent(
-            question=build_mcq_instruction(safe_topic, safe_difficulty, safe_count),
+            question=build_mcq_instruction(safe_topic, safe_difficulty, safe_count, class_level),
             section_id=safe_section_id,
             session_id=session_id,
             mode="exam",
@@ -555,6 +569,7 @@ def generate_structured_mcqs(
             required_not_found_response=not_found,
             count=safe_count,
             topic=safe_topic,
+            class_level=class_level,
         )
         attempt_questions = normalize_mcq_questions(payload, safe_count)
         if len(attempt_questions) < safe_count:
@@ -606,6 +621,7 @@ def generate_structured_mcqs(
         "topic": safe_topic,
         "section_id": safe_section_id,
         "difficulty": safe_difficulty,
+        "class_level": class_level,
         "questions": questions[:safe_count],
         "raw_answer": "" if questions else str(raw or ""),
         "fallback_used": fallback_used,
@@ -656,9 +672,10 @@ def normalize_probable_questions(payload: Optional[Dict[str, Any]]) -> List[Dict
     return normalized
 
 
-def build_probable_instruction(topic: str, difficulty: str) -> str:
+def build_probable_instruction(topic: str, difficulty: str, class_level: str = "") -> str:
+    learner_level = class_level or "school"
     return f"""
-Generate probable Class 11 Chemistry exam theory questions for topic: {topic}.
+Generate probable {learner_level} Chemistry exam theory questions for topic: {topic}.
 
 Return valid JSON only.
 Do not include markdown.
@@ -703,6 +720,7 @@ def generate_structured_probable_questions(
     strict_grounding: bool = False,
     required_not_found_response: Optional[str] = None,
     include_source: bool = False,
+    class_level: str = "",
 ) -> Dict[str, Any]:
     safe_topic = (topic or section_id or "unknown").strip()
     safe_section_id = normalize_section_id(section_id or safe_topic)
@@ -728,7 +746,7 @@ def generate_structured_probable_questions(
         }
 
     payload, raw = run_structured_agent(
-        question=build_probable_instruction(safe_topic, safe_difficulty),
+        question=build_probable_instruction(safe_topic, safe_difficulty, class_level),
         section_id=safe_section_id,
         session_id=session_id,
         mode="probable",
@@ -736,6 +754,7 @@ def generate_structured_probable_questions(
         strict_grounding=strict_grounding,
         required_not_found_response=not_found,
         topic=safe_topic,
+        class_level=class_level,
     )
 
     questions = normalize_probable_questions(payload)
@@ -775,6 +794,7 @@ def generate_structured_probable_questions(
         "topic": safe_topic,
         "section_id": safe_section_id,
         "difficulty": safe_difficulty,
+        "class_level": class_level,
         "questions": questions,
         "text": format_probable_text(questions),
         "raw_answer": "" if questions else str(raw or ""),

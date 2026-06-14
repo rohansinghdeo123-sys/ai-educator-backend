@@ -48,6 +48,7 @@ class RouteSecurityTests(unittest.TestCase):
             ("get", "/coach/conversations/u1"),
             ("post", "/coach/chat"),
             ("get", "/leaderboard"),
+            ("get", "/profile/me"),
             ("get", "/admin/me"),
             ("get", "/admin/console"),
             ("get", "/admin/prompts"),

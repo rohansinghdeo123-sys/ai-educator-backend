@@ -50,6 +50,7 @@ from schemas import (
     CoachProfileResponse,
 )
 from services.coach_service import conversation_rows_for_user
+from services.profile_service import profile_learning_context
 
 router = APIRouter(tags=["coach"])
 
@@ -97,7 +98,7 @@ async def _run_sse_on_single_thread(
 class CoachTurnRequest:
     """Adapter exposing a CoachChatRequest as the attribute bag the agent expects."""
 
-    def __init__(self, payload: CoachChatRequest):
+    def __init__(self, payload: CoachChatRequest, learner_profile: Dict[str, str] | None = None):
         self.user_id = payload.user_id
         self.question = (payload.original_message or payload.message).strip()
         self.raw_message = payload.message
@@ -119,7 +120,10 @@ class CoachTurnRequest:
         self.required_not_found_response = payload.required_not_found_response
         self.student_state = payload.student_state
         self.adaptive_strategy = payload.adaptive_strategy
-        self.learning_context = payload.learning_context
+        self.learning_context = {
+            **payload.learning_context,
+            **(learner_profile or {}),
+        }
         self.attachments = [item.model_dump() for item in payload.attachments]
         self.direct_answer = payload.direct_answer
         self.socratic_mode = payload.socratic_mode
@@ -310,13 +314,15 @@ def coach_chat(
     require_same_user_or_admin(payload.user_id, current_user)
     enforce_user_quota(payload.user_id, "coach")
 
-    result = coach_agent(CoachTurnRequest(payload), db=db)
+    learner_profile = profile_learning_context(db, payload.user_id)
+    result = coach_agent(CoachTurnRequest(payload, learner_profile), db=db)
     return result
 
 
 @router.post("/coach/chat/stream")
 async def coach_chat_stream(
     payload: CoachChatRequest,
+    db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
     """
@@ -327,7 +333,8 @@ async def coach_chat_stream(
     require_same_user_or_admin(payload.user_id, current_user)
     enforce_user_quota(payload.user_id, "coach")
 
-    coach_request = CoachTurnRequest(payload)
+    learner_profile = profile_learning_context(db, payload.user_id)
+    coach_request = CoachTurnRequest(payload, learner_profile)
 
     def make_event_stream() -> Iterator[str]:
         # The generator owns its session: it is opened only once streaming
@@ -396,5 +403,6 @@ def coach_autonomous_study(
         exam_target=payload.exam_target,
         preferred_style=payload.preferred_style,
         prerequisite_confidence=payload.prerequisite_confidence,
+        class_level=profile_learning_context(db, user_id).get("class_level", ""),
     )
     return AutonomousStudyResponse(**mission)

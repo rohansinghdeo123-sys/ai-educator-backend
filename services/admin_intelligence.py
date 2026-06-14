@@ -47,6 +47,7 @@ from models import (
     ObservabilityEvent,
     TestHistory,
     TopicPerformance,
+    UserProfile,
     UserProgress,
 )
 
@@ -690,13 +691,22 @@ def build_admin_overview(db: Session) -> Dict[str, Any]:
     }
 
 
-def build_admin_students(db: Session, limit: int = 50) -> Dict[str, Any]:
-    users = (
-        db.query(UserProgress)
-        .order_by(func.coalesce(UserProgress.last_active_date, date(1970, 1, 1)).desc(), UserProgress.xp.desc())
-        .limit(limit)
-        .all()
-    )
+def build_admin_students(db: Session, limit: int = 50, class_level: str = "") -> Dict[str, Any]:
+    query = db.query(UserProgress)
+    if class_level:
+        query = query.join(UserProfile, UserProfile.user_id == UserProgress.user_id).filter(
+            UserProfile.class_level == class_level
+        )
+    users = query.order_by(
+        func.coalesce(UserProgress.last_active_date, date(1970, 1, 1)).desc(),
+        UserProgress.xp.desc(),
+    ).limit(limit).all()
+    profiles = {
+        profile.user_id: profile
+        for profile in db.query(UserProfile).filter(
+            UserProfile.user_id.in_([user.user_id for user in users])
+        ).all()
+    } if users else {}
     rows: List[Dict[str, Any]] = []
     for user in users:
         sessions = (
@@ -722,8 +732,23 @@ def build_admin_students(db: Session, limit: int = 50) -> Dict[str, Any]:
         rows.append(
             {
                 "user_id": user.user_id,
+                "display_name": profiles.get(user.user_id).display_name if profiles.get(user.user_id) else "",
+                "class_level": profiles.get(user.user_id).class_level if profiles.get(user.user_id) else "",
+                "onboarding_completed": (
+                    bool(profiles.get(user.user_id).onboarding_completed)
+                    if profiles.get(user.user_id)
+                    else False
+                ),
                 "sessions": _query_count(db.query(TestHistory).filter(TestHistory.user_id == user.user_id)),
-                "recent_sessions": [format_test_session(session) for session in sessions],
+                "recent_sessions": [
+                    format_test_session(
+                        session,
+                        profiles.get(user.user_id).class_level
+                        if profiles.get(user.user_id)
+                        else "",
+                    )
+                    for session in sessions
+                ],
                 "recent_question": recent_question.message[:220] if recent_question and recent_question.message else "",
                 "topics_studied": sorted({session.topic for session in sessions if session.topic}),
                 "exam_attempts": _admin_int(user.total_tests),
@@ -1235,6 +1260,12 @@ def build_admin_console_payload(db: Session) -> Dict[str, Any]:
 
     recent_traces = db.query(ModelToolTrace).order_by(ModelToolTrace.created_at.desc(), ModelToolTrace.id.desc()).limit(80).all()
     recent_students = db.query(UserProgress).order_by(UserProgress.last_active_date.desc(), UserProgress.xp.desc()).limit(20).all()
+    recent_profiles = {
+        profile.user_id: profile
+        for profile in db.query(UserProfile).filter(
+            UserProfile.user_id.in_([student.user_id for student in recent_students])
+        ).all()
+    } if recent_students else {}
     recent_audits = db.query(AdminAuditLog).order_by(AdminAuditLog.id.desc()).limit(40).all()
     recent_events = get_recent_observability_events(db, limit=80)
 
@@ -1316,7 +1347,10 @@ def build_admin_console_payload(db: Session) -> Dict[str, Any]:
                 for job in recent_content_jobs
             ],
         },
-        "students": [_student_payload(row) for row in recent_students],
+        "students": [
+            _student_payload(row, recent_profiles.get(row.user_id))
+            for row in recent_students
+        ],
         "traces": [_trace_payload(row) for row in recent_traces],
         "events": recent_events,
         "audit": [_serialize_audit_log(row) for row in recent_audits],

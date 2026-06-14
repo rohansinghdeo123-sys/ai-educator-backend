@@ -28,6 +28,7 @@ from schemas import (
 )
 from services.leaderboard_service import build_leaderboard
 from services.progress_service import apply_streak, create_test_history, get_or_create_progress
+from services.profile_service import profile_learning_context
 from services.ttl_cache import TTLCache
 
 router = APIRouter(tags=["progress"])
@@ -135,7 +136,10 @@ def submit_session(
 
     return {
         "message": "Session submitted successfully",
-        "session": format_test_session(test),
+        "session": format_test_session(
+            test,
+            profile_learning_context(db, payload.user_id).get("class_level", ""),
+        ),
         "progress": progress_payload(user),
     }
 
@@ -180,7 +184,10 @@ def save_test(
         "message": "Test saved successfully",
         "topic": topic,
         "analytics_updated": True,
-        "session": format_test_session(new_test),
+        "session": format_test_session(
+            new_test,
+            profile_learning_context(db, test.user_id).get("class_level", ""),
+        ),
     }
 
 
@@ -193,6 +200,7 @@ def get_sessions(
     current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
     require_same_user_or_admin(user_id, current_user)
+    class_level = profile_learning_context(db, user_id).get("class_level", "")
 
     base = db.query(TestHistory).filter(TestHistory.user_id == user_id)
     total = base.count()
@@ -205,7 +213,7 @@ def get_sessions(
 
     return {
         "user_id": user_id,
-        "sessions": [format_test_session(test) for test in tests],
+        "sessions": [format_test_session(test, class_level) for test in tests],
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -313,6 +321,7 @@ def get_dashboard_data(
     require_same_user_or_admin(user_id, current_user)
 
     user = get_or_create_progress(db, user_id)
+    class_level = profile_learning_context(db, user_id).get("class_level", "")
 
     tests = (
         db.query(TestHistory)
@@ -324,7 +333,7 @@ def get_dashboard_data(
 
     return {
         "progress": progress_payload(user),
-        "sessions": [format_test_session(test) for test in tests],
+        "sessions": [format_test_session(test, class_level) for test in tests],
         "analytics": get_user_analytics(db, user_id),
         "leaderboard": build_leaderboard(db, current_user),
     }

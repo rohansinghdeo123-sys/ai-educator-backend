@@ -1062,6 +1062,8 @@ Selected strategy:
 - Weak signals: {weak_signals if weak_signals else "none detected"}
 
 Study context:
+- Student name: {learning_context.get("display_name", "Student")}
+- Class level: {learning_context.get("class_level", "not set")}
 - Subject: {learning_context.get("selected_subject") or learning_context.get("subject", "unknown")}
 - Chapter: {learning_context.get("selected_chapter") or learning_context.get("chapter", "unknown")}
 - Topic: {learning_context.get("selected_topic") or learning_context.get("topic", "unknown")}

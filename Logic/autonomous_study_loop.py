@@ -90,6 +90,7 @@ def _normalize_mission_profile(
     exam_target: str = "school_exam",
     preferred_style: str = "examples_first",
     prerequisite_confidence: str = "medium",
+    class_level: str = "",
 ) -> Dict[str, Any]:
     minutes = None
     if available_minutes is not None:
@@ -105,6 +106,7 @@ def _normalize_mission_profile(
         "exam_target": (exam_target or "school_exam").strip().lower(),
         "preferred_style": (preferred_style or "examples_first").strip().lower(),
         "prerequisite_confidence": (prerequisite_confidence or "medium").strip().lower(),
+        "class_level": (class_level or "").strip(),
     }
 
 
@@ -723,6 +725,7 @@ def run_autonomous_study_loop(
     exam_target: str = "school_exam",
     preferred_style: str = "examples_first",
     prerequisite_confidence: str = "medium",
+    class_level: str = "",
 ) -> Dict[str, Any]:
     started_at = time.time()
     mission_id = f"mission_{uuid.uuid4().hex[:12]}"
@@ -748,6 +751,7 @@ def run_autonomous_study_loop(
         exam_target=exam_target,
         preferred_style=preferred_style,
         prerequisite_confidence=prerequisite_confidence,
+        class_level=class_level,
     )
     target = _select_target_topic(analytics, current_topic)
     plan = _build_mission_plan(target, analytics, profile)
