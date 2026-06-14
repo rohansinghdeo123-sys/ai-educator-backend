@@ -33,7 +33,6 @@ from Logic.coach import (
     build_active_mastery_profile,
     build_coach_plan,
     build_adaptive_answer_blocks,
-    build_compact_context,
     build_lead_coach_decision,
     build_student_memory_update,
     build_response_plan,
@@ -62,7 +61,6 @@ from Logic.coach import (
 from Logic.coach.llm_judge import judge_coach_answer, should_judge_turn
 from Logic.coach.memory_store import (
     build_layered_lesson_memory,
-    build_memory_summary,
     format_layered_lesson_memory,
     interaction_messages,
 )
@@ -618,27 +616,6 @@ def _maybe_refresh_long_term_summary(
             coach.long_term_summary = summary[:1200]
     except Exception as exc:
         logger.warning("Long-term summary consolidation skipped: %s", exc)
-
-
-def _update_learning_journey_summary(
-    coach: AICoachProfile,
-    question: str,
-    answer_format: Dict[str, Any],
-    topic_snapshot: Dict[str, Any],
-    is_follow_up: bool,
-) -> None:
-    weak_topics = [
-        item.get("topic", "")
-        for item in topic_snapshot.get("weak_topics", [])[:3]
-        if item.get("topic")
-    ]
-    followup_note = "connected follow-up" if is_follow_up else "new learning query"
-    coach.long_term_summary = (
-        f"Recent focus: {question[:160]}. "
-        f"Response style used: {answer_format.get('label', 'Concept Builder')}. "
-        f"Conversation type: {followup_note}. "
-        f"Watched weak areas: {', '.join(weak_topics) if weak_topics else 'not enough data yet'}."
-    )
 
 
 def _get_recent_sessions(db, user_id: str, limit: int = 5) -> List[TestHistory]:
@@ -2405,14 +2382,6 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
     orchestration_prompt = format_orchestration_prompt(orchestration_plan, tool_outputs, mastery_profile)
     assistance_blocks = _build_assistance_blocks(question, answer_format)
     lightweight_reply = _build_lightweight_conversation_reply(question, conversation_context)
-    compact_context = build_compact_context(
-        query=query_understanding,
-        retrieval=retrieved_material or {},
-        recent_messages=interaction_messages(recent_interactions),
-        memory_summary=build_memory_summary(memories, recent_interactions),
-        student_state=adaptive_context["student_state"],
-        lesson_memory=lesson_memory,
-    )
     if conversation_context.get("is_follow_up") and not lightweight_reply:
         yield _stage_event(
             stage="understanding",
@@ -2485,13 +2454,16 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
         turn_id=turn_id,
     )
     trace.mark_phase("drafting")
+    # Deep tier is reserved for genuinely reasoning-heavy turns (numerical,
+    # exam). Strict grounding alone routes to balanced — grounded answers read
+    # from supplied material and rarely need the most expensive model.
     routing_tier = (
         "fast"
         if intent == "definition"
         and not query_understanding.is_follow_up
         and retrieval_policy == "none"
         else "deep"
-        if intent in {"numerical", "exam"} or strict_grounding
+        if intent in {"numerical", "exam"}
         else "balanced"
     )
 
@@ -3135,21 +3107,10 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
     coach.next_best_action = recommendation
     coach.last_interaction_at = datetime.utcnow()
     coach.updated_at = datetime.utcnow()
-    if intent != "conversation":
-        _update_learning_journey_summary(
-            coach=coach,
-            question=question,
-            answer_format=answer_format,
-            topic_snapshot=topic_snapshot,
-            is_follow_up=bool(conversation_context.get("is_follow_up")),
-        )
-        _maybe_refresh_long_term_summary(
-            db=db,
-            coach=coach,
-            conversation_context=conversation_context,
-            question=question,
-            final_answer=final_answer,
-        )
+    # The long-term summary is owned solely by the every-8th-turn model
+    # consolidation (_maybe_refresh_long_term_summary), which now runs after the
+    # final frame. The old per-turn template write was removed: it clobbered the
+    # model-written summary on 7 of every 8 turns.
 
     _persist_interaction(
         db=db,
@@ -3179,7 +3140,6 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
             "multimodal": multimodal_payload,
             "repair": repair_report,
             "growth": growth_report,
-            "agent_state": agent_state.to_trace_dict(),
         },
     )
     _persist_interaction(
@@ -3206,13 +3166,10 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
             "response_plan": response_plan_payload,
             "retrieval_policy": retrieval_policy,
             "retrieval_gate": retrieval_gate.to_dict(),
-            "compact_context": compact_context,
-            "lesson_memory": lesson_memory,
             "answer_blocks": answer_blocks,
             "quality": quality_report.to_dict(),
             "repair": repair_report,
             "growth": growth_report,
-            "observability": observability,
             "mastery_signal": mastery_signal,
             "student_memory_update": student_memory_update,
             "mastery_profile": mastery_profile,
@@ -3220,7 +3177,6 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
             "sources": source_bundle,
             "verification": verification,
             "multimodal": multimodal_payload,
-            "agent_state": agent_state.to_trace_dict(),
         },
         quality_score=quality_report.score,
     )
@@ -3275,6 +3231,23 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
     encoded = base64.b64encode(final_answer.encode("utf-8")).decode("ascii")
     yield f"data: {encoded}\n\n"
     yield "data: [DONE]\n\n"
+
+    # Long-term summary consolidation runs AFTER the final frame so it never
+    # adds latency to the student-visible answer (same pattern as the judge
+    # below). It self-throttles to every 8th interaction internally.
+    if intent != "conversation":
+        _maybe_refresh_long_term_summary(
+            db=db,
+            coach=coach,
+            conversation_context=conversation_context,
+            question=question,
+            final_answer=final_answer,
+        )
+        try:
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.warning("Long-term summary commit skipped: %s", exc)
 
     # Sampled LLM-as-judge evaluation (COACH_JUDGE_SAMPLE_RATE, default off).
     # Runs after the final frame so sampled turns add no student-visible

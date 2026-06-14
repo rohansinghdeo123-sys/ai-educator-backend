@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import asyncio
+import logging
+import threading
+from typing import Any, Callable, Dict, Generator, Iterator, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
@@ -49,6 +52,46 @@ from schemas import (
 from services.coach_service import conversation_rows_for_user
 
 router = APIRouter(tags=["coach"])
+
+logger = logging.getLogger("ai_educator.routers.coach")
+
+
+async def _run_sse_on_single_thread(
+    make_generator: Callable[[], Iterator[str]],
+) -> Generator[str, None, None]:
+    """Drive a sync SSE generator from one dedicated worker thread.
+
+    Starlette iterates sync generators across its threadpool, so successive
+    ``next()`` calls can run on different threads. The coach turn tracks
+    per-turn cost, budget, and observability via thread-local state in the
+    model and tool gateways; running the whole turn on a single thread keeps
+    that state coherent and keeps the request-scoped DB session on one thread.
+
+    If the client disconnects mid-stream the worker simply runs the turn to
+    completion (persisting normally) — one extra turn of compute, no lost data.
+    """
+    loop = asyncio.get_running_loop()
+    queue: "asyncio.Queue[Any]" = asyncio.Queue()
+    done = object()
+
+    def worker() -> None:
+        try:
+            for frame in make_generator():
+                loop.call_soon_threadsafe(queue.put_nowait, frame)
+        except BaseException as exc:  # surface to the response, don't swallow
+            loop.call_soon_threadsafe(queue.put_nowait, exc)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, done)
+
+    threading.Thread(target=worker, name="coach-sse-turn", daemon=True).start()
+
+    while True:
+        item = await queue.get()
+        if item is done:
+            break
+        if isinstance(item, BaseException):
+            raise item
+        yield item
 
 
 class CoachTurnRequest:
@@ -286,24 +329,30 @@ async def coach_chat_stream(
 
     coach_request = CoachTurnRequest(payload)
 
-    def event_stream():
+    def make_event_stream() -> Iterator[str]:
         # The generator owns its session: it is opened only once streaming
         # starts and is guaranteed to close even if the client disconnects
-        # mid-stream, so long turns cannot pin request-scoped pool slots.
+        # mid-stream, so long turns cannot pin request-scoped pool slots. It is
+        # created and consumed entirely on the single worker thread below, so
+        # the session is never touched from more than one thread.
         db = SessionLocal()
-        try:
-            for token in coach_agent_stream(coach_request, db=db):
-                # coach_agent_stream already returns complete SSE frames.
-                yield token
-        finally:
+
+        def event_stream() -> Iterator[str]:
             try:
-                db.rollback()
-            except Exception:
-                pass
-            db.close()
+                for token in coach_agent_stream(coach_request, db=db):
+                    # coach_agent_stream already returns complete SSE frames.
+                    yield token
+            finally:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                db.close()
+
+        return event_stream()
 
     return StreamingResponse(
-        event_stream(),
+        _run_sse_on_single_thread(make_event_stream),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
