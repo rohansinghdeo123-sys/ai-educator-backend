@@ -879,6 +879,11 @@ def search_approved_content(
     if not terms:
         return {"context": "", "source": "content_pipeline", "paragraphs_found": 0}
 
+    # Embed the query before opening a pooled DB connection so the external
+    # embedding HTTP round trip never pins a connection for its full duration.
+    query_vector = embeddings_service.embed_query(question or section_id)
+    min_similarity = _min_semantic_similarity()
+
     db = SessionLocal()
     try:
         chapters = db.query(ContentChapter).filter(ContentChapter.status.in_(APPROVED_STATUSES)).all()
@@ -894,9 +899,6 @@ def search_approved_content(
         concept_rows = db.query(ContentConcept).filter(ContentConcept.chapter_id.in_(chapter_ids)).all()
         chunk_rows = db.query(ContentChunk).filter(ContentChunk.chapter_id.in_(chapter_ids)).all()
         chapter_by_id = {chapter.id: chapter for chapter in chapters}
-
-        query_vector = embeddings_service.embed_query(question or section_id)
-        min_similarity = _min_semantic_similarity()
 
         candidates: Dict[Tuple[str, int], Dict[str, Any]] = {}
         for concept in concept_rows:
