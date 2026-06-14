@@ -226,6 +226,94 @@ def persist_coach_trace(
     }
 
 
+_MODEL_CALL_BASE_KEYS = {
+    "role",
+    "provider",
+    "model",
+    "status",
+    "latency_ms",
+    "estimated_input_tokens",
+    "estimated_output_tokens",
+    "estimated_cost_usd",
+}
+
+
+def persist_agent_trace(
+    *,
+    agent: str,
+    turn_id: str,
+    session_id: str = "",
+    user_id: str = "",
+    status: str = "success",
+    latency_ms: int = 0,
+    quality: Optional[Dict[str, Any]] = None,
+    model_calls: Optional[Iterable[Dict[str, Any]]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Durably trace one legacy-agent run (revision / exam / tutor / planner).
+
+    Gives these surfaces the same cost + quality visibility the coach pipeline
+    already has via persist_coach_trace, but without the full agent-runtime
+    machinery: one "turn" row plus one row per model call. Opens its own short
+    session and never raises, so telemetry can never break a student response.
+    """
+    calls = list(model_calls or [])
+    total_input = sum(_as_int(call.get("estimated_input_tokens")) for call in calls)
+    total_output = sum(_as_int(call.get("estimated_output_tokens")) for call in calls)
+    total_cost = round(sum(_as_float(call.get("estimated_cost_usd")) for call in calls), 8)
+
+    db = None
+    try:
+        db = SessionLocal()
+        turn_meta = dict(metadata or {})
+        if quality is not None:
+            turn_meta["quality"] = quality
+        db.add(
+            ModelToolTrace(
+                user_id=user_id or None,
+                session_id=session_id or None,
+                turn_id=turn_id,
+                trace_type="turn",
+                name=f"{agent}_turn",
+                status=status,
+                latency_ms=_as_int(latency_ms),
+                estimated_input_tokens=total_input,
+                estimated_output_tokens=total_output,
+                estimated_cost_usd=total_cost,
+                metadata_json=turn_meta,
+            )
+        )
+        for call in calls:
+            call_status = str(call.get("status") or "success")
+            db.add(
+                ModelToolTrace(
+                    user_id=user_id or None,
+                    session_id=session_id or None,
+                    turn_id=turn_id,
+                    trace_type="model" if call_status != "skipped" else "route",
+                    name=str(call.get("role") or "model_call"),
+                    provider=str(call.get("provider") or ""),
+                    model=str(call.get("model") or ""),
+                    status=call_status,
+                    latency_ms=_as_int(call.get("latency_ms")),
+                    estimated_input_tokens=_as_int(call.get("estimated_input_tokens")),
+                    estimated_output_tokens=_as_int(call.get("estimated_output_tokens")),
+                    estimated_cost_usd=_as_float(call.get("estimated_cost_usd")),
+                    metadata_json={key: value for key, value in call.items() if key not in _MODEL_CALL_BASE_KEYS},
+                )
+            )
+        db.commit()
+        return {"model_calls": len(calls), "estimated_cost_usd": total_cost}
+    except Exception as exc:
+        if db is not None:
+            db.rollback()
+        logger.warning("Could not persist agent trace (agent=%s): %s", agent, exc)
+        return {}
+    finally:
+        if db is not None:
+            db.close()
+
+
 def _format_event(event: ObservabilityEvent) -> Dict[str, Any]:
     return {
         "id": event.id,

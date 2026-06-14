@@ -54,6 +54,23 @@ def _ensure_session_telemetry_columns() -> None:
         logger.warning("DATABASE: Session telemetry column check skipped: %s", exc)
 
 
+def _log_retrieval_mode() -> None:
+    """Make the active retrieval mode obvious in the boot logs. Semantic search
+    needs EMBEDDINGS_API_KEY; without it retrieval is lexical-only."""
+    try:
+        from Logic import embeddings as embeddings_service
+
+        if embeddings_service.embeddings_enabled():
+            logger.info("RETRIEVAL: semantic search ENABLED (model=%s).", embeddings_service.embedding_model())
+        else:
+            logger.warning(
+                "RETRIEVAL: semantic search DISABLED (lexical-only). Set EMBEDDINGS_API_KEY "
+                "(or OPENAI_API_KEY) and POST /admin/content/embed to backfill and enable it."
+            )
+    except Exception as exc:
+        logger.warning("RETRIEVAL: embeddings status check skipped: %s", exc)
+
+
 def _load_knowledge_graph() -> None:
     logger.info("Loading knowledge graph from: %s", _KNOWLEDGE_GRAPH_PATH)
     try:
@@ -81,6 +98,7 @@ async def lifespan(app):
     event_bus.set_sink(persist_event_from_bus)
     security.initialize_firebase_admin()
     _load_knowledge_graph()
+    _log_retrieval_mode()
     init_telemetry()
 
     from services.job_queue import job_queue

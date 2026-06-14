@@ -13,11 +13,11 @@ This is a TRUE AGENT that follows the Think → Act → Observe → Respond cycl
 Every step emits events to the Agent Event Bus for real-time admin monitoring.
 """
 
-import threading
 import time
 import logging
-from collections import OrderedDict
 from prompts.agent_prompts import TUTOR_AGENT_PROMPT
+from database import SessionLocal
+from models import AgentChatMemory
 from Logic.coach.model_gateway import model_gateway
 from Logic.tools.knowledge_search import search_knowledge_base
 from Logic.tools.chemistry_formatter import format_chemistry_output
@@ -31,26 +31,46 @@ logger = logging.getLogger("ai_educator.agents.tutor")
 # records; GROQ_TUTOR_MODEL still selects the primary model.
 MODEL_NAME = model_gateway.model_for("tutor")
 
-# Process-local doubt memory. Bounded with LRU eviction so a long-running
-# instance cannot grow unbounded; note this is per-process and is lost on
-# restart and not shared across workers. Multi-instance durability would need
-# a DB-backed thread (see coach pipeline) — tracked as a follow-up.
-_MAX_SESSIONS = 500
-_sessions: "OrderedDict[str, list]" = OrderedDict()
-_sessions_lock = threading.Lock()
+# Doubt memory is persisted in the agent_chat_memory table (keyed by
+# session_id), so it survives restarts and stays consistent across instances
+# instead of living in a per-process dict. Sessions are owned/validated at the
+# router. Each DB session is short-lived and never held across the LLM call.
+_MEMORY_TURNS = 10  # last N messages (user + assistant) replayed to the model
 
 
-def _get_session_memory(session_id: str) -> list:
-    with _sessions_lock:
-        memory = _sessions.get(session_id)
-        if memory is None:
-            memory = []
-            _sessions[session_id] = memory
-            while len(_sessions) > _MAX_SESSIONS:
-                _sessions.popitem(last=False)
-        else:
-            _sessions.move_to_end(session_id)
-        return memory
+def _load_session_memory(session_id: str, limit: int = _MEMORY_TURNS) -> list:
+    if not session_id:
+        return []
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(AgentChatMemory)
+            .filter(AgentChatMemory.session_id == session_id)
+            .order_by(AgentChatMemory.id.desc())
+            .limit(limit)
+            .all()
+        )
+        return [{"role": row.role, "content": row.content} for row in reversed(rows)]
+    except Exception as exc:
+        logger.warning("Could not load tutor session memory | session_id=%s error=%s", session_id, exc)
+        return []
+    finally:
+        db.close()
+
+
+def _save_turn(session_id: str, question: str, answer: str) -> None:
+    if not session_id:
+        return
+    db = SessionLocal()
+    try:
+        db.add(AgentChatMemory(session_id=session_id, role="user", content=question))
+        db.add(AgentChatMemory(session_id=session_id, role="assistant", content=answer))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.warning("Could not save tutor session memory | session_id=%s error=%s", session_id, exc)
+    finally:
+        db.close()
 
 
 def tutor_agent(request) -> dict:
@@ -207,7 +227,7 @@ def tutor_agent(request) -> dict:
     # Build the system prompt
     system_prompt = f"{student_instructions}\n\n{enriched_context}\n\n{basics}"
 
-    memory = _get_session_memory(session_id)
+    memory = _load_session_memory(session_id)
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -325,11 +345,7 @@ def tutor_agent(request) -> dict:
                 logger.warning("Tutor quality retry failed; keeping first answer | session_id=%s error=%s", session_id, exc)
 
     # ===== STEP 7: UPDATE MEMORY =====
-    with _sessions_lock:
-        memory.append({"role": "user", "content": question})
-        memory.append({"role": "assistant", "content": formatted_answer})
-        if len(memory) > 10:
-            del memory[:-10]
+    _save_turn(session_id, question, formatted_answer)
 
     latency_ms = round((time.time() - start_time) * 1000)
 
@@ -363,8 +379,15 @@ def tutor_agent(request) -> dict:
 
 def reset_tutor_session(session_id: str):
     """Clear tutor memory for a session."""
-    with _sessions_lock:
-        _sessions.pop(session_id, None)
+    db = SessionLocal()
+    try:
+        db.query(AgentChatMemory).filter(AgentChatMemory.session_id == session_id).delete(synchronize_session=False)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.warning("Could not reset tutor session memory | session_id=%s error=%s", session_id, exc)
+    finally:
+        db.close()
     event_bus.emit("tutor", "state_change", {
         "state": "idle",
         "message": f"Session {session_id} memory cleared",

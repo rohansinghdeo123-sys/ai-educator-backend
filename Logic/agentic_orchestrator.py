@@ -21,6 +21,8 @@ from Logic.agents.exam_agent import exam_agent
 from Logic.agents.planner_agent import planner_agent
 from Logic.agents.revision_agent import revision_agent
 from Logic.agents.tutor_agent import tutor_agent
+from Logic.coach.model_gateway import model_gateway
+from Logic.observability_store import persist_agent_trace
 
 try:
     from Logic.agents.coach_agent import coach_agent
@@ -352,6 +354,9 @@ def execute_agentic_request(request, db: Optional[Any] = None) -> dict:
     route = resolve_agent_route(request)
     question = getattr(request, "question", "") or ""
     session_id = str(getattr(request, "session_id", "") or "")
+    # Scope model-call records to this run so the durable trace below captures
+    # exactly the calls this agent made (cost, tokens, latency, provider).
+    model_gateway.begin_turn(route.run_id)
 
     event_bus.emit(
         "orchestrator",
@@ -437,6 +442,28 @@ def execute_agentic_request(request, db: Optional[Any] = None) -> dict:
 
     latency_ms = round((time.time() - started_at) * 1000)
     response = _attach_run_metadata(result, route, latency_ms)
+
+    # Durably trace non-coach agents (the coach pipeline self-traces via
+    # persist_coach_trace). Gives revision/exam/tutor/planner the same cost and
+    # quality visibility. persist_agent_trace never raises.
+    if route.primary_agent != "coach":
+        result_meta = response.get("metadata") if isinstance(response, dict) else {}
+        result_meta = result_meta if isinstance(result_meta, dict) else {}
+        quality = (
+            {"score": result_meta.get("quality_score"), "passed": result_meta.get("quality_passed")}
+            if "quality_score" in result_meta
+            else None
+        )
+        persist_agent_trace(
+            agent=route.primary_agent,
+            turn_id=route.run_id,
+            session_id=session_id,
+            status="success" if result_meta.get("quality_passed", True) else "needs_review",
+            latency_ms=latency_ms,
+            quality=quality,
+            model_calls=model_gateway.records(),
+            metadata={"mode": route.mode, "intent": route.intent},
+        )
 
     event_bus.emit(
         "orchestrator",
