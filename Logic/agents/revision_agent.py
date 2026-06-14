@@ -83,18 +83,21 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
         max_chars=4000,
     )
 
-    if search_result.get("error"):
+    context = str(search_result.get("context") or "").strip()
+    if search_result.get("error") or not context:
+        not_found = (
+            getattr(request, "required_not_found_response", "")
+            or "I could not find this in your study material. Please upload or select the correct chapter/data."
+        )
         event_bus.emit("revision", "error", {
             "step": "retrieve_markdown",
-            "message": f"Knowledge base error: {search_result['error']}",
+            "message": f"No revision content for section '{section_id}': {search_result.get('error') or 'empty context'}",
         }, severity="error")
         return {
             "type": "revision",
-            "answer": f"Knowledge base error: {search_result['error']}",
-            "metadata": {"agent": "revision", "revision_type": revision_type},
+            "answer": not_found,
+            "metadata": {"agent": "revision", "revision_type": revision_type, "status": "material_not_found"},
         }
-
-    context = search_result["context"]
 
     event_bus.emit("revision", "step", {
         "step": "retrieve_markdown_complete",

@@ -407,28 +407,36 @@ def exam_agent(request, exam_type: str = "mcq") -> dict:
         },
     )
 
+    # Retrieve against the bare topic/section, not the long JSON instruction
+    # carried in `question` — that boilerplate buries the real topic and
+    # degrades retrieval.
+    retrieval_query = (getattr(request, "topic", "") or section_id or question).strip()
     search_result = search_knowledge_base(
         section_id=section_id,
-        question=question,
+        question=retrieval_query,
         max_paragraphs=8,
         max_chars=4000,
     )
 
     if search_result.get("error"):
+        not_found = (
+            getattr(request, "required_not_found_response", "")
+            or "I could not find this in your study material. Please upload or select the correct chapter/data."
+        )
         event_bus.emit(
             "exam",
             "error",
             {
                 "step": "retrieve_markdown",
-                "message": f"Knowledge base error: {search_result['error']}",
+                "message": f"Knowledge base lookup failed for section '{section_id}': {search_result['error']}",
             },
             severity="error",
         )
         return {
             "type": "exam",
-            "answer": f"Knowledge base error: {search_result['error']}",
+            "answer": not_found,
             "data": None,
-            "metadata": {"agent": "exam", "exam_type": exam_type},
+            "metadata": {"agent": "exam", "exam_type": exam_type, "status": "material_not_found"},
         }
 
     context = search_result["context"]

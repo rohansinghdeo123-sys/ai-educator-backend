@@ -35,12 +35,17 @@ class _LegacyRequest:
         strict_grounding: bool = False,
         required_not_found_response: Optional[str] = None,
         count: int = 5,
+        topic: Optional[str] = None,
     ):
         self.question = question
         self.section_id = section_id
         self.session_id = session_id
         self.mode = mode
         self.difficulty = difficulty
+        # Bare topic for retrieval. The `question` passed by the structured
+        # generators is a long JSON instruction; using it as the search query
+        # buries the real topic, so retrieval keys off this instead.
+        self.topic = (topic or section_id or "").strip()
         self.strict_grounding = strict_grounding
         self.retrieval_required = strict_grounding
         self.fallback_to_general_knowledge = not strict_grounding
@@ -186,6 +191,7 @@ def run_structured_agent(
     strict_grounding: bool = False,
     required_not_found_response: Optional[str] = None,
     count: int = 5,
+    topic: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Any]:
     request = _LegacyRequest(
         question=question,
@@ -196,6 +202,7 @@ def run_structured_agent(
         strict_grounding=strict_grounding,
         required_not_found_response=required_not_found_response,
         count=count,
+        topic=topic,
     )
 
     result = route_to_agent(request)
@@ -547,6 +554,7 @@ def generate_structured_mcqs(
             strict_grounding=strict_grounding,
             required_not_found_response=not_found,
             count=safe_count,
+            topic=safe_topic,
         )
         attempt_questions = normalize_mcq_questions(payload, safe_count)
         if len(attempt_questions) < safe_count:
@@ -727,6 +735,7 @@ def generate_structured_probable_questions(
         difficulty=safe_difficulty,
         strict_grounding=strict_grounding,
         required_not_found_response=not_found,
+        topic=safe_topic,
     )
 
     questions = normalize_probable_questions(payload)

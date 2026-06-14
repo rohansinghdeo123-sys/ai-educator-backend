@@ -13,8 +13,10 @@ This is a TRUE AGENT that follows the Think → Act → Observe → Respond cycl
 Every step emits events to the Agent Event Bus for real-time admin monitoring.
 """
 
+import threading
 import time
 import logging
+from collections import OrderedDict
 from prompts.agent_prompts import TUTOR_AGENT_PROMPT
 from Logic.coach.model_gateway import model_gateway
 from Logic.tools.knowledge_search import search_knowledge_base
@@ -29,8 +31,26 @@ logger = logging.getLogger("ai_educator.agents.tutor")
 # records; GROQ_TUTOR_MODEL still selects the primary model.
 MODEL_NAME = model_gateway.model_for("tutor")
 
-# In-memory session store
-_sessions: dict[str, list] = {}
+# Process-local doubt memory. Bounded with LRU eviction so a long-running
+# instance cannot grow unbounded; note this is per-process and is lost on
+# restart and not shared across workers. Multi-instance durability would need
+# a DB-backed thread (see coach pipeline) — tracked as a follow-up.
+_MAX_SESSIONS = 500
+_sessions: "OrderedDict[str, list]" = OrderedDict()
+_sessions_lock = threading.Lock()
+
+
+def _get_session_memory(session_id: str) -> list:
+    with _sessions_lock:
+        memory = _sessions.get(session_id)
+        if memory is None:
+            memory = []
+            _sessions[session_id] = memory
+            while len(_sessions) > _MAX_SESSIONS:
+                _sessions.popitem(last=False)
+        else:
+            _sessions.move_to_end(session_id)
+        return memory
 
 
 def tutor_agent(request) -> dict:
@@ -79,14 +99,18 @@ def tutor_agent(request) -> dict:
     )
 
     if search_result.get("error"):
+        not_found = (
+            getattr(request, "required_not_found_response", "")
+            or "I could not find this in your study material. Please upload or select the correct chapter/data."
+        )
         event_bus.emit("tutor", "error", {
             "step": "retrieve_markdown",
-            "message": f"Knowledge base error: {search_result['error']}",
+            "message": f"Knowledge base lookup failed for section '{section_id}': {search_result['error']}",
         }, session_id=session_id, severity="error")
         return {
             "type": "tutor",
-            "answer": f"Knowledge base error: {search_result['error']}",
-            "metadata": {"agent": "tutor", "step": "retrieval_failed"},
+            "answer": not_found,
+            "metadata": {"agent": "tutor", "step": "retrieval_failed", "status": "material_not_found"},
         }
 
     context = search_result["context"]
@@ -183,10 +207,7 @@ def tutor_agent(request) -> dict:
     # Build the system prompt
     system_prompt = f"{student_instructions}\n\n{enriched_context}\n\n{basics}"
 
-    if session_id not in _sessions:
-        _sessions[session_id] = []
-
-    memory = _sessions[session_id]
+    memory = _get_session_memory(session_id)
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -304,10 +325,11 @@ def tutor_agent(request) -> dict:
                 logger.warning("Tutor quality retry failed; keeping first answer | session_id=%s error=%s", session_id, exc)
 
     # ===== STEP 7: UPDATE MEMORY =====
-    memory.append({"role": "user", "content": question})
-    memory.append({"role": "assistant", "content": formatted_answer})
-    if len(memory) > 10:
-        _sessions[session_id] = memory[-10:]
+    with _sessions_lock:
+        memory.append({"role": "user", "content": question})
+        memory.append({"role": "assistant", "content": formatted_answer})
+        if len(memory) > 10:
+            del memory[:-10]
 
     latency_ms = round((time.time() - start_time) * 1000)
 
@@ -341,7 +363,8 @@ def tutor_agent(request) -> dict:
 
 def reset_tutor_session(session_id: str):
     """Clear tutor memory for a session."""
-    _sessions.pop(session_id, None)
+    with _sessions_lock:
+        _sessions.pop(session_id, None)
     event_bus.emit("tutor", "state_change", {
         "state": "idle",
         "message": f"Session {session_id} memory cleared",
