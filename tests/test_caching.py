@@ -11,7 +11,7 @@ import main
 import routers.admin as admin_router
 from app.security import require_founder_admin
 from database import SessionLocal
-from models import UserProgress
+from models import UserProfile, UserProgress
 from services import leaderboard_service
 from services.ttl_cache import TTLCache
 
@@ -62,144 +62,99 @@ class TTLCacheTests(unittest.TestCase):
         self.assertLessEqual(len(cache._entries), 2)
 
 
-class FakeFirebaseAuth:
-    class _User:
-        def __init__(self, uid, disabled=False):
-            self.uid = uid
-            self.display_name = f"Name {uid}"
-            self.email = f"{uid}@example.com"
-            self.disabled = disabled
+class LeaderboardTests(unittest.TestCase):
+    """The leaderboard ranks active students by XP, names them from the signup
+    profile (never Firebase), shows full names, and caps at the top N."""
 
-    class _Page:
-        def __init__(self, users, next_page_token=None):
-            self.users = users
-            self.next_page_token = next_page_token
-
-    def __init__(self, user_ids, disabled_ids=None, page_size=1000, fail=False):
-        self.calls = 0
-        self.user_ids = list(user_ids)
-        self.disabled_ids = set(disabled_ids or [])
-        self.page_size = page_size
-        self.fail = fail
-
-    def list_users(self, page_token=None, max_results=1000):
-        self.calls += 1
-        if self.fail:
-            raise RuntimeError("Firebase directory unavailable")
-
-        start = int(page_token or 0)
-        size = min(max_results, self.page_size)
-        selected = self.user_ids[start:start + size]
-        next_index = start + len(selected)
-        next_page_token = str(next_index) if next_index < len(self.user_ids) else None
-        return self._Page(
-            [
-                self._User(user_id, disabled=user_id in self.disabled_ids)
-                for user_id in selected
-            ],
-            next_page_token=next_page_token,
-        )
-
-
-class LeaderboardCacheTests(unittest.TestCase):
-    USER_IDS = ["lb-cache-user-1", "lb-cache-user-2"]
+    SEEDED_IDS = ["lb-user-1", "lb-user-2", "lb-user-3", "lb-inactive"]
 
     def setUp(self):
-        leaderboard_service._firebase_lookup_cache.clear()
         self.db = SessionLocal()
-        for index, user_id in enumerate(self.USER_IDS):
-            self.db.add(UserProgress(user_id=user_id, xp=100000 + index))
-        self.db.commit()
-
-    def tearDown(self):
-        self.db.query(UserProgress).filter(UserProgress.user_id.in_(self.USER_IDS)).delete(
-            synchronize_session=False
-        )
-        self.db.commit()
-        self.db.close()
-        leaderboard_service._firebase_lookup_cache.clear()
-
-    def test_firebase_lookup_is_cached_across_calls(self):
-        fake_auth = FakeFirebaseAuth(self.USER_IDS)
-        with patch.object(leaderboard_service.security, "firebase_ready", return_value=True), patch.object(
-            leaderboard_service.security, "firebase_auth", fake_auth
-        ):
-            leaderboard_service.build_leaderboard(self.db)
-            leaderboard_service.build_leaderboard(self.db)
-        self.assertEqual(fake_auth.calls, 1)
-
-    def test_cache_does_not_widen_email_visibility(self):
-        fake_auth = FakeFirebaseAuth(self.USER_IDS)
-        with patch.object(leaderboard_service.security, "firebase_ready", return_value=True), patch.object(
-            leaderboard_service.security, "firebase_auth", fake_auth
-        ):
-            own_view = leaderboard_service.build_leaderboard(
-                self.db, {"uid": self.USER_IDS[0], "email": "x@example.com"}
-            )
-            stranger_view = leaderboard_service.build_leaderboard(
-                self.db, {"uid": "someone-else", "email": "y@example.com"}
-            )
-
-        own_rows = {row["user_id"]: row for row in own_view}
-        stranger_rows = {row["user_id"]: row for row in stranger_view}
-        self.assertIsNotNone(own_rows[self.USER_IDS[0]]["email"])
-        self.assertIsNone(stranger_rows[self.USER_IDS[0]]["email"])
-        # Both views came from one cached Firebase lookup.
-        self.assertEqual(fake_auth.calls, 1)
-
-    def test_includes_every_active_firebase_user_across_pages(self):
-        directory_users = [
-            *self.USER_IDS,
-            *[f"lb-directory-user-{index}" for index in range(12)],
-        ]
-        disabled_user = directory_users[-1]
-        fake_auth = FakeFirebaseAuth(
-            directory_users,
-            disabled_ids={disabled_user},
-            page_size=4,
-        )
-
-        with patch.object(leaderboard_service.security, "firebase_ready", return_value=True), patch.object(
-            leaderboard_service.security, "firebase_auth", fake_auth
-        ):
-            rows = leaderboard_service.build_leaderboard(
-                self.db,
-                {"uid": self.USER_IDS[0], "name": "Current Student"},
-            )
-
-        row_ids = {row["user_id"] for row in rows}
-        self.assertEqual(row_ids, set(directory_users) - {disabled_user})
-        self.assertGreater(fake_auth.calls, 1)
-        self.assertEqual(rows[0]["user_id"], self.USER_IDS[1])
-        zero_progress = next(row for row in rows if row["user_id"] == "lb-directory-user-0")
-        self.assertEqual(zero_progress["xp"], 0)
-        self.assertEqual(zero_progress["streak"], 0)
-        self.assertEqual(zero_progress["total_tests"], 0)
-
-    def test_falls_back_to_all_progress_rows_when_firebase_is_unavailable(self):
-        fallback_ids = [f"lb-fallback-user-{index}" for index in range(12)]
+        self._cleanup()
         self.db.add_all(
             [
-                UserProgress(user_id=user_id, xp=index, streak=index % 3)
-                for index, user_id in enumerate(fallback_ids)
+                UserProgress(user_id="lb-user-1", xp=300, streak=4, total_tests=5),
+                UserProgress(user_id="lb-user-2", xp=150, streak=2, total_tests=3),
+                UserProgress(user_id="lb-inactive", xp=0, streak=0, total_tests=0),
+            ]
+        )
+        self.db.add_all(
+            [
+                UserProfile(user_id="lb-user-1", email="a@example.com", display_name="Aarav Sharma"),
+                UserProfile(user_id="lb-user-2", email="b@example.com", display_name="Diya Patel"),
             ]
         )
         self.db.commit()
 
-        fake_auth = FakeFirebaseAuth([], fail=True)
-        try:
-            with patch.object(leaderboard_service.security, "firebase_ready", return_value=True), patch.object(
-                leaderboard_service.security, "firebase_auth", fake_auth
-            ):
-                rows = leaderboard_service.build_leaderboard(self.db)
+    def _cleanup(self):
+        self.db.query(UserProgress).filter(
+            UserProgress.user_id.in_(self.SEEDED_IDS)
+        ).delete(synchronize_session=False)
+        self.db.query(UserProfile).filter(
+            UserProfile.user_id.in_(self.SEEDED_IDS)
+        ).delete(synchronize_session=False)
+        self.db.commit()
 
-            row_ids = {row["user_id"] for row in rows}
-            self.assertTrue(set(fallback_ids).issubset(row_ids))
-            self.assertGreaterEqual(len(rows), 12)
+    def tearDown(self):
+        self._cleanup()
+        self.db.close()
+
+    def test_full_signup_names_not_firebase_or_masked(self):
+        rows = leaderboard_service.build_leaderboard(self.db, limit=0)
+        by_id = {row["user_id"]: row for row in rows}
+        # Full name from the profile — not "Aarav S." and not a Firebase name.
+        self.assertEqual(by_id["lb-user-1"]["display_name"], "Aarav Sharma")
+        self.assertEqual(by_id["lb-user-2"]["display_name"], "Diya Patel")
+
+    def test_excludes_inactive_students(self):
+        rows = leaderboard_service.build_leaderboard(self.db, limit=0)
+        ids = {row["user_id"] for row in rows}
+        self.assertNotIn("lb-inactive", ids)
+
+    def test_ranks_by_xp_descending(self):
+        rows = leaderboard_service.build_leaderboard(self.db, limit=0)
+        seeded = [row for row in rows if row["user_id"] in {"lb-user-1", "lb-user-2"}]
+        self.assertEqual(seeded[0]["user_id"], "lb-user-1")
+        self.assertEqual(seeded[1]["user_id"], "lb-user-2")
+        self.assertLess(seeded[0]["rank"], seeded[1]["rank"])
+
+    def test_anonymous_name_when_profile_missing(self):
+        self.db.add(UserProgress(user_id="lb-user-3", xp=80, streak=1, total_tests=1))
+        self.db.commit()
+        rows = leaderboard_service.build_leaderboard(self.db, limit=0)
+        row = next(item for item in rows if item["user_id"] == "lb-user-3")
+        self.assertTrue(row["display_name"].startswith("Student "))
+
+    def test_email_visible_only_to_self_or_admin(self):
+        own = leaderboard_service.build_leaderboard(
+            self.db, {"uid": "lb-user-1", "email": "a@example.com"}, limit=0
+        )
+        stranger = leaderboard_service.build_leaderboard(
+            self.db, {"uid": "lb-user-2", "email": "b@example.com"}, limit=0
+        )
+        own_rows = {row["user_id"]: row for row in own}
+        stranger_rows = {row["user_id"]: row for row in stranger}
+        self.assertEqual(own_rows["lb-user-1"]["email"], "a@example.com")
+        self.assertIsNone(stranger_rows["lb-user-1"]["email"])
+
+    def test_caps_at_top_twenty(self):
+        cap_ids = [f"lb-cap-{index}" for index in range(25)]
+        self.db.add_all(
+            [
+                UserProgress(user_id=user_id, xp=10000 + index, streak=1, total_tests=1)
+                for index, user_id in enumerate(cap_ids)
+            ]
+        )
+        self.db.commit()
+        try:
+            rows = leaderboard_service.build_leaderboard(self.db, limit=20)
+            self.assertEqual(len(rows), 20)
+            self.assertEqual(rows[0]["rank"], 1)
+            self.assertEqual(rows[-1]["rank"], 20)
         finally:
-            self.db.query(UserProgress).filter(UserProgress.user_id.in_(fallback_ids)).delete(
-                synchronize_session=False
-            )
+            self.db.query(UserProgress).filter(
+                UserProgress.user_id.in_(cap_ids)
+            ).delete(synchronize_session=False)
             self.db.commit()
 
 

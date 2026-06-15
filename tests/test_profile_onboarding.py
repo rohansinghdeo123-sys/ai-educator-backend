@@ -103,7 +103,7 @@ class ProfileOnboardingTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422)
 
-    def test_leaderboard_uses_private_names_and_class_rank(self):
+    def test_leaderboard_uses_full_signup_names_and_class_rank(self):
         self.db.add_all(
             [
                 UserProfile(
@@ -136,8 +136,8 @@ class ProfileOnboardingTests(unittest.TestCase):
             if row["user_id"] in {self.USER_ID, self.OTHER_USER_ID}
         }
 
-        self.assertEqual(selected[self.OTHER_USER_ID]["display_name"], "Ananya S.")
-        self.assertEqual(selected[self.USER_ID]["display_name"], "Rohan S.")
+        self.assertEqual(selected[self.OTHER_USER_ID]["display_name"], "Ananya Sharma")
+        self.assertEqual(selected[self.USER_ID]["display_name"], "Rohan Singh")
         self.assertEqual(selected[self.OTHER_USER_ID]["class_rank"], 1)
         self.assertEqual(selected[self.USER_ID]["class_rank"], 2)
 
