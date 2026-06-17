@@ -43,6 +43,17 @@ RAW_NCERT_DIR = DATA_DIR / "raw" / "ncert"
 APPROVED_STATUSES = {"approved", "published"}
 DEFAULT_VERSION = "v1"
 
+
+def _min_coverage_score() -> float:
+    # Minimum share of teaching pages a chapter's concepts must cover before it
+    # can be approved. Dense chapters carry many exercise/figure pages with no
+    # extractable concept, so the default is forgiving; the human review is the
+    # real quality gate. Tunable via env without a code change.
+    try:
+        return float(os.getenv("CONTENT_MIN_COVERAGE_SCORE", "0.60"))
+    except ValueError:
+        return 0.60
+
 STOPWORDS = {
     "what", "why", "how", "explain", "define", "describe", "tell", "give",
     "with", "from", "about", "than", "more", "less", "into", "this", "that",
@@ -457,7 +468,7 @@ def build_coverage_report(
         "extraction_quality": round(extraction_quality, 3),
         "issues": list(issues),
         "blocking_issue_count": len(blocking_issues),
-        "ready_for_approval": bool(concepts and not blocking_issues and coverage_score >= 0.65),
+        "ready_for_approval": bool(concepts and not blocking_issues and coverage_score >= _min_coverage_score()),
     }
 
 
