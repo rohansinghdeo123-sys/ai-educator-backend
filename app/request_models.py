@@ -64,7 +64,9 @@ class ContentConceptImportRequest(BaseModel):
 
 class ContentGenerateConceptsRequest(BaseModel):
     replace_existing: bool = True
-    max_batch_chars: int = Field(default=9000, ge=2500, le=16000)
+    # Smaller batches mean fewer concepts per LLM response, which keeps the JSON
+    # output well under the token cap and avoids mid-array truncation.
+    max_batch_chars: int = Field(default=6000, ge=2500, le=16000)
     run_in_background: bool = True
 
 

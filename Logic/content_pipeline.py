@@ -652,6 +652,46 @@ def import_concepts_for_chapter(
     return chapter
 
 
+def _salvage_json_objects(text: str) -> List[Dict[str, Any]]:
+    """Recover every well-formed top-level {...} object from a string, scanning
+    with brace-depth tracking that respects strings/escapes. Used when the model
+    response is not valid JSON as a whole (a dropped comma, or output truncated
+    past max_tokens mid-array): the complete objects before the break are still
+    usable, and the malformed/partial tail is simply skipped."""
+    objects: List[Dict[str, Any]] = []
+    depth = 0
+    start: Optional[int] = None
+    in_string = False
+    escape = False
+    for index, char in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if char == "\\":
+            escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    obj = json.loads(text[start:index + 1])
+                except json.JSONDecodeError:
+                    obj = None
+                if isinstance(obj, dict):
+                    objects.append(obj)
+                start = None
+    return objects
+
+
 def _extract_json_array(text: str) -> List[Dict[str, Any]]:
     cleaned = str(text or "").strip()
     fenced = re.search(r"```(?:json)?\s*(.*?)```", cleaned, flags=re.DOTALL | re.IGNORECASE)
@@ -659,11 +699,17 @@ def _extract_json_array(text: str) -> List[Dict[str, Any]]:
         cleaned = fenced.group(1).strip()
     start = cleaned.find("[")
     end = cleaned.rfind("]")
-    if start >= 0 and end > start:
-        cleaned = cleaned[start:end + 1]
-    data = json.loads(cleaned)
+    candidate = cleaned[start:end + 1] if start >= 0 and end > start else cleaned
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        # The model dropped a comma or got truncated mid-array. Salvage whatever
+        # complete objects it did emit rather than discarding the whole batch.
+        return _salvage_json_objects(cleaned)
+    if isinstance(data, dict):
+        data = data.get("concepts", []) if "concepts" in data else [data]
     if not isinstance(data, list):
-        raise ValueError("Model response must be a JSON array of concepts.")
+        return _salvage_json_objects(cleaned)
     return [item for item in data if isinstance(item, dict)]
 
 
@@ -704,6 +750,7 @@ def generate_concepts_for_chapter(
     from Logic.coach.model_gateway import model_gateway
 
     generated: List[Dict[str, Any]] = []
+    failed_batches = 0
     batches = _page_batches(pages, max_chars=max_batch_chars)
     for batch_index, batch in enumerate(batches, start=1):
         page_text = "\n\n".join(
@@ -747,10 +794,21 @@ def generate_concepts_for_chapter(
             safety_tier="strict_source_grounding",
             messages=messages,
             temperature=0.1,
-            max_tokens=3000,
+            max_tokens=4096,
         )
-        generated.extend(_extract_json_array(response))
+        try:
+            generated.extend(_extract_json_array(response))
+        except Exception as exc:  # noqa: BLE001 - one bad batch must not fail the chapter
+            failed_batches += 1
+            logger.warning(
+                "Concept generation batch %s/%s for %s yielded no parseable JSON: %s",
+                batch_index, len(batches), chapter.slug, exc,
+            )
 
+    if not generated and failed_batches:
+        raise ValueError(
+            f"Concept generation failed: all {failed_batches} batch(es) returned unparseable JSON."
+        )
     return import_concepts_for_chapter(db, chapter.id, generated, replace=replace)
 
 
