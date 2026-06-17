@@ -126,11 +126,26 @@ class ContentConceptPayload(BaseModel):
             return data
         data = dict(data)
 
-        for key in ("concept_id", "title", "definition", "core_explanation",
-                    "blooms_taxonomy", "typical_exam_weightage", "importance_level"):
+        for key in ("definition", "core_explanation", "blooms_taxonomy",
+                    "typical_exam_weightage", "importance_level"):
             value = data.get(key)
             if value is not None and not isinstance(value, str):
                 data[key] = str(value)
+
+        # concept_id and title are required and length-constrained (>= 2 chars).
+        # The model sometimes emits a number or a single character (concept_id:
+        # 4), which fails min_length and drops the whole concept. Derive valid
+        # values from the content so that can never happen.
+        concept_id = normalize_key(data.get("concept_id"))
+        title = str(data.get("title") or "").strip()
+        if len(concept_id) < 2:
+            concept_id = normalize_key(title)
+        if len(concept_id) < 2:
+            concept_id = normalize_key(str(data.get("definition") or "")[:60])
+        data["concept_id"] = (concept_id or "concept")[:140]
+        if len(title) < 2:
+            title = titleize(concept_id) or "Untitled concept"
+        data["title"] = title[:220]
 
         for key in ("key_points", "examples", "properties", "applications",
                     "prerequisites", "learning_objectives"):
