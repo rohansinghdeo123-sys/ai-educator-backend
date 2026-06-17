@@ -15,7 +15,7 @@ from Logic.content_pipeline import (
     validate_concept_payloads,
     approve_chapter,
 )
-from models import ContentChapter, ContentChunk, ContentConcept
+from models import ContentChapter, ContentChunk, ContentConcept, ContentPage
 
 
 class ContentPipelineTests(unittest.TestCase):
@@ -122,9 +122,19 @@ class ContentPipelineTests(unittest.TestCase):
                 status="validated",
                 source_hash="hash_a",
                 validation_report={"ready_for_approval": True},
-                concept_count=3,
+                concept_count=2,
             )
             db.add(chapter)
+            db.commit()
+            # Approval now re-evaluates coverage from real rows, so give the
+            # chapter pages and concepts that fully cover them.
+            for page_number in (1, 2):
+                db.add(ContentPage(chapter_id=chapter.id, page_number=page_number,
+                                   text="x", char_count=100, extraction_quality=1.0))
+            for page_number in (1, 2):
+                db.add(ContentConcept(chapter_id=chapter.id, concept_id=f"concept_{page_number}",
+                                      title=f"Concept {page_number}", definition="d",
+                                      source_pages=[page_number]))
             db.commit()
 
             # First approval: goes live as v1 and records the live hash.

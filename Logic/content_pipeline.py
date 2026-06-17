@@ -864,13 +864,33 @@ def _next_version(value: str) -> str:
     return "v2"
 
 
+def _build_chapter_report(db: Session, chapter: ContentChapter) -> Dict[str, Any]:
+    """Recompute the coverage/validation report for a chapter from its current
+    stored pages and concepts, so threshold/config changes are reflected without
+    re-running generation."""
+    pages = db.query(ContentPage).filter(ContentPage.chapter_id == chapter.id).order_by(ContentPage.page_number).all()
+    concepts = db.query(ContentConcept).filter(ContentConcept.chapter_id == chapter.id).order_by(ContentConcept.concept_id).all()
+    chunks = db.query(ContentChunk).filter(ContentChunk.chapter_id == chapter.id).all()
+    return build_coverage_report(
+        [{"page_number": page.page_number, "char_count": page.char_count, "extraction_quality": page.extraction_quality} for page in pages],
+        concepts,
+        chunks,
+        chapter.validation_report.get("issues", []) if chapter.validation_report else [],
+    )
+
+
 def approve_chapter(db: Session, chapter_id: int, *, approved_by: str = "") -> ContentChapter:
     chapter = db.query(ContentChapter).filter(ContentChapter.id == chapter_id).one_or_none()
     if chapter is None:
         raise ValueError(f"Chapter not found: {chapter_id}")
-    report = chapter.validation_report or {}
     if not chapter.concept_count:
         raise ValueError("Chapter has no validated concepts. Import or generate concept JSON first.")
+    # Re-evaluate against current data and the active coverage threshold (rather
+    # than the snapshot stored at generation time) and persist it, so config
+    # changes take effect without re-running generation.
+    report = _build_chapter_report(db, chapter)
+    chapter.validation_report = report
+    chapter.coverage_score = report["coverage_score"]
     if not report.get("ready_for_approval"):
         raise ValueError("Chapter is not ready for approval. Review validation_report first.")
     # Approval is the moment content goes live for students. If the PDF was
@@ -982,13 +1002,7 @@ def chapter_report(db: Session, chapter_id: int) -> Dict[str, Any]:
         raise ValueError(f"Chapter not found: {chapter_id}")
     pages = db.query(ContentPage).filter(ContentPage.chapter_id == chapter.id).order_by(ContentPage.page_number).all()
     concepts = db.query(ContentConcept).filter(ContentConcept.chapter_id == chapter.id).order_by(ContentConcept.concept_id).all()
-    chunks = db.query(ContentChunk).filter(ContentChunk.chapter_id == chapter.id).all()
-    report = build_coverage_report(
-        [{"page_number": page.page_number, "char_count": page.char_count, "extraction_quality": page.extraction_quality} for page in pages],
-        concepts,
-        chunks,
-        chapter.validation_report.get("issues", []) if chapter.validation_report else [],
-    )
+    report = _build_chapter_report(db, chapter)
     return {
         "chapter": serialize_chapter(chapter),
         "report": report,
