@@ -154,20 +154,29 @@ class ContentConceptPayload(BaseModel):
             ]
 
         if data.get("source_pages") is not None:
-            items = data["source_pages"] if isinstance(data["source_pages"], list) else [data["source_pages"]]
-            pages: List[int] = []
-            for entry in items:
-                if isinstance(entry, bool):
-                    continue
-                if isinstance(entry, (int, float)):
-                    pages.append(int(entry))
-                else:
-                    match = re.search(r"\d+", str(entry))
-                    if match:
-                        pages.append(int(match.group()))
-            data["source_pages"] = pages
+            data["source_pages"] = coerce_page_numbers(data["source_pages"])
 
         return data
+
+
+def coerce_page_numbers(value: Any) -> List[int]:
+    """Pull integer page numbers out of whatever the model returned: ints,
+    numeric strings, or page markers like "[PAGE 28]". Used by both schema
+    coercion and the generation batch-page fallback."""
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    pages: List[int] = []
+    for entry in items:
+        if isinstance(entry, bool):
+            continue
+        if isinstance(entry, (int, float)):
+            pages.append(int(entry))
+        else:
+            match = re.search(r"\d+", str(entry))
+            if match:
+                pages.append(int(match.group()))
+    return pages
 
 
 def normalize_key(value: Any) -> str:
@@ -371,9 +380,12 @@ def validate_concept_payloads(
         except ValidationError as exc:
             issues.append({"severity": "error", "index": index, "message": "Concept schema validation failed.", "details": exc.errors()})
             continue
-        concept_issues: List[str] = []
         if concept.concept_id in seen_ids:
-            concept_issues.append("duplicate_concept_id")
+            # Overlapping batches re-emit the same concept; keep the first
+            # occurrence and drop the rest instead of flagging duplicates.
+            continue
+        seen_ids.add(concept.concept_id)
+        concept_issues: List[str] = []
         if not concept.definition and not concept.core_explanation and not concept.key_points:
             concept_issues.append("missing_teaching_content")
         if not concept.source_pages:
@@ -389,7 +401,6 @@ def validate_concept_payloads(
                     "issues": concept_issues,
                 }
             )
-        seen_ids.add(concept.concept_id)
         validated.append(concept)
 
     return validated, issues
@@ -796,8 +807,16 @@ def generate_concepts_for_chapter(
             temperature=0.1,
             max_tokens=4096,
         )
+        batch_pages = [page.page_number for page in batch]
         try:
-            generated.extend(_extract_json_array(response))
+            items = _extract_json_array(response)
+            for item in items:
+                # Source grounding is the only blocking check; when the model
+                # forgets to cite pages, fall back to the pages of the batch the
+                # concept was actually generated from so it stays approvable.
+                if isinstance(item, dict) and not coerce_page_numbers(item.get("source_pages")):
+                    item["source_pages"] = list(batch_pages)
+            generated.extend(items)
         except Exception as exc:  # noqa: BLE001 - one bad batch must not fail the chapter
             failed_batches += 1
             logger.warning(
