@@ -16,7 +16,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
@@ -112,6 +112,62 @@ class ContentConceptPayload(BaseModel):
                 match = re.search(r"\d+", text)
                 level = int(match.group()) if match else 1
         return max(1, min(5, level))
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_llm_field_types(cls, data: Any) -> Any:
+        # Groq returns loosely-typed JSON: numbers where strings are expected
+        # (importance_level: 7), page markers like "[PAGE 28]" instead of the
+        # integer 28, and occasionally a bare value where a list is expected.
+        # A single mismatch makes Pydantic reject the whole concept, which would
+        # drop every concept and leave coverage at zero. Coerce here so one
+        # sloppy field never discards otherwise-good teaching content.
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+
+        for key in ("concept_id", "title", "definition", "core_explanation",
+                    "blooms_taxonomy", "typical_exam_weightage", "importance_level"):
+            value = data.get(key)
+            if value is not None and not isinstance(value, str):
+                data[key] = str(value)
+
+        for key in ("key_points", "examples", "properties", "applications",
+                    "prerequisites", "learning_objectives"):
+            if data.get(key) is None:
+                continue
+            items = data[key] if isinstance(data[key], list) else [data[key]]
+            data[key] = [item if isinstance(item, str) else str(item)
+                         for item in items if item is not None]
+
+        for key in ("formulas", "related_concepts"):
+            if data.get(key) is not None and not isinstance(data[key], list):
+                data[key] = [data[key]]
+
+        if data.get("common_mistakes") is not None:
+            items = data["common_mistakes"]
+            if not isinstance(items, list):
+                items = [items]
+            data["common_mistakes"] = [
+                item if isinstance(item, dict) else {"note": str(item)}
+                for item in items if item is not None
+            ]
+
+        if data.get("source_pages") is not None:
+            items = data["source_pages"] if isinstance(data["source_pages"], list) else [data["source_pages"]]
+            pages: List[int] = []
+            for entry in items:
+                if isinstance(entry, bool):
+                    continue
+                if isinstance(entry, (int, float)):
+                    pages.append(int(entry))
+                else:
+                    match = re.search(r"\d+", str(entry))
+                    if match:
+                        pages.append(int(match.group()))
+            data["source_pages"] = pages
+
+        return data
 
 
 def normalize_key(value: Any) -> str:
@@ -665,6 +721,8 @@ def generate_concepts_for_chapter(
                     "common_mistakes, learning_objectives, source_pages, difficulty_level, "
                     "blooms_taxonomy, typical_exam_weightage, importance_level. "
                     "difficulty_level must be an integer from 1 (easiest) to 5 (hardest). "
+                    "source_pages must be a JSON array of integer page numbers (e.g. [4, 5]), "
+                    "not page markers. typical_exam_weightage and importance_level must be short strings. "
                     "Every concept must cite source_pages from the supplied [PAGE n] markers."
                 ),
             },
