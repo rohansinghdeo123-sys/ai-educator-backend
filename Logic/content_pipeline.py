@@ -86,6 +86,33 @@ class ContentConceptPayload(BaseModel):
         pages = sorted({int(page) for page in value if int(page) > 0})
         return pages
 
+    @field_validator("difficulty_level", mode="before")
+    @classmethod
+    def coerce_difficulty_level(cls, value: Any) -> int:
+        # LLMs routinely return a word ("Medium") or a numeric string instead of
+        # the 1-5 integer the schema expects. Map those rather than reject the
+        # whole concept, which would otherwise drop every concept as a blocking
+        # issue and leave coverage at zero.
+        if value is None or isinstance(value, bool) or value == "":
+            return 1
+        if isinstance(value, (int, float)):
+            level = int(value)
+        else:
+            text = str(value).strip().lower()
+            words = {
+                "very easy": 1, "trivial": 1,
+                "easy": 2, "low": 2, "basic": 2, "beginner": 2, "simple": 2,
+                "medium": 3, "moderate": 3, "intermediate": 3, "average": 3, "normal": 3,
+                "hard": 4, "high": 4, "difficult": 4, "challenging": 4, "advanced": 4,
+                "very hard": 5, "very difficult": 5, "expert": 5,
+            }
+            if text in words:
+                level = words[text]
+            else:
+                match = re.search(r"\d+", text)
+                level = int(match.group()) if match else 1
+        return max(1, min(5, level))
+
 
 def normalize_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(value or "").lower()).strip("_")
@@ -637,6 +664,7 @@ def generate_concepts_for_chapter(
                     "definition, core_explanation, key_points, examples, formulas, "
                     "common_mistakes, learning_objectives, source_pages, difficulty_level, "
                     "blooms_taxonomy, typical_exam_weightage, importance_level. "
+                    "difficulty_level must be an integer from 1 (easiest) to 5 (hardest). "
                     "Every concept must cite source_pages from the supplied [PAGE n] markers."
                 ),
             },
