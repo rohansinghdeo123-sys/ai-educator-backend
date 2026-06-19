@@ -3103,12 +3103,20 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
         },
     )
 
-    # Persist BEFORE the final frames so a client disconnect between the last
-    # delta and [DONE] cannot lose the turn (the follow-up memory depends on it).
     coach.daily_strategy = recommendation
     coach.next_best_action = recommendation
     coach.last_interaction_at = datetime.utcnow()
     coach.updated_at = datetime.utcnow()
+
+    # Deliver the completed answer to the client NOW, before the (free-tier Neon,
+    # therefore slow) persistence below. This clears the "writing..." indicator
+    # the instant the answer is ready instead of stalling it on DB writes.
+    # Persistence still runs before [DONE]/stream-close — it is synchronous code
+    # that completes even if the client disconnects right after this frame, so
+    # the turn is never lost (_persist_interrupted_turn stays the hard-failure
+    # fallback, since turn_state["persisted"] flips only after the writes below).
+    yield completed_event
+
     # The long-term summary is owned solely by the every-8th-turn model
     # consolidation (_maybe_refresh_long_term_summary), which now runs after the
     # final frame. The old per-turn template write was removed: it clobbered the
@@ -3228,8 +3236,9 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
     )
     turn_state["persisted"] = True
 
-    yield completed_event
-    # Keep the encoded answer for older clients while the semantic contract rolls out.
+    # completed_event was already yielded above (before persistence) so the UI
+    # stops showing "writing..." immediately. Keep the encoded answer for older
+    # clients while the semantic contract rolls out, then close the stream.
     encoded = base64.b64encode(final_answer.encode("utf-8")).decode("ascii")
     yield f"data: {encoded}\n\n"
     yield "data: [DONE]\n\n"
