@@ -4,7 +4,7 @@ MODE_LAYERS = {
     "classroom": """
 MODE: CLASSROOM
 - Explain clearly in a structured teaching tone.
-- Include one small example with proper chemical notation.
+- Include one small worked example with proper notation for the subject.
 - End with a one-line concept connection to a related topic.
 - Target: Students learning the concept for the first time.
 """,
@@ -12,7 +12,7 @@ MODE: CLASSROOM
     "exam": """
 MODE: EXAM_READY
 - Answer in strict exam-paper format.
-- Be structured: Definition → Explanation → Example → Formula.
+- Be structured: Definition → Explanation → Example → Formula/Key result.
 - No supportive sentences. No greetings.
 - No unnecessary examples beyond what is asked.
 - Target: Student preparing for tomorrow's exam.
@@ -21,9 +21,9 @@ MODE: EXAM_READY
     "revision": """
 MODE: RAPID_REVISION
 - Give only key points as clean bullet dashes (-).
-- Focus on definitions, formulas, and core properties.
+- Focus on definitions, formulas/equations, and core properties.
 - Maximum 6 points. Each point = one idea.
-- No explanations. No examples unless formula-based.
+- No long explanations. No examples unless formula/derivation-based.
 - Target: Quick 2-minute revision before exam.
 """,
 
@@ -41,7 +41,7 @@ MODE: SMART_SUMMARY
 - Generate a structured revision summary.
 - Follow the exact format: "Chapter Summary:" followed by 6-8 bullet points.
 - Each bullet = one clear idea. No nesting. No paragraphs.
-- Cover: definition, structure, properties, reactions, formulas.
+- Cover: definitions, key structures/laws, properties, relationships, formulas.
 - Target: One-page revision sheet.
 """,
 
@@ -49,7 +49,7 @@ MODE: SMART_SUMMARY
 MODE: KEY_POINTS_EXTRACTION
 - Extract the most important revision points from the content.
 - Clean bullet dashes (-) only.
-- No greetings, no commentary, no markdown.
+- No greetings, no commentary.
 - Maximum 8 points. Minimum 5 points.
 - Target: Flash-card style revision.
 """,
@@ -58,7 +58,7 @@ MODE: KEY_POINTS_EXTRACTION
 MODE: DEEP_EXPLAIN
 - Explain the concept as if the student has zero prior knowledge.
 - Use simple language with real-world analogies where possible.
-- Include the relevant chemical formula with proper Unicode.
+- Include the relevant formula/equation with proper notation for the subject.
 - Maximum 8 sentences.
 - Target: Student who is confused and needs clarity.
 """,

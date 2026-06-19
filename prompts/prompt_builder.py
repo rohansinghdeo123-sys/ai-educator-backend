@@ -62,10 +62,8 @@ STUDENT QUESTION:
 RESPONSE RULES:
 - Use only the section content above.
 - Follow the active mode and difficulty settings.
-- Ensure correct Unicode chemical formatting.
-- No markdown.
-- No greeting.
-- Plain text only."""
+- Use clean Markdown and correct notation for the subject (Unicode for chemistry formulas, LaTeX \\( \\) for maths/physics).
+- No greeting."""
 
     return [
         {"role": "system", "content": system_message.strip()},
@@ -89,7 +87,7 @@ def build_mcq_prompt(
 
     system_message = f"""{BASE_PROMPT}
 
-You are a senior Class 11 Chemistry exam designer.
+You are a senior exam designer for the student's subject.
 
 Your task is to generate high-quality MCQs from the provided section content.
 
@@ -105,9 +103,9 @@ STRICT OUTPUT RULE:
 - Do not include trailing commas.
 - Do not include any text before or after the JSON.
 
-CHEMISTRY FORMAT RULE:
-- Use proper Unicode subscripts and superscripts.
-- Write CH₄, C₂H₆, CₙH₂ₙ₊₂, not CH4, C2H6, CnH2n+2.
+NOTATION RULE:
+- Use correct notation for the subject inside the JSON text fields.
+- Chemistry: Unicode formulas (CH₄, C₂H₆, SO₄²⁻). Maths/Physics: LaTeX in \\( \\).
 
 QUESTION QUALITY RULE:
 - Questions must test understanding, not only memory.
@@ -168,7 +166,7 @@ def build_probable_questions_prompt(
 
     system_message = f"""{BASE_PROMPT}
 
-You are a senior Class 11 Chemistry exam paper setter.
+You are a senior exam paper setter for the student's subject.
 
 STRICT OUTPUT RULE:
 - Return valid JSON only.

@@ -109,44 +109,38 @@ def _fix_charge_notation(text: str) -> str:
 
 def format_chemistry_output(text: str) -> str:
     """
-    TOOL: Post-process AI output to ensure correct chemical formatting.
+    TOOL: Light, subject-safe post-processor for AI output.
 
-    This tool:
-    1. Replaces known incorrect formulas with correct Unicode versions
-    2. Fixes inline element+number patterns
-    3. Fixes charge notations
-    4. Removes any markdown formatting that slipped through
+    Replaces a small set of well-known chemistry formulas with their Unicode
+    form (e.g. CH4 -> CH₄). It intentionally does NOT:
+      - strip Markdown (the UI now renders bold/tables/lists/code), or
+      - run the aggressive element+digit / charge regexes, which corrupted
+        non-chemistry subjects (e.g. turning the maths expression "2+3" into
+        "2⁺3", or the variable "F2" into "F₂").
+
+    The model is now prompted to emit correct notation per subject (Unicode for
+    chemistry, LaTeX for maths/physics), so this is only a light safety net for
+    a few common un-subscripted chemistry formulas. Safe to apply to any subject.
 
     Args:
         text: Raw AI output text
 
     Returns:
-        Cleaned and formatted text with proper Unicode chemistry
+        Text with common chemistry formulas normalised; formatting preserved.
     """
     if not text:
         return text
 
-    # Step 1: Apply known formula corrections (longest first to avoid partial matches)
+    # Apply known formula corrections (longest first to avoid partial matches).
+    # These are exact, well-known chemistry tokens that do not occur in normal
+    # prose for other subjects, so they are safe to replace unconditionally.
     sorted_corrections = sorted(FORMULA_CORRECTIONS.items(), key=lambda x: len(x[0]), reverse=True)
     for wrong, correct in sorted_corrections:
-        # Case-sensitive replacement
         text = text.replace(wrong, correct)
 
-    # Step 2: Fix remaining inline formulas
-    text = _fix_inline_formulas(text)
-
-    # Step 3: Fix charge notations
-    text = _fix_charge_notation(text)
-
-    # Step 4: Remove markdown formatting
-    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)  # Remove bold
-    text = re.sub(r'#{1,6}\s*', '', text)           # Remove headings
-    text = re.sub(r'```[\s\S]*?```', '', text)      # Remove code blocks
-    text = re.sub(r'`(.+?)`', r'\1', text)          # Remove inline code
-
-    # Step 5: Clean up extra whitespace
+    # Collapse excessive blank lines only; leave Markdown and math untouched.
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = text.strip()
 
-    logger.debug("Chemistry formatting applied successfully.")
+    logger.debug("Subject-safe formatting applied.")
     return text

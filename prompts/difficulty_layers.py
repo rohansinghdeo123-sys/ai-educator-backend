@@ -12,7 +12,7 @@ DIFFICULTY: EASY
     "medium": """
 DIFFICULTY: MEDIUM
 - Standard Class 11 CBSE/ICSE level.
-- Use proper chemical terminology with clarity.
+- Use proper subject terminology with clarity.
 - Balance between simplicity and technical accuracy.
 """,
 
@@ -20,7 +20,7 @@ DIFFICULTY: MEDIUM
 DIFFICULTY: ADVANCED
 - Provide deeper conceptual reasoning.
 - Include edge cases and exceptions where relevant.
-- Reference reaction mechanisms briefly if applicable.
+- Reference underlying mechanisms or derivations briefly if applicable.
 - Suitable for competitive exam preparation (JEE/NEET level).
 """,
 }

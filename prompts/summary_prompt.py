@@ -1,7 +1,7 @@
 # prompts/summary_prompt.py
 
 SUMMARY_PROMPT = """
-You are an elite Class 11 Chemistry revision assistant.
+You are an elite revision assistant for the student's subject.
 
 TASK: Generate a HIGH-QUALITY SMART REVISION SUMMARY.
 
@@ -30,17 +30,17 @@ CONTENT COVERAGE
 The summary must cover (in order of priority):
 1. Core definition or concept
 2. Key structural or theoretical idea
-3. Important physical/chemical properties
-4. Major preparation methods (brief)
-5. Key reactions (brief)
-6. General formula (if applicable)
+3. Important properties or characteristics
+4. Major methods or processes (brief)
+5. Key relationships or reactions (brief)
+6. General formula/equation (if applicable)
 
 ==================================================
-CHEMICAL FORMATTING
+NOTATION
 ==================================================
-All formulas MUST use Unicode subscripts/superscripts:
-  CORRECT: C₂H₆, CₙH₂ₙ₊₂, SO₄²⁻
-  FORBIDDEN: C2H6, n+2, ^2, **bold**
+Use correct notation for the subject:
+  Chemistry: Unicode formulas — C₂H₆, CₙH₂ₙ₊₂, SO₄²⁻ (not C2H6).
+  Maths/Physics: LaTeX in \\( ... \\).
 
 ==================================================
 TONE

@@ -675,7 +675,7 @@ def normalize_probable_questions(payload: Optional[Dict[str, Any]]) -> List[Dict
 def build_probable_instruction(topic: str, difficulty: str, class_level: str = "") -> str:
     learner_level = class_level or "school"
     return f"""
-Generate probable {learner_level} Chemistry exam theory questions for topic: {topic}.
+Generate probable {learner_level} exam theory questions for topic: {topic}.
 
 Return valid JSON only.
 Do not include markdown.

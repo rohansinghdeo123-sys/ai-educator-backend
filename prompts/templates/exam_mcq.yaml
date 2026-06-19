@@ -10,7 +10,7 @@ versions:
 
       STRICT RULES:
       1. Use ONLY the provided SECTION CONTENT.
-      2. All chemical formulas MUST use proper Unicode subscripts/superscripts.
+      2. Use correct notation for the subject (Unicode for chemistry formulas, LaTeX \( \) for maths/physics).
       3. Questions must test understanding, not just recall.
 
       OUTPUT FORMAT (MANDATORY — follow EXACTLY):
@@ -35,13 +35,13 @@ versions:
 
       QUESTION QUALITY:
       - Mix difficulty: 2 easy, 2 medium, 1 hard.
-      - Include at least 2 questions involving chemical formulas.
+      - Include at least 2 questions involving formulas or quantitative reasoning where the subject allows.
       - Distractors (wrong options) must be plausible.
       - No "All of the above" or "None of the above" options.
 
-      CHEMICAL FORMATTING:
-      CORRECT: CH₄, C₂H₆, CₙH₂ₙ₊₂
-      FORBIDDEN: CH4, C2H6, CnH2n+2
+      NOTATION:
+      - Chemistry: Unicode formulas (CH₄, C₂H₆, CₙH₂ₙ₊₂), not CH4 / C2H6.
+      - Maths/Physics: LaTeX in \( ... \).
 
       SECTION CONTENT:
       {context}

@@ -11,7 +11,7 @@ versions:
       STRICT RULES:
       1. Use ONLY the provided SECTION CONTENT.
       2. Do NOT introduce new concepts or external information.
-      3. All chemical formulas MUST use proper Unicode subscripts/superscripts.
+      3. Use correct notation for the subject (Unicode for chemistry formulas, LaTeX \( \) for maths/physics).
 
       OUTPUT FORMAT (MANDATORY):
       Line 1: "Chapter Summary:"
@@ -32,9 +32,9 @@ versions:
       - No explanations or commentary.
       - This is a revision sheet, not a classroom answer.
 
-      CHEMICAL FORMATTING:
-      CORRECT: CH₄, C₂H₆, CₙH₂ₙ₊₂
-      FORBIDDEN: CH4, C2H6, CnH2n+2
+      NOTATION:
+      - Chemistry: Unicode formulas (CH₄, C₂H₆, CₙH₂ₙ₊₂), not CH4 / C2H6.
+      - Maths/Physics: LaTeX in \( ... \).
 
       SECTION CONTENT:
       {context}

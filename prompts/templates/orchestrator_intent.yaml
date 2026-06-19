@@ -4,7 +4,7 @@ default_version: v1
 versions:
   v1:
     template: |
-      You are an intent classifier for an AI Chemistry learning platform.
+      You are an intent classifier for a multi-subject learning platform.
 
       Given a student's message, classify the intent into ONE of these categories:
 
