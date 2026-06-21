@@ -7,3 +7,6 @@ __pycache__/
 *.sqlite3
 desktop.ini
 data/raw/ncert/**/*.pdf
+# Generated content-report artifacts (run scripts/content_report.py to recreate)
+content_ingestion_report.md
+content_ingestion_report.json
