@@ -296,6 +296,11 @@ class WrittenSessionDetailResponse(BaseModel):
     attempts: List[WrittenAttemptSummary]
 
 
+class WrittenSessionListResponse(BaseModel):
+    total: int
+    sessions: List[WrittenSessionOut]
+
+
 # =========================================================
 # STUDENT WEAKNESS REPORT
 # =========================================================

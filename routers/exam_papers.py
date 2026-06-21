@@ -301,7 +301,10 @@ def generate_probable_questions(
             use_syllabus_grounding=payload.use_syllabus_grounding,
         )
     except pattern_service.PatternError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        # A missing analysis_id is a not-found; an empty corpus is a bad request.
+        message = str(exc)
+        code = status.HTTP_404_NOT_FOUND if "not found" in message.lower() else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=message) from exc
     return pattern_service.serialize_probable(row)
 
 

@@ -202,6 +202,14 @@ class ExamPaperRouteTests(unittest.TestCase):
         self._login(self.other)
         self.assertEqual(self.client.get(f"/exam/probable-questions/{set_id}").status_code, 404)
 
+    def test_probable_unknown_analysis_id_is_404(self):
+        self._login(self.student)
+        resp = self.client.post(
+            "/exam/probable-questions/generate",
+            json={"analysis_id": 999999, "use_syllabus_grounding": False},
+        )
+        self.assertEqual(resp.status_code, 404)
+
     def test_pattern_analyze_without_papers_is_400(self):
         # A brand-new user with no analyzed papers.
         fresh = {"uid": f"exam-fresh-{uuid.uuid4().hex[:8]}", "email": "f@example.com"}

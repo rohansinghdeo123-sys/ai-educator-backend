@@ -11,6 +11,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from Logic.exam import agents
@@ -70,6 +71,43 @@ def get_owned_session(db: Session, user_id: str, session_id: int) -> Optional[Wr
         .filter(WrittenPracticeSession.id == session_id, WrittenPracticeSession.user_id == user_id)
         .first()
     )
+
+
+def complete_session(db: Session, session: WrittenPracticeSession) -> WrittenPracticeSession:
+    """Mark a practice session finished. Idempotent."""
+    if session.session_status != "completed":
+        session.session_status = "completed"
+        session.completed_at = _utcnow()
+        db.commit()
+        db.refresh(session)
+    return session
+
+
+def list_sessions(
+    db: Session,
+    user_id: str,
+    *,
+    subject: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> Tuple[int, List[Dict[str, Any]]]:
+    query = db.query(WrittenPracticeSession).filter(WrittenPracticeSession.user_id == user_id)
+    if subject:
+        query = query.filter(WrittenPracticeSession.subject == subject)
+    total = query.count()
+    sessions = (
+        query.order_by(WrittenPracticeSession.id.desc())
+        .offset(max(0, offset))
+        .limit(max(1, min(limit, 200)))
+        .all()
+    )
+    counts = dict(
+        db.query(WrittenAnswerAttempt.session_id, func.count(WrittenAnswerAttempt.id))
+        .filter(WrittenAnswerAttempt.session_id.in_([s.id for s in sessions] or [0]))
+        .group_by(WrittenAnswerAttempt.session_id)
+        .all()
+    )
+    return total, [serialize_session(s, attempt_count=counts.get(s.id, 0)) for s in sessions]
 
 
 def get_owned_attempt(db: Session, user_id: str, attempt_id: int) -> Optional[WrittenAnswerAttempt]:

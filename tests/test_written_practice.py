@@ -185,6 +185,32 @@ class WrittenPracticeRouteTests(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 422)  # answer min_length=1
 
+    def test_session_list_and_complete(self):
+        self._login(self.student)
+        session_id = self._start()
+
+        # list shows the session
+        lst = self.client.get("/exam/written-practice/sessions")
+        self.assertEqual(lst.status_code, 200, lst.text)
+        self.assertTrue(any(s["id"] == session_id for s in lst.json()["sessions"]))
+
+        # complete it
+        comp = self.client.post(f"/exam/written-practice/sessions/{session_id}/complete")
+        self.assertEqual(comp.status_code, 200, comp.text)
+        self.assertEqual(comp.json()["session_status"], "completed")
+        self.assertIsNotNone(comp.json()["completed_at"])
+
+        # idempotent
+        self.assertEqual(
+            self.client.post(f"/exam/written-practice/sessions/{session_id}/complete").status_code, 200
+        )
+
+        # another user cannot complete or see it
+        self._login(self.other)
+        self.assertEqual(
+            self.client.post(f"/exam/written-practice/sessions/{session_id}/complete").status_code, 404
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

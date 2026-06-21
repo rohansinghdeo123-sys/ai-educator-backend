@@ -20,6 +20,7 @@ from app.exam_schemas import (
     WrittenQuestionOut,
     WrittenQuestionRequest,
     WrittenSessionDetailResponse,
+    WrittenSessionListResponse,
     WrittenSessionOut,
     WrittenStartRequest,
     WrittenSubmitRequest,
@@ -137,6 +138,19 @@ def written_history(
     return {"total": total, "attempts": attempts}
 
 
+@router.get("/exam/written-practice/sessions", response_model=WrittenSessionListResponse)
+def written_sessions(
+    subject: Optional[str] = Query(default=None, max_length=120),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    user_id = require_authenticated_user_id(current_user)
+    total, sessions = practice_service.list_sessions(db, user_id, subject=subject, limit=limit, offset=offset)
+    return {"total": total, "sessions": sessions}
+
+
 @router.get("/exam/written-practice/sessions/{session_id}", response_model=WrittenSessionDetailResponse)
 def written_session_detail(
     session_id: int,
@@ -148,6 +162,20 @@ def written_session_detail(
     if session is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SESSION_NOT_FOUND)
     return practice_service.session_detail(db, user_id, session)
+
+
+@router.post("/exam/written-practice/sessions/{session_id}/complete", response_model=WrittenSessionOut)
+def complete_written_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    user_id = require_authenticated_user_id(current_user)
+    session = practice_service.get_owned_session(db, user_id, session_id)
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SESSION_NOT_FOUND)
+    session = practice_service.complete_session(db, session)
+    return practice_service.session_detail(db, user_id, session)["session"]
 
 
 @router.get("/exam/written-practice/attempts/{attempt_id}/feedback", response_model=WrittenFeedbackOut)

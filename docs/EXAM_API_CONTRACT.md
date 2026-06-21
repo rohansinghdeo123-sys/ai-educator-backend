@@ -246,7 +246,9 @@ Each `rubric_scores` value is a fraction `0..1` (render as % or bars). `marks_aw
 | Method & path | Returns |
 |---|---|
 | `GET /exam/written-practice/history?subject=&limit=&offset=` | `{ total, attempts:[AttemptSummary] }` |
+| `GET /exam/written-practice/sessions?subject=&limit=&offset=` | `{ total, sessions:[Session] }` (each `Session` includes `attempt_count`) |
 | `GET /exam/written-practice/sessions/{id}` | `{ session: Session, attempts:[AttemptSummary] }` · `404` |
+| `POST /exam/written-practice/sessions/{id}/complete` | `Session` (sets `session_status:"completed"`, `completed_at`); idempotent · `404` |
 | `GET /exam/written-practice/attempts/{id}/feedback` | `Feedback` · `404` if not owned or not yet evaluated |
 
 `AttemptSummary`: `{ id, session_id, question_text, question_type, marks_total, marks_awarded(nullable), score_percentage(nullable), evaluation_status, topic, subject, submitted_at, created_at }`.
