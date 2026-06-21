@@ -63,6 +63,7 @@ from services.admin_service import (
     record_admin_audit,
     record_admin_audit_simple,
 )
+from services.content_report_service import build_content_report as build_content_ingestion_report
 from services.ttl_cache import TTLCache
 
 router = APIRouter(tags=["admin"])
@@ -349,6 +350,21 @@ def admin_content_embed(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/admin/content/ingestion-report")
+def admin_content_ingestion_report(
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    full: bool = Query(default=False, description="Include every concept per chapter."),
+    db: Session = Depends(get_db),
+    _current_admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Detailed content-ingestion inventory for the admin page.
+
+    Identical payload to the `scripts/content_report.py` CLI (shared builder), so
+    the in-app report and the terminal report never diverge.
+    """
+    return build_content_ingestion_report(db, status_filter=status_filter, include_full_concepts=full)
 
 
 @router.get("/admin/content/jobs")
