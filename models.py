@@ -625,3 +625,251 @@ class AgentRuntimeHandoff(Base):
     status = Column(String, default="requested", index=True)
     input_json = Column(JSON, default=dict)
     result_json = Column(JSON, default=dict)
+
+
+# =========================================================
+# EXAM INTELLIGENCE — UPLOADED PAPERS & PATTERN ANALYSIS
+# =========================================================
+class UploadedExamPaper(Base):
+    """One question paper a student uploaded for pattern analysis.
+
+    Extracted text and analysis are the durable source of truth: the raw file
+    on disk may be lost on ephemeral hosts, but stored text lets us re-analyze.
+    ``storage_path`` is internal and must never be serialized to clients.
+    """
+    __tablename__ = "uploaded_exam_papers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=False)
+
+    class_level = Column(String, default="", index=True)
+    subject = Column(String, default="", index=True)
+    chapter_id = Column(Integer, nullable=True, index=True)
+    chapter_name = Column(String, default="")
+    exam_type = Column(String, default="unknown", index=True)
+    paper_title = Column(String, default="")
+
+    file_name = Column(String, default="")
+    file_type = Column(String, default="")
+    file_size = Column(Integer, default=0)
+    storage_path = Column(Text, default="")  # internal only — never serialized
+
+    upload_status = Column(String, default="uploaded", index=True)
+    parse_status = Column(String, default="pending", index=True)
+    uploaded_at = Column(DateTime, default=_utcnow_naive)
+    parsed_at = Column(DateTime, nullable=True)
+
+    extracted_text = Column(Text, default="")
+    extraction_confidence = Column(Float, default=0.0)
+    extracted_question_count = Column(Integer, default=0)
+    analysis_json = Column(JSON, default=dict)
+    warnings_json = Column(JSON, default=list)
+
+    created_at = Column(DateTime, default=_utcnow_naive)
+    updated_at = Column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)
+
+    questions = relationship(
+        "ExtractedExamQuestion",
+        back_populates="paper",
+        cascade="all, delete-orphan",
+    )
+
+
+class ExtractedExamQuestion(Base):
+    """One question structured out of an uploaded paper by the analyzer agent."""
+    __tablename__ = "extracted_exam_questions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    paper_id = Column(Integer, ForeignKey("uploaded_exam_papers.id"), index=True)
+    user_id = Column(String, index=True, nullable=False)
+
+    question_number = Column(String, default="")
+    section_name = Column(String, default="")
+    question_text = Column(Text, default="")
+    marks = Column(Float, nullable=True)  # null when not detectable
+    question_type = Column(String, default="")
+    intent = Column(String, default="")
+    difficulty = Column(String, default="")
+
+    class_level = Column(String, default="")
+    subject = Column(String, default="")
+    chapter_id = Column(Integer, nullable=True)
+    chapter_name = Column(String, default="")
+    topic = Column(String, default="", index=True)
+
+    concept_tags_json = Column(JSON, default=list)
+    expected_answer_style = Column(String, default="")
+    confidence_score = Column(Float, default=0.0)
+    raw_block = Column(Text, default="")
+    created_at = Column(DateTime, default=_utcnow_naive)
+
+    paper = relationship("UploadedExamPaper", back_populates="questions")
+
+
+class ExamPatternAnalysis(Base):
+    """Aggregated pattern intelligence across one or more uploaded papers."""
+    __tablename__ = "exam_pattern_analysis"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=False)
+
+    class_level = Column(String, default="", index=True)
+    subject = Column(String, default="", index=True)
+    chapter_id = Column(Integer, nullable=True, index=True)
+    chapter_name = Column(String, default="")
+
+    source_paper_ids_json = Column(JSON, default=list)
+    total_questions = Column(Integer, default=0)
+    total_marks = Column(Float, nullable=True)
+    marks_distribution_json = Column(JSON, default=dict)
+    question_type_distribution_json = Column(JSON, default=dict)
+    chapter_weightage_json = Column(JSON, default=dict)
+    topic_frequency_json = Column(JSON, default=dict)
+    repeated_concepts_json = Column(JSON, default=list)
+    difficulty_distribution_json = Column(JSON, default=dict)
+    pattern_summary = Column(Text, default="")
+    confidence_score = Column(Float, default=0.0)
+
+    created_at = Column(DateTime, default=_utcnow_naive)
+    updated_at = Column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)
+
+
+class ProbableQuestionSet(Base):
+    """Most-probable practice questions derived from observed patterns.
+
+    Output is always framed as 'most probable', never guaranteed (see disclaimer).
+    """
+    __tablename__ = "probable_question_sets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=False)
+
+    class_level = Column(String, default="", index=True)
+    subject = Column(String, default="", index=True)
+    chapter_id = Column(Integer, nullable=True, index=True)
+    chapter_name = Column(String, default="")
+
+    source_analysis_ids_json = Column(JSON, default=list)
+    generation_mode = Column(String, default="mixed", index=True)
+    probable_questions_json = Column(JSON, default=list)
+    priority_topics_json = Column(JSON, default=list)
+    strategy_summary = Column(Text, default="")
+    disclaimer = Column(Text, default="")
+    confidence_score = Column(Float, default=0.0)
+
+    created_at = Column(DateTime, default=_utcnow_naive)
+
+
+# =========================================================
+# EXAM INTELLIGENCE — WRITTEN ANSWER PRACTICE
+# =========================================================
+class WrittenPracticeSession(Base):
+    """A descriptive (non-MCQ) answer-writing practice session for one student."""
+    __tablename__ = "written_practice_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=False)
+
+    class_level = Column(String, default="")
+    subject = Column(String, default="", index=True)
+    chapter_id = Column(Integer, nullable=True)
+    chapter_name = Column(String, default="")
+    topic = Column(String, default="")
+    marks_focus = Column(String, default="")  # e.g. "1", "3", "5", "long"
+
+    session_status = Column(String, default="active", index=True)
+    started_at = Column(DateTime, default=_utcnow_naive)
+    completed_at = Column(DateTime, nullable=True)
+    metadata_json = Column(JSON, default=dict)
+
+    attempts = relationship(
+        "WrittenAnswerAttempt",
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
+
+
+class WrittenAnswerAttempt(Base):
+    """One descriptive question a student attempted within a practice session."""
+    __tablename__ = "written_answer_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("written_practice_sessions.id"), index=True)
+    user_id = Column(String, index=True, nullable=False)
+
+    question_text = Column(Text, default="")
+    question_type = Column(String, default="")
+    marks_total = Column(Float, default=0.0)
+    student_answer = Column(Text, default="")
+    expected_points_json = Column(JSON, default=list)
+
+    # Denormalized scope so weakness recalculation is self-contained.
+    class_level = Column(String, default="")
+    subject = Column(String, default="")
+    chapter_id = Column(Integer, nullable=True)
+    chapter_name = Column(String, default="")
+    topic = Column(String, default="", index=True)
+
+    submitted_at = Column(DateTime, nullable=True)
+    evaluation_status = Column(String, default="pending", index=True)
+    created_at = Column(DateTime, default=_utcnow_naive)
+
+    session = relationship("WrittenPracticeSession", back_populates="attempts")
+    feedback = relationship(
+        "WrittenAnswerFeedback",
+        back_populates="attempt",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+
+class WrittenAnswerFeedback(Base):
+    """Teacher-style rubric evaluation for one written answer attempt."""
+    __tablename__ = "written_answer_feedback"
+
+    id = Column(Integer, primary_key=True, index=True)
+    attempt_id = Column(Integer, ForeignKey("written_answer_attempts.id"), index=True)
+    user_id = Column(String, index=True, nullable=False)
+
+    marks_awarded = Column(Float, default=0.0)
+    marks_total = Column(Float, default=0.0)
+    score_percentage = Column(Float, default=0.0)
+
+    covered_points_json = Column(JSON, default=list)
+    missing_points_json = Column(JSON, default=list)
+    incorrect_points_json = Column(JSON, default=list)
+    weak_explanation_json = Column(JSON, default=list)
+    presentation_feedback = Column(Text, default="")
+    teacher_feedback = Column(Text, default="")
+    model_answer = Column(Text, default="")
+    improve_to_full_marks = Column(Text, default="")
+    rubric_scores_json = Column(JSON, default=dict)
+    next_question_suggestion = Column(Text, default="")
+
+    created_at = Column(DateTime, default=_utcnow_naive)
+
+    attempt = relationship("WrittenAnswerAttempt", back_populates="feedback")
+
+
+class StudentExamWeakness(Base):
+    """Durable per-student weakness signal aggregated from written evaluations."""
+    __tablename__ = "student_exam_weaknesses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=False)
+
+    class_level = Column(String, default="")
+    subject = Column(String, default="", index=True)
+    chapter_id = Column(Integer, nullable=True)
+    chapter_name = Column(String, default="")
+    topic = Column(String, default="", index=True)
+
+    weakness_type = Column(String, default="", index=True)
+    weakness_summary = Column(Text, default="")
+    evidence_json = Column(JSON, default=list)
+    frequency_count = Column(Integer, default=1)
+    last_seen_at = Column(DateTime, default=_utcnow_naive)
+    improvement_suggestion = Column(Text, default="")
+
+    created_at = Column(DateTime, default=_utcnow_naive)
+    updated_at = Column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)

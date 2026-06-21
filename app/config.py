@@ -61,6 +61,20 @@ ADMIN_RATE_LIMIT_PER_MINUTE = env_int("ADMIN_RATE_LIMIT_PER_MINUTE", 180)
 AI_DAILY_QUOTA_PER_USER = env_int("AI_DAILY_QUOTA_PER_USER", 180)
 EXAM_DAILY_QUOTA_PER_USER = env_int("EXAM_DAILY_QUOTA_PER_USER", 80)
 ARTIFACT_DAILY_QUOTA_PER_USER = env_int("ARTIFACT_DAILY_QUOTA_PER_USER", 40)
+# Exam-intelligence quotas: paper uploads each run a parse + analysis LLM pass,
+# and each written-answer submission runs a teacher-evaluation LLM pass.
+EXAM_PAPER_DAILY_QUOTA_PER_USER = env_int("EXAM_PAPER_DAILY_QUOTA_PER_USER", 30)
+WRITTEN_PRACTICE_DAILY_QUOTA_PER_USER = env_int("WRITTEN_PRACTICE_DAILY_QUOTA_PER_USER", 120)
+
+# ================= EXAM PAPER UPLOAD LIMITS =================
+# Max accepted upload size in bytes (default 8 MB). Enforced while reading the
+# stream so an oversize upload is rejected before it is buffered fully.
+EXAM_UPLOAD_MAX_BYTES = env_int("EXAM_UPLOAD_MAX_BYTES", 8 * 1024 * 1024)
+# Extensions accepted by the parser factory. Image types are accepted at the
+# API but routed to the OCR stub until an OCR backend is configured.
+EXAM_UPLOAD_ALLOWED_EXTENSIONS = set(
+    env_list("EXAM_UPLOAD_ALLOWED_EXTENSIONS", ["pdf", "txt", "png", "jpg", "jpeg"])
+)
 
 AI_RATE_LIMIT_PATHS = {
     "/section-ai",
@@ -70,6 +84,11 @@ AI_RATE_LIMIT_PATHS = {
     "/agent",
     "/coach/chat",
     "/coach/chat/stream",
+    "/exam/papers/upload",
+    "/exam/pattern/analyze",
+    "/exam/probable-questions/generate",
+    "/exam/written-practice/question",
+    "/exam/written-practice/submit",
 }
 
 QUOTA_LIMITS: Dict[str, int] = {
@@ -77,6 +96,8 @@ QUOTA_LIMITS: Dict[str, int] = {
     "exam": EXAM_DAILY_QUOTA_PER_USER,
     "artifact": ARTIFACT_DAILY_QUOTA_PER_USER,
     "agent": AI_DAILY_QUOTA_PER_USER,
+    "exam_paper": EXAM_PAPER_DAILY_QUOTA_PER_USER,
+    "written_practice": WRITTEN_PRACTICE_DAILY_QUOTA_PER_USER,
 }
 
 # ================= ADMIN ALLOWLISTS =================

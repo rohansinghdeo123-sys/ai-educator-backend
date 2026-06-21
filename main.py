@@ -19,7 +19,17 @@ from fastapi.responses import JSONResponse
 from app import config
 from app.lifespan import lifespan
 from app.rate_limit import client_rate_key, minute_limit_for_path, rate_limiter
-from routers import admin, agent, coach, health, profile, progress, study
+from routers import (
+    admin,
+    agent,
+    coach,
+    exam_papers,
+    health,
+    profile,
+    progress,
+    study,
+    written_practice,
+)
 
 # ================= LOGGING =================
 logging.basicConfig(
@@ -111,6 +121,8 @@ app.include_router(health.router)
 app.include_router(admin.router)
 app.include_router(progress.router)
 app.include_router(profile.router)
+app.include_router(exam_papers.router)
+app.include_router(written_practice.router)
 
 
 # ================= BACKWARD-COMPAT RE-EXPORTS =================
