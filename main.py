@@ -94,13 +94,20 @@ async def production_guardrails(request: Request, call_next):
         limit = minute_limit_for_path(request.url.path)
         allowed, retry_after = rate_limiter.allow(client_rate_key(request), limit, 60)
         if not allowed:
+            # This early return runs outside CORSMiddleware, so without these
+            # headers the browser hides the 429 and reports a generic
+            # "Failed to fetch" instead of surfacing the rate-limit.
             return JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 content={
                     "detail": "Too many requests. Please slow down and try again.",
                     "request_id": request_id,
                 },
-                headers={"X-Request-ID": request_id, "Retry-After": str(retry_after)},
+                headers={
+                    "X-Request-ID": request_id,
+                    "Retry-After": str(retry_after),
+                    **_cors_headers_for(request),
+                },
             )
 
     started = time.perf_counter()
