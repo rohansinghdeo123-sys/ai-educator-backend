@@ -12,6 +12,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import engine
@@ -36,6 +37,26 @@ def _iso(value) -> str:
     return value.isoformat() if value else ""
 
 
+# Estimated bytes per stored embedding component (float32 vector storage).
+EMBEDDING_BYTES_PER_DIM = 4
+
+
+def _concept_chars(concept: ContentConcept) -> int:
+    """Approximate the stored teaching-content size of one concept/subtopic
+    (its definition, explanation, and list fields), used as its memory size."""
+    total = len(concept.definition or "") + len(concept.core_explanation or "")
+    for field in (
+        concept.key_points,
+        concept.examples,
+        concept.formulas,
+        concept.properties,
+        concept.applications,
+    ):
+        for item in field or []:
+            total += len(str(item))
+    return total
+
+
 def build_content_report(
     db: Session,
     *,
@@ -53,10 +74,21 @@ def build_content_report(
         chapters_q = chapters_q.filter(ContentChapter.status == status_filter)
     chapters = chapters_q.all()
 
+    # Embedding dimensionality (same across the corpus) — sampled once to size
+    # the vector "memory" footprint without loading every vector.
+    sample_embedding = (
+        db.query(ContentChunk.embedding).filter(ContentChunk.embedding.isnot(None)).first()
+    )
+    embedding_dims = len(sample_embedding[0]) if sample_embedding and sample_embedding[0] else 0
+
     chapter_reports = []
     totals = {
         "chapters": 0, "pages": 0, "extracted_pages": 0,
         "concepts": 0, "chunks": 0, "embedded_chunks": 0,
+        "chunk_chars": 0, "page_chars": 0, "concept_chars": 0,
+        "tokens": 0, "embedding_bytes": 0, "memory_bytes": 0,
+        "validation_issues": 0, "concepts_with_issues": 0,
+        "embedding_dims": embedding_dims,
     }
     by_status: Counter = Counter()
     by_class: Counter = Counter()
@@ -69,17 +101,34 @@ def build_content_report(
             .order_by(ContentConcept.concept_id)
             .all()
         )
-        chunk_count = db.query(ContentChunk).filter(ContentChunk.chapter_id == chapter.id).count()
-        embedded = (
-            db.query(ContentChunk)
-            .filter(ContentChunk.chapter_id == chapter.id, ContentChunk.embedding.isnot(None))
-            .count()
+        # One aggregate for chunk count, embedded count, indexed text size, tokens.
+        chunk_chars, chunk_tokens, chunk_count, embedded = db.query(
+            func.coalesce(func.sum(func.length(ContentChunk.text)), 0),
+            func.coalesce(func.sum(ContentChunk.token_estimate), 0),
+            func.count(ContentChunk.id),
+            func.count(ContentChunk.embedding),
+        ).filter(ContentChunk.chapter_id == chapter.id).one()
+        chunk_chars, chunk_tokens, chunk_count, embedded = (
+            int(chunk_chars or 0), int(chunk_tokens or 0), int(chunk_count or 0), int(embedded or 0),
         )
-        page_count = db.query(ContentPage).filter(ContentPage.chapter_id == chapter.id).count()
-        report = chapter.validation_report or {}
+        page_count, page_chars = db.query(
+            func.count(ContentPage.id),
+            func.coalesce(func.sum(func.length(ContentPage.text)), 0),
+        ).filter(ContentPage.chapter_id == chapter.id).one()
+        page_count, page_chars = int(page_count or 0), int(page_chars or 0)
 
-        concepts_view = [
-            {
+        report = chapter.validation_report or {}
+        embedding_bytes = embedded * embedding_dims * EMBEDDING_BYTES_PER_DIM
+        # Retrievable "memory" footprint of the chapter: indexed chunk text + vectors.
+        memory_bytes = chunk_chars + embedding_bytes
+        concepts_with_issues = sum(1 for c in concept_rows if c.validation_issues)
+        chapter_concept_chars = 0
+
+        concepts_view = []
+        for concept in concept_rows:
+            concept_chars = _concept_chars(concept)
+            chapter_concept_chars += concept_chars
+            concepts_view.append({
                 "concept_id": concept.concept_id,
                 "title": concept.title,
                 "difficulty_level": concept.difficulty_level,
@@ -92,9 +141,9 @@ def build_content_report(
                 "source_pages": concept.source_pages or [],
                 "has_definition": bool((concept.definition or "").strip()),
                 "validation_issues": len(concept.validation_issues or []),
-            }
-            for concept in concept_rows
-        ]
+                "chars": concept_chars,            # subtopic memory size (chars ≈ bytes)
+                "tokens": concept_chars // 4,
+            })
         shown_concepts = concepts_view if include_full_concepts else concepts_view[:CONCEPT_PREVIEW_LIMIT]
 
         chapter_reports.append({
@@ -125,6 +174,16 @@ def build_content_report(
             "updated_at": _iso(chapter.updated_at),
             "source_hash": (chapter.source_hash or "")[:12],
             "published_source_hash": (chapter.published_source_hash or "")[:12],
+            # ── data / memory sizing ──
+            "chunk_chars": chunk_chars,
+            "page_chars": page_chars,
+            "concept_chars": chapter_concept_chars,
+            "chunk_tokens": chunk_tokens,
+            "embedding_dims": embedding_dims,
+            "embedding_bytes": embedding_bytes,
+            "memory_bytes": memory_bytes,
+            "concepts_with_issues": concepts_with_issues,
+            "error_rate": round(concepts_with_issues / len(concept_rows), 4) if concept_rows else 0.0,
             "concepts": shown_concepts,
             "concepts_truncated": (not include_full_concepts) and len(concepts_view) > CONCEPT_PREVIEW_LIMIT,
         })
@@ -135,9 +194,21 @@ def build_content_report(
         totals["concepts"] += len(concept_rows)
         totals["chunks"] += chunk_count
         totals["embedded_chunks"] += embedded
+        totals["chunk_chars"] += chunk_chars
+        totals["page_chars"] += page_chars
+        totals["concept_chars"] += chapter_concept_chars
+        totals["tokens"] += chunk_tokens
+        totals["embedding_bytes"] += embedding_bytes
+        totals["memory_bytes"] += memory_bytes
+        totals["validation_issues"] += sum(len(c.validation_issues or []) for c in concept_rows)
+        totals["concepts_with_issues"] += concepts_with_issues
         by_status[chapter.status] += 1
         by_class[str(chapter.class_level or "?")] += 1
         by_subject[str(chapter.subject or "?")] += 1
+
+    totals["error_rate"] = (
+        round(totals["concepts_with_issues"] / totals["concepts"], 4) if totals["concepts"] else 0.0
+    )
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
