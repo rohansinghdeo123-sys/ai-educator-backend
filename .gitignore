@@ -10,3 +10,5 @@ data/raw/ncert/**/*.pdf
 # Generated content-report artifacts (run scripts/content_report.py to recreate)
 content_ingestion_report.md
 content_ingestion_report.json
+# Generated automation run summary (run scripts/automate_content.py to recreate)
+content_automation_run.json
