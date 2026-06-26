@@ -168,6 +168,15 @@ def build_content_report(
             "ready_for_approval": report.get("ready_for_approval"),
             "blocking_issue_count": report.get("blocking_issue_count"),
             "missing_source_pages": report.get("missing_source_pages", []),
+            # Why a chapter is held for review (validation issue messages).
+            "issues": [
+                {
+                    "severity": str(issue.get("severity") or ""),
+                    "message": str(issue.get("message") or ""),
+                    "concept_id": str(issue.get("concept_id") or ""),
+                }
+                for issue in (report.get("issues") or [])
+            ][:20],
             "approved_by": chapter.approved_by,
             "approved_at": _iso(chapter.approved_at),
             "published_at": _iso(chapter.published_at),
