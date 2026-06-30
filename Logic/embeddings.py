@@ -88,6 +88,10 @@ def _embed_batch(batch: Sequence[str]) -> List[List[float]]:
         json={"model": embedding_model(), "input": list(batch)},
         timeout=_timeout_seconds(),
     )
+    if not response.ok:
+        # Surface the provider's actual message (e.g. "API key not valid") so
+        # config mistakes are obvious in the logs instead of a bare status code.
+        logger.warning("Embeddings API %s error: %s", response.status_code, response.text[:300])
     response.raise_for_status()
     data = response.json().get("data") or []
     ordered = sorted(data, key=lambda item: int(item.get("index") or 0))
