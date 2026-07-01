@@ -35,7 +35,7 @@ from Logic.content_pipeline import (
     serialize_chapter,
     titleize,
 )
-from models import ContentChapter, ContentPage
+from models import ContentChapter, ContentChunk, ContentPage
 
 logger = logging.getLogger("ai_educator.content_automation")
 
@@ -216,17 +216,48 @@ def _infer_title(db, chapter: ContentChapter) -> str:
     return ""
 
 
+def _existing_ingested_chapter(db, pdf_path: Path) -> Optional[ContentChapter]:
+    """Return an already-ingested chapter for this exact PDF (matching source
+    hash, chunks present) so a resume can skip re-ingest + re-embed and spend
+    quota only on concept generation. None if not ingested or the PDF changed."""
+    try:
+        meta = infer_metadata_from_pdf_path(pdf_path, RAW_NCERT_DIR)
+        chapter = (
+            db.query(ContentChapter)
+            .filter(ContentChapter.slug == meta["slug"])
+            .one_or_none()
+        )
+        if not chapter or chapter.source_hash != file_sha256(pdf_path):
+            return None
+        has_chunks = (
+            db.query(ContentChunk.id)
+            .filter(ContentChunk.chapter_id == chapter.id)
+            .first()
+            is not None
+        )
+        return chapter if has_chunks else None
+    except Exception:  # noqa: BLE001 - fall back to a normal ingest
+        return None
+
+
 def process_chapter(
     db,
     pdf_path: Path,
     *,
     auto_publish: bool = True,
     max_batch_chars: int = 6000,
+    reuse_ingest: bool = True,
 ) -> Dict[str, Any]:
-    """Ingest -> generate concepts -> embed -> (gated) publish one chapter."""
-    chapter = ingest_pdf_file(db, pdf_path, root_path=RAW_NCERT_DIR)
-    db.commit()
-    db.refresh(chapter)
+    """Ingest -> generate concepts -> embed -> (gated) publish one chapter.
+
+    When ``reuse_ingest`` and the PDF is already ingested unchanged, the pages/
+    chunks/embeddings are reused as-is (no re-extract, no re-embed) so a
+    quota-interrupted resume only re-runs the concept-generation step."""
+    chapter = _existing_ingested_chapter(db, pdf_path) if reuse_ingest else None
+    if chapter is None:
+        chapter = ingest_pdf_file(db, pdf_path, root_path=RAW_NCERT_DIR)
+        db.commit()
+        db.refresh(chapter)
 
     title = _infer_title(db, chapter)
     if title and title.lower() not in chapter.chapter_name.lower():
