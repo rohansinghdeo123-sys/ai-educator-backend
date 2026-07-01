@@ -162,8 +162,17 @@ def download_subject(
 # ---------------------------------------------------------------------------
 # Per-chapter pipeline
 # ---------------------------------------------------------------------------
+# Lines that begin a sentence/epigraph, not a title — NCERT chapters often open
+# with a quotation, so a title must not look like prose.
+_TITLE_SKIP_STARTERS = (
+    "the ", "it ", "a ", "an ", "in ", "this ", "these ", "those ", "when ",
+    "as ", "after ", "every", "chemical", "chemistry deals", "scientists",
+)
+
+
 def _infer_title(db, chapter: ContentChapter) -> str:
-    """Best-effort chapter title from the first page; conservative, may return ""."""
+    """Best-effort chapter title from the first page. Deliberately strict: only a
+    short, clean title-like line qualifies, otherwise "" (caller keeps "Chapter N")."""
     page = (
         db.query(ContentPage)
         .filter(ContentPage.chapter_id == chapter.id)
@@ -172,13 +181,21 @@ def _infer_title(db, chapter: ContentChapter) -> str:
     )
     if not page or not page.text:
         return ""
-    for raw in [line.strip() for line in page.text.splitlines() if line.strip()][:18]:
+    for raw in [line.strip() for line in page.text.splitlines() if line.strip()][:4]:
         low = raw.lower()
-        if low.startswith(("chapter", "unit", "page", "ncert")) or raw.isdigit():
-            continue
         words = raw.split()
         alpha_ratio = sum(c.isalpha() or c.isspace() for c in raw) / max(len(raw), 1)
-        if 1 <= len(words) <= 8 and len(raw) <= 60 and alpha_ratio > 0.75 and raw[:1].isalpha():
+        if (
+            1 <= len(words) <= 5           # a title, not a sentence
+            and len(raw) <= 45
+            and raw[0].isupper()           # titles are capitalized; rejects "able to"
+            and "." not in raw             # rejects author lines like "Glenn T. Seaborg"
+            and "�" not in raw        # rejects garbled-encoding lines
+            and not raw.rstrip().endswith((",", ";", ":"))
+            and not low.startswith(("chapter", "unit", "page", "ncert"))
+            and not low.startswith(_TITLE_SKIP_STARTERS)
+            and alpha_ratio > 0.9
+        ):
             return titleize(raw)
     return ""
 
