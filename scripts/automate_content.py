@@ -71,6 +71,7 @@ def main() -> int:
         auto_publish=not args.no_publish,
         download_only=args.download_only,
         skip_existing=not args.no_skip,
+        skip_completed=not args.no_skip,
     )
     summary["generated_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -81,6 +82,7 @@ def main() -> int:
     print(f" Downloaded : {summary['downloaded']}")
     print(f" Published  : {summary['published']}")
     print(f" Needs review: {summary['needs_review']}")
+    print(f" Skipped(done): {summary.get('skipped', 0)}")
     print(f" Failed     : {len(summary['failed'])}")
     print(f" Summary written to {args.out}")
     print("=" * 60)

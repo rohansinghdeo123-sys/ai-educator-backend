@@ -27,7 +27,9 @@ from database import SessionLocal
 from Logic.content_pipeline import (
     RAW_NCERT_DIR,
     embed_missing_chunks,
+    file_sha256,
     generate_concepts_for_chapter,
+    infer_metadata_from_pdf_path,
     ingest_pdf_file,
     publish_chapter,
     serialize_chapter,
@@ -267,6 +269,27 @@ def process_chapter(
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
+def _already_completed(db, pdf_path: Path) -> bool:
+    """True if this PDF is already fully published with matching content, so a
+    resume can skip it without re-spending LLM/embedding quota. Only fully
+    published/approved chapters are skipped; ingested-but-unprocessed chapters
+    (no concepts yet) are re-processed so a quota-interrupted run can finish."""
+    try:
+        meta = infer_metadata_from_pdf_path(pdf_path, RAW_NCERT_DIR)
+        chapter = (
+            db.query(ContentChapter)
+            .filter(ContentChapter.slug == meta["slug"])
+            .first()
+        )
+        if not chapter or chapter.status not in ("approved", "published"):
+            return False
+        if not (chapter.concept_count or 0):
+            return False
+        return chapter.published_source_hash == file_sha256(pdf_path)
+    except Exception:  # noqa: BLE001 - never let a skip-check abort the run
+        return False
+
+
 def run_automation(
     *,
     classes: Optional[Sequence[str]] = None,
@@ -276,6 +299,7 @@ def run_automation(
     auto_publish: bool = True,
     download_only: bool = False,
     skip_existing: bool = True,
+    skip_completed: bool = True,
     dest_root: Path = RAW_NCERT_DIR,
     db_factory=SessionLocal,
 ) -> Dict[str, Any]:
@@ -292,6 +316,7 @@ def run_automation(
         "downloaded": 0,
         "published": 0,
         "needs_review": 0,
+        "skipped": 0,
         "failed": [],
         "chapters": [],
     }
@@ -315,6 +340,11 @@ def run_automation(
             for pdf_path in pdf_paths:
                 db = db_factory()
                 try:
+                    if skip_completed and _already_completed(db, pdf_path):
+                        summary["skipped"] += 1
+                        logger.info("[SKIP] already published: Class %s %s %s",
+                                    class_level, subject, pdf_path.name)
+                        continue
                     result = process_chapter(db, pdf_path, auto_publish=auto_publish)
                     status = result["status"]
                     if status == "published":
@@ -339,7 +369,8 @@ def run_automation(
                     db.close()
 
     logger.info(
-        "Automation done: downloaded=%d published=%d needs_review=%d failed=%d",
-        summary["downloaded"], summary["published"], summary["needs_review"], len(summary["failed"]),
+        "Automation done: downloaded=%d published=%d needs_review=%d skipped=%d failed=%d",
+        summary["downloaded"], summary["published"], summary["needs_review"],
+        summary["skipped"], len(summary["failed"]),
     )
     return summary

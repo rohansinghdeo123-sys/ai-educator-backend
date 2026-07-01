@@ -114,6 +114,21 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(summary["needs_review"], 1)
         self.assertEqual(len(summary["failed"]), 1)
 
+    def test_skip_completed_skips_published_chapters(self):
+        # A resume must not re-process (and re-spend LLM/embedding quota) on a
+        # chapter that is already fully published.
+        published = {"status": "published", "chapter": {"slug": "s", "coverage_score": 0.8, "concept_count": 5}, "publish_error": ""}
+        with patch.object(automation, "robots_allows", return_value=True), \
+             patch.object(automation, "download_subject", return_value=[Path("a.pdf"), Path("b.pdf")]), \
+             patch.object(automation, "_already_completed", side_effect=lambda db, p: p.name == "a.pdf"), \
+             patch.object(automation, "process_chapter", return_value=published) as proc:
+            summary = automation.run_automation(
+                classes=["11"], subjects=["Chemistry"], delay_seconds=0,
+                db_factory=lambda: MagicMock(),
+            )
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(proc.call_count, 1)  # only b.pdf processed
+
     def test_download_only_skips_processing(self):
         with patch.object(automation, "robots_allows", return_value=True), \
              patch.object(automation, "download_subject", return_value=[Path("a.pdf")]), \
