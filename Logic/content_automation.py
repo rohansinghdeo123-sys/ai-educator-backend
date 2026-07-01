@@ -116,6 +116,15 @@ def _download_pdf(session: requests.Session, url: str, dest: Path) -> bool:
         return False
 
 
+def _remote_pdf_exists(session: requests.Session, code: str, nn: int) -> bool:
+    """HEAD-probe a chapter URL (no download) to discover if it exists."""
+    try:
+        resp = session.head(f"{NCERT_PDF_BASE}/{code}{nn:02d}.pdf", timeout=30, allow_redirects=True)
+        return resp.status_code == 200 and "pdf" in resp.headers.get("content-type", "").lower()
+    except Exception:
+        return False
+
+
 def download_subject(
     session: requests.Session,
     class_level: str,
@@ -129,33 +138,38 @@ def download_subject(
 ) -> List[Path]:
     """Download all chapters for one subject, numbered continuously across parts.
 
-    Chapters are discovered by probing ``<code>NN.pdf`` until two consecutive
-    misses. Already-downloaded valid PDFs are skipped (resumable)."""
+    Discovery is done FIRST (cheap HEAD probes, two-miss stop) to build a stable
+    chapter list, THEN files are downloaded to ``chapter_<index>.pdf``. Because
+    the index comes from the deterministic discovered list, re-runs are
+    resume-safe and never duplicate a chapter under a new number."""
     subject_dir = dest_root / f"class_{class_level}" / subject.lower()
     subject_dir.mkdir(parents=True, exist_ok=True)
-    paths: List[Path] = []
-    index = 0
 
+    # Phase 1: discover every real chapter across all book parts.
+    discovered: List[Tuple[str, int]] = []
     for code in book_codes:
         misses = 0
         for nn in range(1, max_chapters + 1):
-            index += 1
-            dest = subject_dir / f"chapter_{index:02d}.pdf"
-            if skip_existing and dest.exists() and _is_valid_pdf(dest):
-                logger.info("skip (exists) %s", dest.name)
-                paths.append(dest)
-                misses = 0
-                continue
-            url = f"{NCERT_PDF_BASE}/{code}{nn:02d}.pdf"
-            if _download_pdf(session, url, dest):
-                paths.append(dest)
+            if _remote_pdf_exists(session, code, nn):
+                discovered.append((code, nn))
                 misses = 0
             else:
-                index -= 1  # this number was not used
                 misses += 1
                 if misses >= 2:
                     break
-            time.sleep(delay_seconds)  # be polite between requests
+            time.sleep(min(delay_seconds, 1.5))
+
+    # Phase 2: download to stable sequential filenames.
+    paths: List[Path] = []
+    for index, (code, nn) in enumerate(discovered, start=1):
+        dest = subject_dir / f"chapter_{index:02d}.pdf"
+        if skip_existing and dest.exists() and _is_valid_pdf(dest):
+            logger.info("skip (exists) %s", dest.name)
+            paths.append(dest)
+            continue
+        if _download_pdf(session, f"{NCERT_PDF_BASE}/{code}{nn:02d}.pdf", dest):
+            paths.append(dest)
+        time.sleep(delay_seconds)
     return paths
 
 

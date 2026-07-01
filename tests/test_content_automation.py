@@ -19,34 +19,41 @@ class DownloadTests(unittest.TestCase):
             root = Path(tmp)
 
             def fake_dl(session, url, dest):
-                # Chapters 01-03 exist; 04+ are 404 (two misses → stop).
-                if url.endswith(("01.pdf", "02.pdf", "03.pdf")):
-                    dest.write_bytes(b"%PDF-1.4" + b"0" * 20000)
-                    return True
-                return False
+                dest.write_bytes(b"%PDF-1.4" + b"0" * 20000)
+                return True
 
-            with patch.object(automation, "_download_pdf", side_effect=fake_dl):
+            with patch.object(automation, "_remote_pdf_exists", side_effect=lambda s, c, nn: nn <= 3), \
+                 patch.object(automation, "_download_pdf", side_effect=fake_dl):
                 paths = automation.download_subject(
                     automation._make_session(), "11", "Chemistry", ["kech1"],
                     dest_root=root, delay_seconds=0, max_chapters=10,
                 )
             self.assertEqual([p.name for p in paths], ["chapter_01.pdf", "chapter_02.pdf", "chapter_03.pdf"])
 
-    def test_skip_existing(self):
+    def test_no_duplicates_across_parts_on_resume(self):
+        # Part 1 has 2 chapters, Part 2 has 2 — must yield 4 distinct files, and a
+        # re-run must not re-download or renumber anything (the old drift bug).
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            existing = root / "class_11" / "chemistry" / "chapter_01.pdf"
-            existing.parent.mkdir(parents=True)
-            existing.write_bytes(b"%PDF-1.4" + b"0" * 20000)
+            exists = {("kech1", 1), ("kech1", 2), ("kech2", 1), ("kech2", 2)}
+            downloaded = []
 
-            calls = []
-            with patch.object(automation, "_download_pdf", side_effect=lambda s, u, d: calls.append(u) or False):
-                paths = automation.download_subject(
-                    automation._make_session(), "11", "Chemistry", ["kech1"],
-                    dest_root=root, delay_seconds=0, max_chapters=3,
-                )
-            self.assertIn(existing, paths)  # pre-existing valid PDF kept
-            self.assertNotIn("kech101", "".join(calls))  # chapter 01 not re-downloaded
+            def fake_dl(session, url, dest):
+                downloaded.append(url)
+                dest.write_bytes(b"%PDF-1.4" + b"0" * 20000)
+                return True
+
+            with patch.object(automation, "_remote_pdf_exists", side_effect=lambda s, c, nn: (c, nn) in exists), \
+                 patch.object(automation, "_download_pdf", side_effect=fake_dl):
+                first = automation.download_subject(automation._make_session(), "11", "Chemistry", ["kech1", "kech2"], dest_root=root, delay_seconds=0, max_chapters=10)
+                names = [p.name for p in first]
+                self.assertEqual(names, ["chapter_01.pdf", "chapter_02.pdf", "chapter_03.pdf", "chapter_04.pdf"])
+                self.assertEqual(len(set(names)), 4)  # no duplicate filenames
+                # resume: nothing new downloaded, same stable set
+                downloaded.clear()
+                second = automation.download_subject(automation._make_session(), "11", "Chemistry", ["kech1", "kech2"], dest_root=root, delay_seconds=0, max_chapters=10)
+                self.assertEqual([p.name for p in second], names)
+                self.assertEqual(downloaded, [])  # resume re-downloaded nothing
 
 
 class ProcessChapterTests(unittest.TestCase):
