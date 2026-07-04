@@ -96,6 +96,12 @@ async def lifespan(app):
     else:
         logger.info("AUTO_CREATE_TABLES disabled; relying on Alembic migrations.")
     event_bus.set_sink(persist_event_from_bus)
+
+    from database import SessionLocal
+    from services.retention_service import prune_telemetry_safely
+
+    prune_telemetry_safely(SessionLocal)
+
     security.initialize_firebase_admin()
     _load_knowledge_graph()
     _log_retrieval_mode()

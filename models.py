@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from database import Base
@@ -84,6 +84,11 @@ class UserProfile(Base):
 # =========================================================
 class TestHistory(Base):
     __tablename__ = "test_history"
+    __table_args__ = (
+        # Rival rankings scan by date window; weekly stats scan (user, window).
+        Index("ix_test_history_date", "date"),
+        Index("ix_test_history_user_date", "user_id", "date"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, index=True)
