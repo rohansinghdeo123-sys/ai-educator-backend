@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from database import Base
@@ -849,6 +849,43 @@ class WrittenAnswerFeedback(Base):
     created_at = Column(DateTime, default=_utcnow_naive)
 
     attempt = relationship("WrittenAnswerAttempt", back_populates="feedback")
+
+
+class RivalPairing(Base):
+    """One student's fixed rival assignment for one competition week.
+
+    Pairings are written symmetrically (one row per participant) so both
+    students see the same match. Rows are immutable for the week; the weekly
+    refresh writes new rows for the next week_start and resolves old ones.
+    """
+
+    __tablename__ = "rival_pairings"
+    __table_args__ = (
+        UniqueConstraint("week_start", "user_id", name="uq_rival_week_user"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    week_start = Column(Date, index=True, nullable=False)
+    user_id = Column(String, index=True, nullable=False)
+    rival_user_id = Column(String, index=True, nullable=True)
+
+    # Matchmaking snapshot at pairing time (monthly exam performance).
+    status = Column(String, default="active", index=True)  # active | unmatched
+    match_basis = Column(String, default="monthly_exam")   # monthly_exam | newcomer | fallback
+    user_seed_score = Column(Float, default=0.0)
+    rival_seed_score = Column(Float, default=0.0)
+    user_seed_rank = Column(Integer, nullable=True)
+    rival_seed_rank = Column(Integer, nullable=True)
+
+    # End-of-week resolution (idempotent; applied when the next week begins).
+    resolved = Column(Boolean, default=False, index=True)
+    outcome = Column(String, default="")  # won | lost | tied | unmatched
+    my_week_xp = Column(Integer, default=0)
+    rival_week_xp = Column(Integer, default=0)
+    reward_xp = Column(Integer, default=0)
+    resolved_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=_utcnow_naive)
 
 
 class StudentExamWeakness(Base):

@@ -27,6 +27,7 @@ from routers import (
     health,
     profile,
     progress,
+    rivals,
     study,
     written_practice,
 )
@@ -130,6 +131,7 @@ app.include_router(progress.router)
 app.include_router(profile.router)
 app.include_router(exam_papers.router)
 app.include_router(written_practice.router)
+app.include_router(rivals.router)
 
 
 # ================= BACKWARD-COMPAT RE-EXPORTS =================
