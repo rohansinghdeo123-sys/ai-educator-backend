@@ -99,7 +99,9 @@ def submit_session(
         raise HTTPException(status_code=400, detail="total_questions must be greater than zero")
 
     correct = max(0, min(payload.score, payload.total_questions))
-    xp_earned = payload.xp_earned if payload.xp_earned is not None else correct * 10
+    # XP is server-authoritative: it feeds the leaderboard and rival battles,
+    # so the client's xp_earned is accepted for compatibility but ignored.
+    xp_earned = correct * 10
 
     test = create_test_history(
         db=db,
@@ -153,9 +155,10 @@ def save_test(
     require_same_user_or_admin(test.user_id, current_user)
 
     topic = normalize_topic(test.topic)
-    correct = int(test.score)
     total = int(test.total_questions)
-    xp_earned = int(test.xp_earned)
+    correct = max(0, min(int(test.score), total)) if total > 0 else max(0, int(test.score))
+    # Server-authoritative XP (see /submit-session).
+    xp_earned = correct * 10
 
     new_test = create_test_history(
         db=db,
