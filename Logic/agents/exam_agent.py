@@ -20,6 +20,11 @@ from Logic.coach.model_gateway import model_gateway
 from Logic.tools.answer_evaluator import evaluate_answer_quality
 from Logic.tools.chemistry_formatter import format_chemistry_output
 from Logic.tools.knowledge_search import search_knowledge_base
+from Logic.tools.mcq_normalization import (
+    normalize_mcq_answer,
+    normalize_mcq_options,
+    parse_text_mcqs,  # noqa: F401  (used by the legacy text-output fallback)
+)
 from Logic.knowledge_graph import knowledge_graph   # <-- NEW
 from prompts.agent_prompts import EXAM_MCQ_PROMPT, EXAM_PROBABLE_PROMPT
 
@@ -53,53 +58,6 @@ def extract_json_object(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def normalize_option_key(value: Any, fallback: str) -> str:
-    key = str(value or fallback).strip().upper()[:1]
-    return key if key in {"A", "B", "C", "D"} else fallback
-
-
-def normalize_options(options: Any) -> List[str]:
-    normalized: List[str] = []
-
-    if not isinstance(options, list):
-        options = []
-
-    for index, option in enumerate(options[:4]):
-        fallback_key = chr(65 + index)
-
-        if isinstance(option, dict):
-            key = normalize_option_key(option.get("key"), fallback_key)
-            text = str(option.get("text") or "").strip()
-        else:
-            raw = str(option or "").strip()
-            match = re.match(r"^([A-D])[\.\)]\s*(.+)$", raw, flags=re.IGNORECASE)
-
-            if match:
-                key = normalize_option_key(match.group(1), fallback_key)
-                text = match.group(2).strip()
-            else:
-                key = fallback_key
-                text = raw
-
-        normalized.append(f"{key}. {text or 'Option unavailable'}")
-
-    while len(normalized) < 4:
-        key = chr(65 + len(normalized))
-        normalized.append(f"{key}. Option unavailable")
-
-    return normalized
-
-
-def normalize_answer(value: Any) -> str:
-    """Return a valid answer key or "" — never a guessed default.
-
-    Defaulting to "A" silently marked a wrong option as correct whenever the
-    model emitted an unusable key; callers drop keyless questions instead.
-    """
-    answer = str(value or "").strip().upper()
-    return answer[:1] if answer[:1] in {"A", "B", "C", "D"} else ""
-
-
 def normalize_structured_mcqs(payload: Optional[Dict[str, Any]], count: int = 5) -> List[Dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
@@ -118,11 +76,7 @@ def normalize_structured_mcqs(payload: Optional[Dict[str, Any]], count: int = 5)
         if not question:
             continue
 
-        correct = normalize_answer(
-            item.get("answer")
-            or item.get("correct")
-            or item.get("correct_answer")
-        )
+        correct = normalize_mcq_answer(item)
         if not correct:
             continue
 
@@ -130,7 +84,7 @@ def normalize_structured_mcqs(payload: Optional[Dict[str, Any]], count: int = 5)
             {
                 "id": str(item.get("id") or f"Q{index + 1}"),
                 "question": question,
-                "options": normalize_options(item.get("options")),
+                "options": normalize_mcq_options(item.get("options")),
                 "correct": correct,
                 "explanation": str(item.get("explanation") or "").strip(),
                 "source": str(
@@ -144,79 +98,6 @@ def normalize_structured_mcqs(payload: Optional[Dict[str, Any]], count: int = 5)
         )
 
     return normalized
-
-
-def parse_text_mcqs(text: str, count: int = 5) -> List[Dict[str, Any]]:
-    if not text:
-        return []
-
-    normalized_text = re.sub(r"\s+", " ", text.strip())
-    blocks = re.split(r"(?=Q\s*\d+\s*[\.\)])", normalized_text, flags=re.IGNORECASE)
-    parsed: List[Dict[str, Any]] = []
-
-    for block in blocks:
-        block = block.strip()
-        if not re.match(r"Q\s*\d+\s*[\.\)]", block, flags=re.IGNORECASE):
-            continue
-
-        qid_match = re.match(r"Q\s*(\d+)\s*[\.\)]", block, flags=re.IGNORECASE)
-        qid = f"Q{qid_match.group(1)}" if qid_match else f"Q{len(parsed) + 1}"
-
-        answer_match = re.search(r"Answer\s*:\s*([A-D])", block, flags=re.IGNORECASE)
-        explanation_match = re.search(
-            r"Explanation\s*:\s*(.*?)(?=Q\s*\d+\s*[\.\)]|$)",
-            block,
-            flags=re.IGNORECASE,
-        )
-
-        if not answer_match:
-            continue
-        correct = normalize_answer(answer_match.group(1))
-        explanation = explanation_match.group(1).strip() if explanation_match else ""
-
-        before_answer = re.split(r"Answer\s*:", block, flags=re.IGNORECASE)[0]
-
-        option_matches = list(
-            re.finditer(
-                r"\b([A-D])[\.\)]\s*(.*?)(?=\s+\b[A-D][\.\)]\s+|$)",
-                before_answer,
-                flags=re.IGNORECASE,
-            )
-        )
-
-        if len(option_matches) < 4:
-            continue
-
-        first_option_start = option_matches[0].start()
-        question = re.sub(
-            r"^Q\s*\d+\s*[\.\)]\s*",
-            "",
-            before_answer[:first_option_start].strip(),
-            flags=re.IGNORECASE,
-        )
-
-        options = []
-        for match in option_matches[:4]:
-            key = normalize_option_key(match.group(1), chr(65 + len(options)))
-            option_text = match.group(2).strip()
-            options.append(f"{key}. {option_text}")
-
-        if question and len(options) == 4:
-            parsed.append(
-                {
-                    "id": qid,
-                    "question": question,
-                    "options": options,
-                    "correct": correct,
-                    "explanation": explanation,
-                    "source": "",
-                }
-            )
-
-        if len(parsed) >= count:
-            break
-
-    return parsed
 
 
 def mcqs_to_legacy_text(questions: List[Dict[str, Any]]) -> str:
