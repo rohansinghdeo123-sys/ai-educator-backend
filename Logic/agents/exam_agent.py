@@ -91,8 +91,13 @@ def normalize_options(options: Any) -> List[str]:
 
 
 def normalize_answer(value: Any) -> str:
+    """Return a valid answer key or "" — never a guessed default.
+
+    Defaulting to "A" silently marked a wrong option as correct whenever the
+    model emitted an unusable key; callers drop keyless questions instead.
+    """
     answer = str(value or "").strip().upper()
-    return answer[:1] if answer[:1] in {"A", "B", "C", "D"} else "A"
+    return answer[:1] if answer[:1] in {"A", "B", "C", "D"} else ""
 
 
 def normalize_structured_mcqs(payload: Optional[Dict[str, Any]], count: int = 5) -> List[Dict[str, Any]]:
@@ -113,16 +118,20 @@ def normalize_structured_mcqs(payload: Optional[Dict[str, Any]], count: int = 5)
         if not question:
             continue
 
+        correct = normalize_answer(
+            item.get("answer")
+            or item.get("correct")
+            or item.get("correct_answer")
+        )
+        if not correct:
+            continue
+
         normalized.append(
             {
                 "id": str(item.get("id") or f"Q{index + 1}"),
                 "question": question,
                 "options": normalize_options(item.get("options")),
-                "correct": normalize_answer(
-                    item.get("answer")
-                    or item.get("correct")
-                    or item.get("correct_answer")
-                ),
+                "correct": correct,
                 "explanation": str(item.get("explanation") or "").strip(),
                 "source": str(
                     item.get("source")
@@ -160,7 +169,9 @@ def parse_text_mcqs(text: str, count: int = 5) -> List[Dict[str, Any]]:
             flags=re.IGNORECASE,
         )
 
-        correct = normalize_answer(answer_match.group(1) if answer_match else "A")
+        if not answer_match:
+            continue
+        correct = normalize_answer(answer_match.group(1))
         explanation = explanation_match.group(1).strip() if explanation_match else ""
 
         before_answer = re.split(r"Answer\s*:", block, flags=re.IGNORECASE)[0]

@@ -266,6 +266,12 @@ def normalize_mcq_options(options: Any) -> List[str]:
 
 
 def normalize_mcq_answer(question: Dict[str, Any]) -> str:
+    """Return the validated answer key, or "" when the model's key is unusable.
+
+    An empty return drops the question upstream — a guessed default would
+    silently mark a wrong option as correct, which is worse than one fewer
+    question (the generator's retry loop tops packs back up).
+    """
     answer = str(
         question.get("answer")
         or question.get("correct")
@@ -276,7 +282,64 @@ def normalize_mcq_answer(question: Dict[str, Any]) -> str:
     if answer[:1] in {"A", "B", "C", "D"}:
         return answer[:1]
 
-    return "A"
+    return ""
+
+
+def _option_texts(options: List[str]) -> List[str]:
+    return [re.sub(r"^[A-D][\.\)]\s*", "", option, flags=re.IGNORECASE).strip() for option in options]
+
+
+def mcq_options_are_valid(options: List[str]) -> bool:
+    """Reject degenerate packs: missing, empty, or duplicate option texts."""
+    texts = _option_texts(options)
+    if len(texts) != 4:
+        return False
+    if any(not text or text.lower() == "option unavailable" for text in texts):
+        return False
+    lowered = [re.sub(r"\s+", " ", text.lower()) for text in texts]
+    return len(set(lowered)) == 4
+
+
+_LETTER_REFERENCE = re.compile(r"\boption\s+[A-D]\b|\(\s*[A-D]\s*\)|\b[A-D][\.\)]", re.IGNORECASE)
+
+
+def shuffle_mcq_options(question: Dict[str, Any]) -> Dict[str, Any]:
+    """Deterministically reshuffle option positions and re-letter the answer.
+
+    Models place the correct option at A/B far more often than chance, which
+    lets students pattern-guess. Seeding by question text keeps the same pack
+    stable across refetches. Questions whose explanation cites option letters
+    are left untouched so the explanation stays truthful.
+    """
+    options = list(question.get("options") or [])
+    correct = str(question.get("correct") or "").strip().upper()[:1]
+    if len(options) != 4 or correct not in {"A", "B", "C", "D"}:
+        return question
+    if _LETTER_REFERENCE.search(str(question.get("explanation") or "")):
+        return question
+
+    texts = _option_texts(options)
+    correct_text = texts[ord(correct) - 65]
+
+    seed = int.from_bytes(
+        __import__("hashlib").sha256(str(question.get("question") or "").encode("utf-8")).digest()[:4],
+        "big",
+    )
+    order = list(range(4))
+    # Fisher-Yates with a tiny deterministic LCG keyed by the question text.
+    state = seed or 1
+    for index in range(3, 0, -1):
+        state = (state * 1103515245 + 12345) % (2 ** 31)
+        swap = state % (index + 1)
+        order[index], order[swap] = order[swap], order[index]
+
+    shuffled = [texts[position] for position in order]
+    new_correct_index = shuffled.index(correct_text)
+    return {
+        **question,
+        "options": [f"{chr(65 + index)}. {text}" for index, text in enumerate(shuffled)],
+        "correct": chr(65 + new_correct_index),
+    }
 
 
 def normalize_mcq_questions(payload: Optional[Dict[str, Any]], count: int) -> List[Dict[str, Any]]:
@@ -300,26 +363,31 @@ def normalize_mcq_questions(payload: Optional[Dict[str, Any]], count: int) -> Li
         options = normalize_mcq_options(item.get("options"))
         explanation = str(item.get("explanation") or "").strip()
 
-        if len(options) != 4 or any("Option unavailable" in option for option in options):
+        if not mcq_options_are_valid(options):
             continue
         if not explanation:
             continue
+        correct = normalize_mcq_answer(item)
+        if not correct:
+            continue
 
         normalized.append(
-            {
-                "id": str(item.get("id") or f"Q{index + 1}"),
-                "question": question_text,
-                "options": options,
-                "correct": normalize_mcq_answer(item),
-                "explanation": explanation,
-                "source": str(
-                    item.get("source")
-                    or item.get("reference")
-                    or payload.get("source")
-                    or payload.get("section_id")
-                    or ""
-                ).strip(),
-            }
+            shuffle_mcq_options(
+                {
+                    "id": str(item.get("id") or f"Q{index + 1}"),
+                    "question": question_text,
+                    "options": options,
+                    "correct": correct,
+                    "explanation": explanation,
+                    "source": str(
+                        item.get("source")
+                        or item.get("reference")
+                        or payload.get("source")
+                        or payload.get("section_id")
+                        or ""
+                    ).strip(),
+                }
+            )
         )
 
     return normalized
@@ -354,7 +422,11 @@ def parse_text_mcqs(text: str, count: int = 5) -> List[Dict[str, Any]]:
             flags=re.IGNORECASE,
         )
 
-        correct = normalize_option_key(answer_match.group(1) if answer_match else "A", "A")
+        # No explicit answer marker means the key would be a guess; skip the
+        # block rather than crown option A arbitrarily.
+        if not answer_match:
+            continue
+        correct = normalize_option_key(answer_match.group(1), "A")
         explanation = explanation_match.group(1).strip() if explanation_match else ""
 
         before_answer = re.split(r"Answer\s*:", block, flags=re.IGNORECASE)[0]
@@ -383,16 +455,18 @@ def parse_text_mcqs(text: str, count: int = 5) -> List[Dict[str, Any]]:
             option_text = match.group(2).strip()
             options.append(f"{key}. {option_text}")
 
-        if question and len(options) == 4:
+        if question and len(options) == 4 and mcq_options_are_valid(options):
             parsed.append(
-                {
-                    "id": qid,
-                    "question": question,
-                    "options": options,
-                    "correct": correct,
-                    "explanation": explanation,
-                    "source": "",
-                }
+                shuffle_mcq_options(
+                    {
+                        "id": qid,
+                        "question": question,
+                        "options": options,
+                        "correct": correct,
+                        "explanation": explanation,
+                        "source": "",
+                    }
+                )
             )
 
         if len(parsed) >= count:
