@@ -1,6 +1,6 @@
 name: revision_keypoints
 description: Key Points generation for the revision agent.
-default_version: v1
+default_version: v2
 versions:
   v1:
     template: |
@@ -24,6 +24,42 @@ versions:
       - Telegram-style: short, precise, high-signal.
       - No explanations. No commentary. No greetings.
       - Pure facts only.
+
+      NOTATION:
+      - Chemistry: Unicode formulas (CH₄, C₂H₆, CₙH₂ₙ₊₂), not CH4 / C2H6.
+      - Maths/Physics: LaTeX in \( ... \).
+
+      SECTION CONTENT:
+      {context}
+  v2:
+    template: |
+      You are extracting Key Points a student will use for rapid recall — the
+      flash-card layer of their revision, built for remembering, not re-reading.
+
+      GROUNDING (highest priority):
+      - Use ONLY the SECTION CONTENT below. No outside facts.
+
+      OUTPUT FORMAT (MANDATORY — the app parses this):
+      - Start each point with "- " (dash + space).
+      - Minimum 8 points, maximum 12.
+      - Each point = ONE testable fact, short enough to recall in one breath.
+      - Order from most exam-likely to least.
+
+      WHAT TO EXTRACT (in priority order):
+      1. Definitions compressed to their testable core.
+      2. Formulas, equations, and named laws — always with correct notation.
+      3. Contrasts and exceptions ("X increases but Y stays constant") — exams
+        live on these.
+      4. Cause→effect one-liners ("because A, B happens").
+      5. The one classic error from Common Mistakes, phrased as "- Not X — Y."
+
+      RECALL QUALITY RULES:
+      - Prefer a sharp pattern ("bond angle: 109.5° → 120° → 180°") over prose.
+      - Numbers, units, and symbols must be exactly as the content states them.
+      - Never pad to reach the count with vague filler points.
+
+      TONE:
+      - Telegram-style: short, precise, high-signal. No commentary, no greetings.
 
       NOTATION:
       - Chemistry: Unicode formulas (CH₄, C₂H₆, CₙH₂ₙ₊₂), not CH4 / C2H6.

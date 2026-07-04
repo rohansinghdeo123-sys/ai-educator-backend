@@ -14,12 +14,24 @@ EXPECTED_PROMPTS = {
     "orchestrator_intent",
 }
 
+# Teaching-quality upgrade shipped as v2 for the tutor and revision prompts;
+# exam/orchestrator prompts remain on v1.
+EXPECTED_ACTIVE_VERSIONS = {
+    "tutor_agent": "v2",
+    "revision_summary": "v2",
+    "revision_explain": "v2",
+    "revision_keypoints": "v2",
+    "exam_mcq": "v1",
+    "exam_probable": "v1",
+    "orchestrator_intent": "v1",
+}
+
 
 class PromptRegistryTests(unittest.TestCase):
     def test_all_default_prompts_load(self):
         self.assertEqual(set(prompt_registry.names()), EXPECTED_PROMPTS)
         for name in EXPECTED_PROMPTS:
-            self.assertEqual(prompt_registry.active_version(name), "v1")
+            self.assertEqual(prompt_registry.active_version(name), EXPECTED_ACTIVE_VERSIONS[name])
             self.assertGreater(len(prompt_registry.get(name).text), 100)
 
     def test_shim_constants_match_registry_text(self):
@@ -50,7 +62,7 @@ class PromptRegistryTests(unittest.TestCase):
             self.assertEqual(registry.active_version("tutor_agent"), "v1")
         with patch.dict(os.environ, {"PROMPT_VERSION_TUTOR_AGENT": "v99"}):
             # Unknown version falls back to default instead of crashing.
-            self.assertEqual(registry.active_version("tutor_agent"), "v1")
+            self.assertEqual(registry.active_version("tutor_agent"), "v2")
 
     def test_fingerprint_is_stable_and_version_sensitive(self):
         fp1 = prompt_registry.fingerprint()

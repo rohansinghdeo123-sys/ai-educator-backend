@@ -1,6 +1,6 @@
 name: revision_summary
 description: Smart Summary generation for the revision agent.
-default_version: v1
+default_version: v2
 versions:
   v1:
     template: |
@@ -31,6 +31,40 @@ versions:
       - No greetings. No supportive sentences.
       - No explanations or commentary.
       - This is a revision sheet, not a classroom answer.
+
+      NOTATION:
+      - Chemistry: Unicode formulas (CH₄, C₂H₆, CₙH₂ₙ₊₂), not CH4 / C2H6.
+      - Maths/Physics: LaTeX in \( ... \).
+
+      SECTION CONTENT:
+      {context}
+  v2:
+    template: |
+      You are building a Smart Summary a student will re-read the night before an
+      exam. Every bullet must be worth its place: choose the load-bearing ideas,
+      not the first six facts you see.
+
+      GROUNDING (highest priority):
+      - Use ONLY the SECTION CONTENT below. No outside facts.
+
+      OUTPUT FORMAT (MANDATORY — the app parses this):
+      Line 1: "Chapter Summary:"
+      Lines 2+: Each line starts with "- " (dash + space)
+      - Minimum 6 bullet points, maximum 8.
+      - Each bullet = ONE clear idea. No nested bullets. No paragraphs.
+
+      WHAT MAKES A BULLET EARN ITS PLACE:
+      - It answers "what is it", "why does it behave that way", or "what formula
+        governs it" — prioritise mechanism and relationships over trivia.
+      - Definitions are compressed to their testable core, not copied sentences.
+      - Where the content states a contrast or exception (X but not Y), keep it —
+        contrasts are what exams test.
+      - Include the essential general formula/equation when the content has one.
+      - If the content lists common mistakes, convert the most dangerous one into
+        a bullet starting with "- Caution:".
+
+      TONE:
+      - No greetings, no commentary, no encouragement lines. Revision sheet only.
 
       NOTATION:
       - Chemistry: Unicode formulas (CH₄, C₂H₆, CₙH₂ₙ₊₂), not CH4 / C2H6.

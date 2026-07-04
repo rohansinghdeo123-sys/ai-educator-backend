@@ -214,18 +214,13 @@ def tutor_agent(request) -> dict:
     if concept_data:
         enriched_context += "\n\n--- STRUCTURED KNOWLEDGE (from official curriculum) ---\n" + concept_data
 
-    # Student-friendly instructions
-    student_instructions = (
-        "You are a friendly, patient AI tutor for school students.\n"
-        "Use simple language and everyday analogies to explain concepts.\n"
-        "When you see 'Common Mistakes' in the context, mention them to the student so they can avoid those errors.\n"
-        "Break down complex ideas step-by-step.\n"
-        "Encourage the student and make them feel confident.\n"
-        "If the context contains both markdown text and structured knowledge, combine them to give the best answer."
+    # Render the versioned registry prompt. The template carries LaTeX braces,
+    # so placeholders are substituted with .replace() rather than .format().
+    system_prompt = (
+        TUTOR_AGENT_PROMPT
+        .replace("{context}", enriched_context)
+        .replace("{basics}", basics or "None provided.")
     )
-
-    # Build the system prompt
-    system_prompt = f"{student_instructions}\n\n{enriched_context}\n\n{basics}"
 
     memory = _load_session_memory(session_id)
 
@@ -254,8 +249,8 @@ def tutor_agent(request) -> dict:
             task="Answer a Study Lab doubt from retrieved section context.",
             student_visible=True,
             safety_tier="final_answer",
-            temperature=0.25,
-            max_tokens=500,
+            temperature=0.3,
+            max_tokens=700,
         ).strip()
     except Exception as e:
         logger.error(f"[TUTOR] LLM error: {e}")
@@ -314,7 +309,11 @@ def tutor_agent(request) -> dict:
             retry_context = retry_result["context"]
             if concept_data:
                 retry_context += "\n\n--- STRUCTURED KNOWLEDGE ---\n" + concept_data
-            retry_prompt = f"{student_instructions}\n\n{retry_context}\n\n{basics}"
+            retry_prompt = (
+                TUTOR_AGENT_PROMPT
+                .replace("{context}", retry_context)
+                .replace("{basics}", basics or "None provided.")
+            )
             retry_messages = [
                 {"role": "system", "content": retry_prompt},
                 {"role": "user", "content": question},

@@ -28,6 +28,11 @@ from .response_planner import (
 )
 from .settings import coach_settings
 from .source_metadata import build_source_bundle
+from .teaching_strategy import (
+    TeachingStrategy,
+    build_teaching_strategy,
+    build_teaching_strategy_instruction,
+)
 from .tool_registry import coach_tool_registry
 from .tool_gateway import ToolGateway, tool_gateway
 from .unified_orchestrator import build_orchestration_plan, format_orchestration_prompt
@@ -75,6 +80,9 @@ __all__ = [
     "persist_mastery_signal",
     "prepare_attachments",
     "score_coach_answer",
+    "TeachingStrategy",
+    "build_teaching_strategy",
+    "build_teaching_strategy_instruction",
     "build_adaptive_answer_blocks",
     "parse_semantic_event",
     "resolve_hybrid_query",

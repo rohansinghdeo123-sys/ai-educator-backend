@@ -16,6 +16,11 @@ class FakeEmbeddingResponse:
     def __init__(self, payload, status_code=200):
         self._payload = payload
         self.status_code = status_code
+        self.text = ""
+
+    @property
+    def ok(self):
+        return self.status_code < 400
 
     def json(self):
         return self._payload

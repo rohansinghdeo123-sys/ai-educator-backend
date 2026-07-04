@@ -48,6 +48,8 @@ from Logic.coach import (
     format_orchestration_prompt,
     build_conversation_response,
     build_scenario_intent_profile,
+    build_teaching_strategy,
+    build_teaching_strategy_instruction,
     model_gateway,
     mark_repair_applied,
     parse_semantic_event,
@@ -1234,6 +1236,7 @@ def _build_study_prompt(
     strict_grounding: bool = False,
     retrieval_policy: str = "none",
     response_plan: Optional[Dict[str, Any]] = None,
+    teaching_strategy_instruction: str = "",
 ) -> str:
     graph_context = ""
     if retrieved_material and str(retrieved_material.get("context") or "").strip():
@@ -1300,6 +1303,8 @@ Private tuition behavior:
 {adaptive_format}
 
 {response_plan_instruction}
+
+{teaching_strategy_instruction}
 
 {adaptive_teaching}
 
@@ -2493,6 +2498,19 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
                 response_plan=response_plan_payload,
             )
         else:
+            teaching_strategy = build_teaching_strategy(
+                question=question,
+                intent=intent,
+                response_plan=response_plan_payload,
+                adaptive_context=adaptive_context,
+                conversation_context=conversation_context,
+                topic_snapshot=topic_snapshot,
+                mastery_profile=mastery_profile,
+                user_id=str(getattr(request, "user_id", "") or ""),
+                topic=str(selected_scope.get("topic") or selected_scope.get("section_id") or ""),
+            )
+            agent_state.metadata["teaching_strategy"] = teaching_strategy.to_dict()
+            trace.record_tool("teaching_strategy", **teaching_strategy.to_dict())
             draft_prompt = _build_study_prompt(
                 coach=coach,
                 question=question,
@@ -2505,6 +2523,7 @@ def _coach_agent_stream_impl(request, db=None, turn_state: Optional[Dict[str, An
                 strict_grounding=strict_grounding,
                 retrieval_policy=retrieval_policy,
                 response_plan=response_plan_payload,
+                teaching_strategy_instruction=build_teaching_strategy_instruction(teaching_strategy),
             )
         draft_prompt = f"{draft_prompt}\n\n{orchestration_prompt}"
         draft_messages = [
