@@ -32,9 +32,27 @@ from Logic.tools.artifact_generator import (
     available_artifact_sections,
     generate_study_artifacts,
 )
+from services.catalog_service import build_catalog
 from services.profile_service import profile_learning_context
+from services.ttl_cache import TTLCache
 
 router = APIRouter(tags=["study"])
+
+_catalog_cache = TTLCache(max_entries=2)
+
+
+@router.get("/catalog")
+def learning_catalog(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    """The chapters/topics students may select across Study, Exam, and Missions.
+
+    Served from admin-published content; a built-in starter catalog answers
+    until the first chapter is published. Cached for five minutes, so a new
+    publish appears without a deploy but without per-request DB scans.
+    """
+    return _catalog_cache.get_or_build("catalog", 300.0, lambda: build_catalog(db))
 
 
 @router.post("/section-ai")
