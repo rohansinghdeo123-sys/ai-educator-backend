@@ -36,8 +36,10 @@ MODEL_NAME = model_gateway.model_for("tutor", complexity="fast")
 
 # Mode-to-prompt mapping
 REVISION_PROMPTS = {
-    "summary": {"prompt": SUMMARY_AGENT_PROMPT, "temp": 0.25, "max_tokens": 400},
-    "explain": {"prompt": EXPLAIN_AGENT_PROMPT, "temp": 0.3, "max_tokens": 600},
+    "summary": {"prompt": SUMMARY_AGENT_PROMPT, "temp": 0.25, "max_tokens": 450},
+    # v2 Deep Explain teaches intuition-first with a worked example; 600 tokens
+    # truncated it mid-example on denser sections.
+    "explain": {"prompt": EXPLAIN_AGENT_PROMPT, "temp": 0.3, "max_tokens": 750},
     "key":     {"prompt": KEYPOINTS_AGENT_PROMPT, "temp": 0.2, "max_tokens": 450},
     "keypoints": {"prompt": KEYPOINTS_AGENT_PROMPT, "temp": 0.2, "max_tokens": 450},
 }
