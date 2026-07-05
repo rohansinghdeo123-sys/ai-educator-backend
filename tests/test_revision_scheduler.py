@@ -184,6 +184,16 @@ class RevisionQueueRouteTests(unittest.TestCase):
         response = self.client.get("/revision/queue/someone-else")
         self.assertEqual(response.status_code, 403)
 
+    def test_coach_topic_snapshot_includes_revision_due(self):
+        from Logic.agents.coach_agent import _get_topic_snapshot
+
+        self._seed("Thermodynamics", 12, 9, days_ago=15)
+        snapshot = _get_topic_snapshot(self.db, self.uid)
+        self.assertIn("revision_due", snapshot)
+        self.assertEqual(snapshot["revision_due"][0]["topic"], "Thermodynamics")
+        self.assertEqual(snapshot["revision_due"][0]["bucket"], "overdue")
+        self.assertTrue(snapshot["revision_due"][0]["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

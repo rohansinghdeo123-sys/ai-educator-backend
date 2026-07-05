@@ -68,6 +68,7 @@ from Logic.coach.memory_store import (
 )
 from Logic.knowledge_graph import knowledge_graph
 from Logic.observability_store import persist_coach_trace
+from services.revision_scheduler import build_revision_queue
 from models import (
     AICoachDailySignal,
     AICoachInteraction,
@@ -661,10 +662,26 @@ def _get_topic_snapshot(db, user_id: str) -> Dict[str, List[Dict[str, Any]]]:
         key=lambda item: (-item["accuracy"], -item["attempts"]),
     )[:5]
 
+    # Spaced-repetition view over the same rows: which topics are due for
+    # review right now, so the coach can nudge proactively.
+    revision_due = [
+        {
+            "topic": entry["topic"],
+            "bucket": entry["bucket"],
+            "days_since_practiced": entry["days_since_practiced"],
+            "retention_estimate": entry["retention_estimate"],
+            "suggested_minutes": entry["suggested_minutes"],
+            "reason": entry["reason"],
+        }
+        for entry in build_revision_queue(topics, limit=5)
+        if entry["bucket"] != "fresh"
+    ]
+
     return {
         "all_topics": topic_rows,
         "weak_topics": weak_topics,
         "strong_topics": strong_topics,
+        "revision_due": revision_due,
     }
 
 
@@ -1413,6 +1430,8 @@ PROGRESS:
 TOPIC SNAPSHOT:
 Weak topics: {topic_snapshot["weak_topics"]}
 Strong topics: {topic_snapshot["strong_topics"]}
+Revision due (spaced repetition): {topic_snapshot.get("revision_due") or "nothing due"}
+If revision_due lists topics and it fits the conversation naturally, add ONE short, encouraging nudge to revisit the top item — never more than one, never off-topic.
 
 RECENT SESSIONS:
 {recent_sessions}
