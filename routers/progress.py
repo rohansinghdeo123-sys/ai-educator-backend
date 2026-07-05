@@ -19,7 +19,7 @@ from app.request_models import SubmitSessionRequest
 from app.serializers import format_test_session, normalize_topic, progress_payload
 from database import get_db
 from Logic.analytics_engine import get_user_analytics
-from models import TestHistory, UserProgress
+from models import TestHistory, TopicPerformance, UserProgress
 from schemas import (
     ProgressResponse,
     ProgressUpdate,
@@ -29,6 +29,7 @@ from schemas import (
 from services.leaderboard_service import build_leaderboard
 from services.progress_service import apply_streak, create_test_history, get_or_create_progress
 from services.profile_service import profile_learning_context
+from services.revision_scheduler import build_revision_queue, summarize_queue
 from services.ttl_cache import TTLCache
 
 router = APIRouter(tags=["progress"])
@@ -303,6 +304,27 @@ def leaderboard(
     current_user: Dict[str, Any] = Depends(verify_firebase_user),
 ):
     return build_leaderboard(db, current_user)
+
+
+@router.get("/revision/queue/{user_id}")
+def revision_queue(
+    user_id: str,
+    limit: int = Query(default=10, ge=1, le=25),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(verify_firebase_user),
+):
+    """Spaced-repetition revision queue: which topics to review now and why."""
+    require_same_user_or_admin(user_id, current_user)
+
+    topics = db.query(TopicPerformance).filter(TopicPerformance.user_id == user_id).all()
+    queue = build_revision_queue(topics, limit=limit)
+
+    return {
+        "user_id": user_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": summarize_queue(queue),
+        "queue": queue,
+    }
 
 
 @router.get("/analytics/{user_id}")
