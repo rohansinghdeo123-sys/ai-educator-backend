@@ -111,6 +111,7 @@ class GroundedRetriever:
             question=question or section_id,
             max_paragraphs=coach_settings.max_retrieval_paragraphs,
             max_chars=coach_settings.max_retrieval_chars,
+            scope=scope,
         )
         context = str(result.get("context") or "").strip()
         error = str(result.get("error") or "").strip()

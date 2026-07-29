@@ -53,6 +53,11 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
 
     section_id = request.section_id
     question = request.question
+    content_scope = getattr(request, "content_scope", None)
+    uses_published_catalog = (
+        str((content_scope or {}).get("catalog_source") or "").strip().lower()
+        == "published"
+    )
 
     if revision_type not in REVISION_PROMPTS:
         revision_type = "summary"
@@ -83,6 +88,7 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
         question=question,
         max_paragraphs=8,
         max_chars=4000,
+        scope=content_scope,
     )
 
     context = str(search_result.get("context") or "").strip()
@@ -120,7 +126,9 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
 
     concept_data = ""
     concepts_found = []
-    if knowledge_graph.concepts:
+    # Published revision is version-scoped. The bundled graph is a legacy
+    # fallback and must not be mixed into approved catalog material.
+    if not uses_published_catalog and knowledge_graph.concepts:
         exact = knowledge_graph.get_concept(section_id)
         if exact:
             concepts_found = [exact]
@@ -250,6 +258,7 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
             question=f"complete overview of {section_id}",
             max_paragraphs=10,
             max_chars=5000,
+            scope=content_scope,
         )
         if retry_search["context"]:
             retry_context = retry_search["context"]

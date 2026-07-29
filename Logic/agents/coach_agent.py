@@ -192,6 +192,13 @@ def _apply_effective_retrieval_policy(query_understanding, retrieval_policy: str
 
 def _selected_material_scope(request, adaptive_context: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
     learning_context = _as_dict((adaptive_context or {}).get("learning_context"))
+    class_level = str(learning_context.get("class_level") or "").strip()
+    if re.sub(r"[^a-z0-9]+", "_", class_level.lower()).strip("_") in {
+        "other",
+        "general",
+        "unspecified",
+    }:
+        class_level = ""
     return {
         "subject": str(
             getattr(request, "subject", "")
@@ -217,6 +224,14 @@ def _selected_material_scope(request, adaptive_context: Optional[Dict[str, Any]]
             or learning_context.get("topic")
             or ""
         ).strip(),
+        "chapter_slug": str(
+            learning_context.get("selected_chapter_id")
+            or learning_context.get("chapter_slug")
+            or ""
+        ).strip(),
+        "class_level": class_level,
+        "content_version": str(learning_context.get("content_version") or "").strip(),
+        "catalog_source": str(learning_context.get("catalog_source") or "").strip(),
     }
 
 

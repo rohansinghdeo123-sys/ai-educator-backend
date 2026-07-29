@@ -268,6 +268,11 @@ def exam_agent(request, exam_type: str = "mcq") -> dict:
 
     section_id = request.section_id
     question = request.question
+    content_scope = getattr(request, "content_scope", None)
+    uses_published_catalog = (
+        str((content_scope or {}).get("catalog_source") or "").strip().lower()
+        == "published"
+    )
     try:
         requested_count = max(1, min(int(getattr(request, "count", 5) or 5), 10))
     except Exception:
@@ -308,6 +313,7 @@ def exam_agent(request, exam_type: str = "mcq") -> dict:
         question=retrieval_query,
         max_paragraphs=8,
         max_chars=4000,
+        scope=content_scope,
     )
 
     if search_result.get("error"):
@@ -359,7 +365,7 @@ def exam_agent(request, exam_type: str = "mcq") -> dict:
 
     concept_data = ""
     concepts_found = []
-    if knowledge_graph.concepts:
+    if not uses_published_catalog and knowledge_graph.concepts:
         exact = knowledge_graph.get_concept(section_id)
         if exact:
             concepts_found = [exact]

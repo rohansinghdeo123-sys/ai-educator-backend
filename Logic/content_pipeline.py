@@ -1023,9 +1023,21 @@ def _chapter_scope_matches(chapter: ContentChapter, scope: Optional[Dict[str, An
         return True
     subject = normalize_key(scope.get("subject"))
     chapter_value = normalize_key(scope.get("chapter"))
-    if subject and subject not in normalize_key(chapter.subject):
+    chapter_slug = normalize_key(scope.get("chapter_slug"))
+    class_level = normalize_key(scope.get("class_level")).removeprefix("class_")
+    content_version = str(scope.get("content_version") or "").strip()
+    if subject and subject != normalize_key(chapter.subject):
         return False
-    if chapter_value and chapter_value not in normalize_key(f"{chapter.chapter_name} {chapter.slug} chapter_{chapter.chapter_number or ''}"):
+    chapter_haystack = normalize_key(
+        f"{chapter.chapter_name} {chapter.slug} chapter_{chapter.chapter_number or ''}"
+    )
+    if chapter_value and chapter_value not in chapter_haystack:
+        return False
+    if chapter_slug and chapter_slug != normalize_key(chapter.slug):
+        return False
+    if class_level and class_level != normalize_key(chapter.class_level).removeprefix("class_"):
+        return False
+    if content_version and content_version != str(chapter.version or "").strip():
         return False
     return True
 
@@ -1104,6 +1116,15 @@ def search_approved_content(
         chapter_by_id = {chapter.id: chapter for chapter in chapters}
 
         candidates: Dict[Tuple[str, int], Dict[str, Any]] = {}
+        requested_topic_keys = {
+            normalize_key(value)
+            for value in (
+                section_id,
+                (scope or {}).get("section_id"),
+                (scope or {}).get("topic"),
+            )
+            if normalize_key(value)
+        }
         for concept in concept_rows:
             text = "\n".join(
                 [
@@ -1116,10 +1137,18 @@ def search_approved_content(
                 ]
             )
             lexical = _score_text(text, terms)
-            if lexical:
+            exact_topic_match = bool(
+                requested_topic_keys.intersection(
+                    {normalize_key(concept.concept_id), normalize_key(concept.title)}
+                )
+            )
+            if lexical or exact_topic_match:
                 candidates[("concept", concept.id)] = {
-                    "lexical": lexical + 3,
+                    # A catalog ID/title match is authoritative and must rank
+                    # ahead of merely similar text from the same chapter.
+                    "lexical": lexical + 3 + (1000 if exact_topic_match else 0),
                     "semantic": 0.0,
+                    "exact_topic_match": exact_topic_match,
                     "type": "concept",
                     "payload": {
                         "chapter": chapter_by_id.get(concept.chapter_id),
@@ -1141,6 +1170,7 @@ def search_approved_content(
                 candidates[("chunk", chunk.id)] = {
                     "lexical": lexical,
                     "semantic": semantic,
+                    "exact_topic_match": False,
                     "type": "chunk",
                     "payload": {
                         "chapter": chapter_by_id.get(chunk.chapter_id),
@@ -1170,7 +1200,14 @@ def search_approved_content(
         for ranking in (lexical_ranking, semantic_ranking):
             for rank, key in enumerate(ranking, start=1):
                 fused[key] = fused.get(key, 0.0) + 1.0 / (_RRF_K + rank)
-        ordered_keys = sorted(fused, key=lambda key: (-fused[key], key))
+        ordered_keys = sorted(
+            fused,
+            key=lambda key: (
+                not bool(candidates[key].get("exact_topic_match")),
+                -fused[key],
+                key,
+            ),
+        )
 
         blocks: List[str] = []
         used_pages: List[int] = []
@@ -1190,7 +1227,15 @@ def search_approved_content(
             )
             block = f"{header}{payload['text']}".strip()
             if total_chars + len(block) > max_chars:
-                continue
+                # A detailed concept can legitimately exceed the revision
+                # budget. Preserve a bounded prefix of the best first match
+                # instead of dropping the correct concept and reporting that
+                # published material does not exist.
+                if blocks:
+                    continue
+                block = block[:max_chars].rstrip()
+                if not block:
+                    continue
             blocks.append(block)
             used_pages.extend(int(page) for page in payload["pages"] if page)
             used_sections.append(str(payload["section_id"]))

@@ -3,7 +3,7 @@
 import os
 import re
 import logging
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from Logic.knowledge_graph import knowledge_graph  # <-- NEW
 from Logic.content_pipeline import search_approved_content
@@ -175,6 +175,7 @@ def search_knowledge_base(
     question: str,
     max_paragraphs: int = 5,
     max_chars: int = 3000,
+    scope: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """
     TOOL: Search the knowledge base for relevant content.
@@ -193,17 +194,40 @@ def search_knowledge_base(
     """
     section_id = re.sub(r"[^a-z0-9]+", "_", (section_id or "").strip().lower()).strip("_")
     section_id = SECTION_ALIASES.get(section_id, section_id)
+    strict_published_scope = str((scope or {}).get("catalog_source") or "").strip().lower() == "published"
 
     try:
         approved_result = search_approved_content(
             section_id=section_id,
             question=question,
+            scope=scope,
             max_chars=max_chars,
         )
         if str(approved_result.get("context") or "").strip():
             return approved_result
+        if strict_published_scope:
+            return {
+                **approved_result,
+                "section_id": section_id,
+                "source": approved_result.get("source") or "approved_content_pipeline",
+                "error": "material_not_found",
+            }
     except Exception as exc:
         logger.warning("Approved content pipeline search failed: %s", exc)
+        if strict_published_scope:
+            # A published catalog selection must fail closed. Falling through
+            # to bundled markdown or the global graph can cross the selected
+            # chapter, class, or content version and produce an ungrounded
+            # revision answer.
+            return {
+                "context": "",
+                "section_id": section_id,
+                "paragraphs_found": 0,
+                "keywords_used": [],
+                "basics_context": "",
+                "source": "approved_content_pipeline",
+                "error": "approved_content_unavailable",
+            }
 
     # ── Step 1: Try markdown file map ──────────────────────────────────
     if section_id in SECTION_FILE_MAP:

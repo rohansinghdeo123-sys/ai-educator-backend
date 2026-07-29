@@ -32,7 +32,7 @@ from Logic.tools.artifact_generator import (
     available_artifact_sections,
     generate_study_artifacts,
 )
-from services.catalog_service import build_catalog
+from services.catalog_service import build_catalog, resolve_catalog_topic
 from services.profile_service import profile_learning_context
 from services.ttl_cache import TTLCache
 
@@ -64,7 +64,29 @@ def section_ai(
     user_id = require_owned_study_session(request.session_id, current_user)
     enforce_user_quota(user_id, "coach")
     learner_profile = profile_learning_context(db, user_id)
-    section_id = normalize_topic(request.section_id)
+    learner_class = learner_profile.get("class_level", "")
+    resolved_topic = resolve_catalog_topic(
+        db,
+        request.section_id,
+        subject=request.subject,
+        chapter=request.chapter,
+        topic=request.topic,
+        class_level=learner_class,
+    )
+    section_id = (
+        resolved_topic["section_id"]
+        if resolved_topic
+        else normalize_topic(request.section_id)
+    )
+    content_scope = {
+        "section_id": section_id,
+        "subject": request.subject or "",
+        "chapter": request.chapter or "",
+        "topic": request.topic or request.section_id,
+        "class_level": learner_class,
+    }
+    if resolved_topic:
+        content_scope.update(resolved_topic)
     answer = section_doubt(
         question=request.question,
         section_id=section_id,
@@ -73,7 +95,8 @@ def section_ai(
         difficulty=request.difficulty,
         strict_grounding=request.strict_grounding or request.retrieval_required,
         required_not_found_response=request.required_not_found_response,
-        class_level=learner_profile.get("class_level", ""),
+        class_level=learner_class,
+        content_scope=content_scope,
     )
     return {"answer": answer}
 

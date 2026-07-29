@@ -254,7 +254,7 @@ def serialize_coach_conversation(session_id: str, rows: List[AICoachInteraction]
     title = str(metadata.get("conversation_title") or conversation_title_from(first_user.message))
     last_metadata = interaction_metadata(last_row)
     learning_context = last_metadata.get("learning_context") if isinstance(last_metadata.get("learning_context"), dict) else {}
-    return {
+    payload = {
         "id": session_id.replace(f"coach-{last_row.user_id}-", "", 1) if session_id.startswith(f"coach-{last_row.user_id}-") else session_id,
         "sessionId": session_id,
         "title": title,
@@ -267,6 +267,26 @@ def serialize_coach_conversation(session_id: str, rows: List[AICoachInteraction]
         "titleLocked": bool(metadata.get("conversation_title_locked")),
         "messageCount": len(sorted_rows),
     }
+    if learning_context.get("scope") == "selected_study_material_only":
+        chapter_label = str(learning_context.get("selected_chapter") or "").strip()
+        topic_label = str(learning_context.get("selected_topic") or "").strip()
+        chapter_id = str(learning_context.get("selected_chapter_id") or "").strip()
+        topic_id = str(learning_context.get("section_id") or "").strip()
+        if chapter_label and topic_label and topic_id:
+            payload["scope"] = {
+                "source": "syllabus",
+                "catalogSource": (
+                    "published"
+                    if str(learning_context.get("catalog_source") or "").strip().lower() == "published"
+                    else "starter"
+                ),
+                "subject": str(learning_context.get("selected_subject") or "").strip(),
+                "chapterId": chapter_id or re.sub(r"[^a-z0-9]+", "_", chapter_label.lower()).strip("_"),
+                "chapterLabel": chapter_label,
+                "topicId": topic_id,
+                "topicLabel": topic_label,
+            }
+    return payload
 
 
 def group_conversation_rows(rows: List[AICoachInteraction]) -> Dict[str, List[AICoachInteraction]]:

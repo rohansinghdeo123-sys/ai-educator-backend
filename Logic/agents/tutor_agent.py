@@ -83,6 +83,11 @@ def tutor_agent(request) -> dict:
     section_id = request.section_id
     session_id = request.session_id
     difficulty = getattr(request, "difficulty", "medium")
+    content_scope = getattr(request, "content_scope", None)
+    uses_published_catalog = (
+        str((content_scope or {}).get("catalog_source") or "").strip().lower()
+        == "published"
+    )
 
     logger.info(f"[TUTOR] Processing: '{question}' | Section: {section_id}")
 
@@ -116,6 +121,7 @@ def tutor_agent(request) -> dict:
         question=question,
         max_paragraphs=5,
         max_chars=3000,
+        scope=content_scope,
     )
 
     if search_result.get("error"):
@@ -157,7 +163,10 @@ def tutor_agent(request) -> dict:
     # Attempt to find relevant concepts by keyword or section_id
     concept_data = ""
     concepts_found = []
-    if knowledge_graph.concepts:
+    # Published catalog sessions are grounded exclusively in the selected
+    # versioned material. The bundled graph is a legacy fallback and may
+    # represent another chapter/version.
+    if not uses_published_catalog and knowledge_graph.concepts:
         # First try exact match via section_id (which may be a concept_id)
         exact = knowledge_graph.get_concept(section_id)
         if exact:
@@ -304,6 +313,7 @@ def tutor_agent(request) -> dict:
             question=question,
             max_paragraphs=8,
             max_chars=4000,
+            scope=content_scope,
         )
         if retry_result["context"]:
             retry_context = retry_result["context"]

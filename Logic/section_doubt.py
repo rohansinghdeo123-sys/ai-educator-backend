@@ -48,6 +48,7 @@ class _LegacyRequest:
         count: int = 5,
         topic: Optional[str] = None,
         class_level: str = "",
+        content_scope: Optional[Dict[str, Any]] = None,
     ):
         self.question = question
         self.section_id = section_id
@@ -64,6 +65,9 @@ class _LegacyRequest:
         self.required_not_found_response = required_not_found_response or MATERIAL_NOT_FOUND_MESSAGE
         self.count = count
         self.class_level = class_level
+        self.content_scope = dict(content_scope or {})
+        self.subject = str(self.content_scope.get("subject") or "")
+        self.chapter = str(self.content_scope.get("chapter") or "")
         self.learning_context = {"class_level": class_level} if class_level else {}
 
 
@@ -89,6 +93,7 @@ def section_doubt(
     strict_grounding: bool = False,
     required_not_found_response: Optional[str] = None,
     class_level: str = "",
+    content_scope: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Main entry point for the section-based AI tutor.
@@ -107,6 +112,7 @@ def section_doubt(
             question=question or section_id,
             max_paragraphs=8,
             max_chars=4000,
+            scope=content_scope,
         )
         if search_result.get("error") or not str(search_result.get("context") or "").strip():
             return not_found
@@ -125,6 +131,7 @@ def section_doubt(
         strict_grounding=strict_grounding,
         required_not_found_response=not_found,
         class_level=class_level,
+        content_scope=content_scope,
     )
 
     logger.info(
