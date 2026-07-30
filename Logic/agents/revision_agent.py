@@ -45,6 +45,44 @@ REVISION_PROMPTS = {
 }
 
 
+def _grounded_revision_fallback(context: str, section_id: str) -> str:
+    """Return a readable lesson using only the already-retrieved source text.
+
+    Published revision should remain useful when the model provider is slow or
+    temporarily unavailable.  The retrieval gate has already established that
+    ``context`` belongs to the selected, approved topic, so this fallback may
+    reformat it but must not add any new subject-matter claims.
+    """
+    raw_lines = [line.strip() for line in str(context or "").splitlines() if line.strip()]
+    if not raw_lines:
+        return ""
+
+    title = str(section_id or "Revision topic").replace("_", " ").strip().title()
+    source_line = ""
+    body_lines = []
+    seen = set()
+    for line in raw_lines:
+        if line.startswith("## "):
+            title = line[3:].strip() or title
+            continue
+        if line.lower().startswith("source:"):
+            source_line = line
+            continue
+        key = line.casefold()
+        if key == title.casefold() or key in seen:
+            continue
+        seen.add(key)
+        body_lines.append(line)
+
+    if not body_lines:
+        return ""
+
+    lesson = f"## {title}\n\n" + "\n\n".join(body_lines)
+    if source_line:
+        lesson += f"\n\n> {source_line}"
+    return format_chemistry_output(lesson)
+
+
 def revision_agent(request, revision_type: str = "summary") -> dict:
     """
     Agentic Revision: Retrieve → Enrich → Generate → Format → Validate
@@ -201,19 +239,53 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
             temperature=config["temp"],
             max_tokens=config["max_tokens"],
         ).strip()
+        if not raw_answer:
+            raise RuntimeError("Revision model returned an empty response.")
     except Exception as e:
+        # Keep this recovery deliberately scoped to the approved catalog. A
+        # legacy/bundled source should retain its existing failure contract;
+        # only material that has already passed published scope/version gates
+        # is safe to deliver directly when the provider is unavailable.
+        grounded_fallback = (
+            _grounded_revision_fallback(context, section_id)
+            if uses_published_catalog
+            else ""
+        )
+        if grounded_fallback:
+            logger.warning("[REVISION] LLM unavailable; delivering approved-source fallback: %s", e)
+            event_bus.emit("revision", "step", {
+                "step": "generate_fallback",
+                "message": "Model generation was unavailable; delivered the approved source instead.",
+            }, severity="warning")
+            event_bus.emit("revision", "task_complete", {
+                "status": "degraded",
+                "message": "Approved-source revision delivered without model rewriting",
+                "latency_ms": round((time.time() - start_time) * 1000),
+            })
+            return {
+                "type": "revision",
+                "revision_type": revision_type,
+                "answer": grounded_fallback,
+                "metadata": {
+                    "agent": "revision",
+                    "revision_type": revision_type,
+                    "status": "grounded_fallback",
+                    "source": search_result.get("source") or "approved_content_pipeline",
+                    "paragraphs_retrieved": search_result.get("paragraphs_found") or 0,
+                    "error": str(e),
+                },
+            }
+
         logger.error(f"[REVISION] LLM error: {e}")
         event_bus.emit("revision", "error", {
             "step": "generate",
             "message": f"LLM API error: {str(e)}",
         }, severity="error")
-
         event_bus.emit("revision", "task_complete", {
             "status": "failed",
             "message": "Generation failed",
             "latency_ms": round((time.time() - start_time) * 1000),
         })
-
         return {
             "type": "revision",
             "answer": "AI service encountered an error. Please try again.",
@@ -247,7 +319,11 @@ def revision_agent(request, revision_type: str = "summary") -> dict:
         context=context,
     )
 
-    if not quality["passed"] and not concepts_found:
+    # A second provider call can push a published revision beyond the client
+    # deadline.  Keep the first grounded answer for published material; the
+    # retry is only useful for legacy sources where broader retrieval may add
+    # missing context.
+    if not quality["passed"] and not concepts_found and not uses_published_catalog:
         event_bus.emit("revision", "step", {
             "step": "retry",
             "message": f"Quality failed (score={quality['score']}). Retrying with more markdown context...",

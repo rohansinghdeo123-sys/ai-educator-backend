@@ -332,6 +332,103 @@ class PublishedRevisionRetrievalTests(unittest.TestCase):
         self.assertNotIn("STALE GRAPH CONTENT", prompt)
         self.assertEqual(result["metadata"]["concepts_from_graph"], 0)
 
+    def test_published_revision_uses_grounded_source_when_model_is_unavailable(self):
+        import Logic.agents.revision_agent as revision
+
+        scope = {
+            "catalog_source": "published",
+            "section_id": "atomic_mass",
+            "chapter_slug": NCERT_CHAPTER_SLUG,
+            "class_level": "11",
+            "content_version": "v3",
+        }
+        request = SimpleNamespace(
+            question="Revise atomic mass.",
+            section_id="atomic_mass",
+            content_scope=scope,
+            required_not_found_response="material missing",
+        )
+        retrieval = {
+            "context": (
+                "## Atomic Mass of an Element\n"
+                "Source: NCERT Class 11 Chemistry, Some Basic Concepts of Chemistry, "
+                "page(s): 16, type: concept\n"
+                "Atomic mass expresses the mass of an atom relative to carbon-12.\n"
+                "Atomic masses are relative values expressed in unified mass units."
+            ),
+            "section_id": "atomic_mass",
+            "paragraphs_found": 1,
+            "keywords_used": ["atomic", "mass"],
+            "basics_context": "",
+            "source": "approved_content_pipeline",
+        }
+
+        with (
+            patch.object(revision, "search_knowledge_base", return_value=retrieval),
+            patch.object(revision, "event_bus") as events,
+            patch.object(
+                revision.model_gateway,
+                "complete",
+                side_effect=RuntimeError("provider temporarily unavailable"),
+            ),
+        ):
+            result = revision.revision_agent(request, revision_type="explain")
+
+        self.assertEqual(result["metadata"]["status"], "grounded_fallback")
+        self.assertIn("Atomic Mass of an Element", result["answer"])
+        self.assertIn("relative to carbon-12", result["answer"])
+        self.assertIn("NCERT Class 11 Chemistry", result["answer"])
+        self.assertNotIn("AI service encountered an error", result["answer"])
+        completion_statuses = [
+            call.args[2].get("status")
+            for call in events.emit.call_args_list
+            if len(call.args) >= 3 and call.args[1] == "task_complete"
+        ]
+        self.assertIn("degraded", completion_statuses)
+        self.assertNotIn("failed", completion_statuses)
+
+    def test_low_quality_published_revision_does_not_make_a_second_model_call(self):
+        import Logic.agents.revision_agent as revision
+
+        scope = {
+            "catalog_source": "published",
+            "section_id": "atomic_mass",
+            "chapter_slug": NCERT_CHAPTER_SLUG,
+            "class_level": "11",
+            "content_version": "v3",
+        }
+        request = SimpleNamespace(
+            question="Revise atomic mass.",
+            section_id="atomic_mass",
+            content_scope=scope,
+        )
+        retrieval = {
+            "context": "Current approved atomic mass explanation.",
+            "section_id": "atomic_mass",
+            "paragraphs_found": 1,
+            "keywords_used": ["atomic", "mass"],
+            "basics_context": "",
+            "source": "approved_content_pipeline",
+        }
+
+        with (
+            patch.object(revision, "search_knowledge_base", return_value=retrieval) as search,
+            patch.object(revision, "knowledge_graph") as graph,
+            patch.object(revision, "event_bus"),
+            patch.object(revision.model_gateway, "complete", return_value="Usable grounded answer") as complete,
+            patch.object(
+                revision,
+                "evaluate_answer_quality",
+                return_value={"passed": False, "score": 0.45},
+            ),
+        ):
+            graph.concepts = {}
+            result = revision.revision_agent(request, revision_type="explain")
+
+        self.assertEqual(result["answer"], "Usable grounded answer")
+        self.assertEqual(search.call_count, 1)
+        self.assertEqual(complete.call_count, 1)
+
     def test_conversation_serialization_preserves_syllabus_scope(self):
         learning_context = {
             "scope": "selected_study_material_only",
@@ -455,6 +552,48 @@ class PublishedRevisionRetrievalTests(unittest.TestCase):
         self.assertEqual(call["content_scope"]["topic"], "Atomic Mass of an Element")
         self.assertEqual(call["content_scope"]["class_level"], "11")
         self.assertEqual(call["content_scope"]["content_version"], "v3")
+        self.assertEqual(call["class_level"], "11")
+
+    def test_section_ai_returns_atomic_mass_revision_when_provider_is_down(self):
+        """Exercise route, profile scope, retrieval, agent routing and fallback."""
+        import Logic.agents.revision_agent as revision
+
+        request = SectionAIRequest(
+            question="Teach Atomic Mass of an Element thoroughly.",
+            section_id="atomic_mass",
+            session_id="revision-student-1-atomic-mass-explain",
+            mode="explain",
+            subject="Chemistry",
+            chapter="Some Basic Concepts of Chemistry",
+            topic="Atomic Mass of an Element",
+            strict_grounding=True,
+            retrieval_required=True,
+        )
+
+        with (
+            patch("routers.study.enforce_user_quota"),
+            patch(
+                "routers.study.profile_learning_context",
+                return_value={"class_level": "Other"},
+            ),
+            patch("Logic.content_pipeline.SessionLocal", self.SessionTesting),
+            patch("Logic.content_pipeline.embeddings_service.embed_query", return_value=None),
+            patch.object(revision, "event_bus"),
+            patch.object(
+                revision.model_gateway,
+                "complete",
+                side_effect=RuntimeError("provider temporarily unavailable"),
+            ),
+        ):
+            response = section_ai(
+                request,
+                db=self.db,
+                current_user={"uid": "student-1", "email": "student@example.com"},
+            )
+
+        self.assertIn("Atomic Mass of an Element", response["answer"])
+        self.assertIn("Atomic mass expresses", response["answer"])
+        self.assertNotIn("could not find this", response["answer"].lower())
 
 
 if __name__ == "__main__":

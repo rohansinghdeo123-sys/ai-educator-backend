@@ -87,6 +87,7 @@ def section_ai(
     }
     if resolved_topic:
         content_scope.update(resolved_topic)
+    effective_class_level = str(content_scope.get("class_level") or learner_class or "")
     answer = section_doubt(
         question=request.question,
         section_id=section_id,
@@ -95,7 +96,7 @@ def section_ai(
         difficulty=request.difficulty,
         strict_grounding=request.strict_grounding or request.retrieval_required,
         required_not_found_response=request.required_not_found_response,
-        class_level=learner_class,
+        class_level=effective_class_level,
         content_scope=content_scope,
     )
     return {"answer": answer}
